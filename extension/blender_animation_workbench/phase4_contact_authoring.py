@@ -23,7 +23,12 @@ from .phase4_contact_model import (
     state_value_for_type,
     type_for_state_value,
 )
-from .phase4_mutation_journal import FCurveMutationReceipt, FCurveSnapshot, MutationJournal
+from .phase4_mutation_journal import (
+    FCurveMutationReceipt,
+    FCurveSnapshot,
+    IDPropertyMutationReceipt,
+    MutationJournal,
+)
 from .phase4_mutation_journal_blender import BlenderRollbackExecutor
 from .phase4_operation_plan import (
     AllocationIntent,
@@ -765,6 +770,40 @@ def _contact_authoring_latch_type(capability) -> ContactKeyType | None:
 def _set_contact_authoring_latch(capability, contact_type: ContactKeyType) -> None:
     solver_bone = capability.native_ik.solver_owner.target
     solver_bone[AWB_CONTACT_AUTHORING_STATE_PROPERTY] = float(state_value_for_type(contact_type))
+
+
+def _journal_contact_authoring_latch(
+    capability,
+    contact_type: ContactKeyType,
+    plan: OperationPlan,
+    journal: MutationJournal,
+    stage_write,
+) -> None:
+    owner = capability.native_ik.solver_owner.owner_object
+    solver_bone = capability.native_ik.solver_owner.target
+    owner_ptr = _runtime_pointer(owner)
+    target_ptr = _runtime_pointer(solver_bone)
+    if owner_ptr is None or target_ptr is None:
+        raise ContactAuthoringError("Contact authoring latch lost runtime identity before commit.")
+    before_exists = AWB_CONTACT_AUTHORING_STATE_PROPERTY in solver_bone
+    before_value = (
+        solver_bone.get(AWB_CONTACT_AUTHORING_STATE_PROPERTY)
+        if before_exists
+        else None
+    )
+    journal.record(
+        IDPropertyMutationReceipt(
+            journal.next_ordinal(),
+            _scope(plan, owner_ptr=int(owner_ptr), bag_ptr=None),
+            int(owner_ptr),
+            int(target_ptr),
+            AWB_CONTACT_AUTHORING_STATE_PROPERTY,
+            bool(before_exists),
+            before_value,
+        )
+    )
+    stage_write("set Contact authoring latch")
+    _set_contact_authoring_latch(capability, contact_type)
 
 
 def _reset_contact_authoring_latch(capability) -> None:
@@ -4096,9 +4135,15 @@ def execute_contact_intent_plan(
         if terminal_position > position_tolerance or terminal_rotation > rotation_tolerance:
             raise ContactAuthoringError("Persistent Contact transition changed the evaluated terminal pose.")
 
-        journal.commit()
         if trigger is not WriterTrigger.AUTO_TRANSFORM:
-            _set_contact_authoring_latch(capability, intent.target_type)
+            _journal_contact_authoring_latch(
+                capability,
+                intent.target_type,
+                contact_plan,
+                journal,
+                stage_write,
+            )
+        journal.commit()
         hook.enter(OperationStage.COMMIT, operation=contact_plan.operation_id)
         trace_event(
             "WRITER",
@@ -4689,10 +4734,16 @@ def execute_contact_batch_intent_plan(
                     f"I20 batch changed evaluated terminal pose for {intent.mapping_id}."
                 )
 
-        journal.commit()
         if trigger is not WriterTrigger.AUTO_TRANSFORM:
             for item in prepared_tuple:
-                _set_contact_authoring_latch(item.capability, item.intent.target_type)
+                _journal_contact_authoring_latch(
+                    item.capability,
+                    item.intent.target_type,
+                    contact_plan,
+                    journal,
+                    stage_write,
+                )
+        journal.commit()
         hook.enter(OperationStage.COMMIT, operation=contact_plan.operation_id)
         mapping_types = tuple(
             (item.intent.mapping_id, item.intent.target_type)

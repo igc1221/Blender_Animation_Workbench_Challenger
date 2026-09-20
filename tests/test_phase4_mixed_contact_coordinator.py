@@ -101,3 +101,29 @@ def test_e3_contact_transactions_prepare_direct_semantic_backing_property() -> N
     assert len(_calls(single, "_prepare_semantic_state_property")) >= 2
     # Batch Contact had no semantic backing-property preparation before E3.
     assert len(_calls(batch, "_prepare_semantic_state_property")) >= 1
+
+
+def test_e3_contact_latch_is_journaled_before_persistent_commit() -> None:
+    helper = _function("_journal_contact_authoring_latch")
+    assert len(_calls(helper, "IDPropertyMutationReceipt")) == 1
+    assert len(_calls(helper, "_set_contact_authoring_latch")) == 1
+
+    for name in ("execute_contact_intent_plan", "execute_contact_batch_intent_plan"):
+        function = _function(name)
+        latch_calls = _calls(function, "_journal_contact_authoring_latch")
+        commit_calls = tuple(
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "journal"
+            and node.func.attr == "commit"
+        )
+        assert latch_calls
+        assert len(commit_calls) == 1
+        assert max(call.lineno for call in latch_calls) < commit_calls[0].lineno
+        for call in latch_calls:
+            assert len(call.args) >= 4
+            assert isinstance(call.args[3], ast.Name)
+            assert call.args[3].id == "journal"
