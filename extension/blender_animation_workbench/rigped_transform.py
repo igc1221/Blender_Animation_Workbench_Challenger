@@ -77,6 +77,7 @@ from .rigped_contract import (
 from .rigped_fit_transform import _axis_point, _plane_point, _rotation_vector
 from .rigped_humanoid_builder import configure_generated_rigped_ik_hinge_branch
 from .rigped_limb_math import preferred_two_bone_bend
+from .rigped_operation_domain import OperationDomainSnapshot, resolve_operation_domain
 from .semantic_adapter import (
     ResolvedControl,
     control_context_for_context,
@@ -151,6 +152,8 @@ class SlidingRotateSyncSession:
     intent: ContactIntentPlan
     capability: LimbRepresentationCapability
     terminal_selected: bool
+    start_fk_states: tuple[SnapControlState, ...]
+    start_terminal_state: SnapControlState
     start_ik_state: SnapControlState
     start_pole_state: SnapControlState
     start_pole_angle: float
@@ -5863,40 +5866,34 @@ def _restore_hinge_settings(owner, snapshot: tuple[Any, ...]) -> None:
     ) = snapshot
 
 
-def _direct_rotate_sliding_sync_sessions(context) -> tuple[SlidingRotateSyncSession, ...]:
+def _direct_rotate_sliding_sync_sessions(
+    context,
+    operation_domain: OperationDomainSnapshot,
+) -> tuple[SlidingRotateSyncSession, ...]:
     control_context = control_context_for_context(context)
-    resolution = resolve_rigped_target(context.scene, control_context)
-    target = resolution.target
-    if target is None:
-        return ()
+    view = resolve_character(context.scene, operation_domain.character_id)
+    selected_binding_ids = frozenset(operation_domain.selected_binding_ids)
 
-    capabilities: dict[str, tuple[LimbRepresentationCapability, bool]] = {}
-    for binding_id in target.selected_binding_ids:
-        selected = _resolve_semantic_move_binding(context, target, binding_id)
-        if selected is None:
-            continue
-        capability = selected.capability
+    sessions: list[SlidingRotateSyncSession] = []
+    for mapping_id in operation_domain.contact_mapping_ids:
+        representation = resolve_limb_representation_capability(view, mapping_id)
+        capability = representation.capability
+        if capability is None:
+            raise RigpedSemanticMoveError(
+                "Sliding Rotate lost a selected limb representation capability."
+            )
         solver = capability.native_ik.solver_owner.target
         if AWB_CONTACT_STATE_PROPERTY not in solver:
             continue
         contact_type = type_for_state_value(float(solver[AWB_CONTACT_STATE_PROPERTY]))
         if contact_type is not ContactKeyType.SLIDING:
             continue
-        mapping_id = str(capability.native_ik.mapping_id)
-        terminal_selected = (
-            binding_id == str(capability.authored_terminal_binding_id)
-        )
-        existing = capabilities.get(mapping_id)
-        capabilities[mapping_id] = (
-            capability,
-            terminal_selected or (existing[1] if existing is not None else False),
-        )
 
-    sessions: list[SlidingRotateSyncSession] = []
-    for mapping_id, (capability, terminal_selected) in capabilities.items():
         pole_target = capability.native_ik.pole_target
         if pole_target is None:
-            raise RigpedSemanticMoveError("Sliding Rotate requires the generated IK pole target.")
+            raise RigpedSemanticMoveError(
+                "Sliding Rotate requires the generated IK pole target."
+            )
         planned = build_contact_intent_plan(
             context.scene,
             control_context,
@@ -5905,7 +5902,11 @@ def _direct_rotate_sliding_sync_sessions(context) -> tuple[SlidingRotateSyncSess
             enabled_types=(ContactKeyType.FREE, ContactKeyType.SLIDING),
             mapping_id=mapping_id,
         )
-        if not planned.ok or planned.plan is None or planned.plan.target_type is not ContactKeyType.SLIDING:
+        if (
+            not planned.ok
+            or planned.plan is None
+            or planned.plan.target_type is not ContactKeyType.SLIDING
+        ):
             raise RigpedSemanticMoveError(
                 "Sliding Rotate could not prepare a coherent IK preview for the selected limb."
             )
@@ -5913,13 +5914,27 @@ def _direct_rotate_sliding_sync_sessions(context) -> tuple[SlidingRotateSyncSess
             SlidingRotateSyncSession(
                 intent=planned.plan,
                 capability=capability,
-                terminal_selected=terminal_selected,
+                terminal_selected=(
+                    str(capability.authored_terminal_binding_id)
+                    in selected_binding_ids
+                ),
+                start_fk_states=tuple(
+                    _capture_control_state(control)
+                    for control in capability.fk_controls
+                ),
+                start_terminal_state=_capture_control_state(
+                    capability.authored_terminal
+                ),
                 start_ik_state=_capture_control_state(capability.native_ik.ik_target),
                 start_pole_state=_capture_control_state(pole_target),
                 start_pole_angle=float(capability.native_ik.constraint.pole_angle),
                 start_ik_influence=float(capability.native_ik.constraint.influence),
-                start_terminal_ik_influence=float(capability.terminal_ik_constraint.influence),
-                start_hinge_settings=_capture_hinge_settings(capability.native_ik.solver_owner.target),
+                start_terminal_ik_influence=float(
+                    capability.terminal_ik_constraint.influence
+                ),
+                start_hinge_settings=_capture_hinge_settings(
+                    capability.native_ik.solver_owner.target
+                ),
             )
         )
     return tuple(sessions)
@@ -5954,7 +5969,7 @@ def _current_sliding_capabilities(
 
 
 def _passive_sliding_capabilities(
-    context,
+    current_sliding: tuple[LimbRepresentationCapability, ...],
     active_syncs: tuple[SlidingRotateSyncSession, ...],
 ) -> tuple[LimbRepresentationCapability, ...]:
     active_mapping_ids = {
@@ -5963,8 +5978,17 @@ def _passive_sliding_capabilities(
     }
     return tuple(
         capability
-        for capability in _current_sliding_capabilities(context)
+        for capability in current_sliding
         if str(capability.native_ik.mapping_id) not in active_mapping_ids
+    )
+
+
+def _sliding_capability_mapping_ids(
+    capabilities: tuple[LimbRepresentationCapability, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        str(capability.native_ik.mapping_id)
+        for capability in capabilities
     )
 
 
@@ -6031,6 +6055,43 @@ def _refresh_current_sliding_public_overlays(
     )
 
 
+def _restore_direct_rotate_sliding_sync_session(
+    context,
+    session: SlidingRotateSyncSession,
+    *,
+    update: bool = True,
+) -> None:
+    capability = session.capability
+    pole_target = capability.native_ik.pole_target
+    if pole_target is None:
+        return
+    native_ik = capability.native_ik.constraint
+    terminal_ik = capability.terminal_ik_constraint
+    native_ik.influence = 0.0
+    terminal_ik.influence = 0.0
+    _apply_control_state(capability.native_ik.ik_target, session.start_ik_state)
+    _apply_control_state(pole_target, session.start_pole_state)
+    native_ik.pole_angle = session.start_pole_angle
+    _restore_hinge_settings(
+        capability.native_ik.solver_owner.target,
+        session.start_hinge_settings,
+    )
+    for control, state in zip(
+        capability.fk_controls,
+        session.start_fk_states,
+        strict=True,
+    ):
+        _apply_control_state(control, state)
+    _apply_control_state(
+        capability.authored_terminal,
+        session.start_terminal_state,
+    )
+    native_ik.influence = session.start_ik_influence
+    terminal_ik.influence = session.start_terminal_ik_influence
+    if update:
+        context.view_layer.update()
+
+
 def _apply_direct_rotate_sliding_sync(context, session: SlidingRotateSyncSession) -> None:
     capability = session.capability
     pole_target = capability.native_ik.pole_target
@@ -6040,10 +6101,6 @@ def _apply_direct_rotate_sliding_sync(context, session: SlidingRotateSyncSession
     terminal_ik = capability.terminal_ik_constraint
     solver_owner = capability.native_ik.solver_owner.target
 
-    previous_ik_state = _capture_control_state(capability.native_ik.ik_target)
-    previous_pole_state = _capture_control_state(pole_target)
-    previous_pole_angle = float(native_ik.pole_angle)
-    previous_hinge = _capture_hinge_settings(solver_owner)
     previous_ik_influence = float(native_ik.influence)
     previous_terminal_influence = float(terminal_ik.influence)
 
@@ -6133,15 +6190,7 @@ def _apply_direct_rotate_sliding_sync(context, session: SlidingRotateSyncSession
         _apply_control_state(capability.authored_terminal, terminal_state, location=False, rotation=True)
         context.view_layer.update()
     except Exception as exc:
-        native_ik.influence = 0.0
-        terminal_ik.influence = 0.0
-        _apply_control_state(capability.native_ik.ik_target, previous_ik_state)
-        _apply_control_state(pole_target, previous_pole_state)
-        native_ik.pole_angle = previous_pole_angle
-        _restore_hinge_settings(solver_owner, previous_hinge)
-        native_ik.influence = previous_ik_influence
-        terminal_ik.influence = previous_terminal_influence
-        context.view_layer.update()
+        _restore_direct_rotate_sliding_sync_session(context, session)
         if isinstance(exc, RigpedSemanticMoveError):
             raise
         raise RigpedSemanticMoveError(str(exc)) from exc
@@ -6152,23 +6201,11 @@ def _restore_direct_rotate_sliding_syncs(
     sessions: tuple[SlidingRotateSyncSession, ...],
 ) -> None:
     for session in sessions:
-        capability = session.capability
-        pole_target = capability.native_ik.pole_target
-        if pole_target is None:
-            continue
-        native_ik = capability.native_ik.constraint
-        terminal_ik = capability.terminal_ik_constraint
-        native_ik.influence = 0.0
-        terminal_ik.influence = 0.0
-        _apply_control_state(capability.native_ik.ik_target, session.start_ik_state)
-        _apply_control_state(pole_target, session.start_pole_state)
-        native_ik.pole_angle = session.start_pole_angle
-        _restore_hinge_settings(
-            capability.native_ik.solver_owner.target,
-            session.start_hinge_settings,
+        _restore_direct_rotate_sliding_sync_session(
+            context,
+            session,
+            update=False,
         )
-        native_ik.influence = session.start_ik_influence
-        terminal_ik.influence = session.start_terminal_ik_influence
     context.view_layer.update()
 
 
@@ -6243,6 +6280,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
     _states: tuple[DirectRotateControlState, ...] = ()
     _sliding_syncs: tuple[SlidingRotateSyncSession, ...] = ()
     _sliding_guard_capabilities: tuple[LimbRepresentationCapability, ...] = ()
+    _sliding_affected_capabilities: tuple[LimbRepresentationCapability, ...] = ()
     _axis_world = Vector((0.0, 0.0, 1.0))
     _pivot = Vector((0.0, 0.0, 0.0))
     _start_rotation_vector = Vector((1.0, 0.0, 0.0))
@@ -6292,6 +6330,21 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         axes = direct_transform_axes(context)
         if not controls or axes is None:
             return {"CANCELLED"}
+
+        domain_resolution = resolve_operation_domain(
+            context.scene,
+            control_context_for_context(context),
+        )
+        if not domain_resolution.ok or domain_resolution.snapshot is None:
+            detail = (
+                domain_resolution.issues[0].detail
+                if domain_resolution.issues
+                else "Rigped Rotate could not freeze the operation domain."
+            )
+            self.report({"WARNING"}, detail)
+            return {"CANCELLED"}
+        operation_domain = domain_resolution.snapshot
+        frozen_current_sliding = _current_sliding_capabilities(context)
 
         # Historical/baked keys may predate the current joint-limit policy.
         # Repair them before capturing the modal start state so Rotate can move
@@ -6374,21 +6427,50 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             # change into its own IK pole/swivel.
             self._forearm_special_session = None
         try:
-            self._sliding_syncs = _direct_rotate_sliding_sync_sessions(context)
+            self._sliding_syncs = _direct_rotate_sliding_sync_sessions(
+                context,
+                operation_domain,
+            )
         except RigpedSemanticMoveError as exc:
             _report_operator_error(self, context, exc)
             self._states = ()
             self._sliding_syncs = ()
             self._sliding_guard_capabilities = ()
+            self._sliding_affected_capabilities = ()
             self._active = None
             self._auto_plan = None
             self._forearm_special_session = None
             return {"CANCELLED"}
 
+        active_capabilities = tuple(
+            session.capability
+            for session in self._sliding_syncs
+        )
         self._sliding_guard_capabilities = _passive_sliding_capabilities(
-            context,
+            frozen_current_sliding,
             self._sliding_syncs,
         )
+        self._sliding_affected_capabilities = frozen_current_sliding
+        active_ids = set(_sliding_capability_mapping_ids(active_capabilities))
+        passive_ids = set(
+            _sliding_capability_mapping_ids(self._sliding_guard_capabilities)
+        )
+        affected_ids = set(
+            _sliding_capability_mapping_ids(self._sliding_affected_capabilities)
+        )
+        if active_ids & passive_ids or active_ids | passive_ids != affected_ids:
+            self.report(
+                {"WARNING"},
+                "Rigped Rotate Sliding ownership coverage changed at gesture start.",
+            )
+            self._states = ()
+            self._sliding_syncs = ()
+            self._sliding_guard_capabilities = ()
+            self._sliding_affected_capabilities = ()
+            self._active = None
+            self._forearm_special_session = None
+            return {"CANCELLED"}
+
         self._auto_plan = None
         self._auto_direct_plan = None
         self._auto_contact_batch_plan = None
@@ -6571,6 +6653,16 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             auto_key=bool(getattr(context.scene, "baw_auto_key_enabled", False)),
             sliding_sync_count=len(self._sliding_syncs),
             sliding_guard_count=len(self._sliding_guard_capabilities),
+            sliding_sync_ids=tuple(
+                str(session.capability.native_ik.mapping_id)
+                for session in self._sliding_syncs
+            ),
+            sliding_guard_ids=_sliding_capability_mapping_ids(
+                self._sliding_guard_capabilities
+            ),
+            sliding_affected_ids=_sliding_capability_mapping_ids(
+                self._sliding_affected_capabilities
+            ),
         )
         context.window_manager.modal_handler_add(self)
         return {"RUNNING_MODAL"}
@@ -7014,9 +7106,12 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 # A direct writer can trigger Action reevaluation across
                 # both actively selected Sliding limbs and passive guarded
                 # Sliding limbs. Final commit reconciliation therefore covers
-                # every currently Sliding mapping, while preview ownership stays
-                # disjoint between selected sync sessions and the passive guard.
-                _refresh_current_sliding_public_overlays(context)
+                # the gesture-start frozen affected set without re-scanning
+                # Sliding ownership after the write.
+                _refresh_current_sliding_public_overlays(
+                    context,
+                    capabilities=self._sliding_affected_capabilities,
+                )
 
                 from .trackbar_model import clear_key_selection_for_context
 
