@@ -986,6 +986,25 @@ OPEN RISK: none that blocks E1. E2 explicit direct-subset planning and E3 atomic
 NEXT ITEM ALLOWED: YES — proceed to E2 only.
 ```
 
+### E5 evidence ledger — 2026-09-20 USER PASS / CLOSED
+
+```text
+ITEM: E5 — one Sliding gesture lifecycle: active vs passive ownership
+MAIN DIFF / SHA: c02b252600202fec367122313a4e45507007e25b
+CHALLENGER REQUEST: DeepSeek PRE awb-e5-pre-deepseek-20260920-01; GLM Agent POST awb-e5-post-glm-agent-20260920-01
+CHALLENGER RESPONSE: DeepSeek PRE found a real cancel/failure public-state restoration gap and the missing active/passive mapping-ID proof; it also over-promoted the final broad display reconciliation to a blocker before the passive helper body/commit-phase meaning was proved. GLM Agent fetched public mirror b72940feccf02ab5ad9442afb88736009bbe8877, reproduced 284 pytest passes, source-audited the final E5 Rotate lifecycle, and reported NO E5 BLOCKER.
+MAIN VERDICT: CLOSED. Accepted the cancel exactness finding and ID instrumentation; replaced final dynamic rescan with the frozen affected set to remove ownership ambiguity; rejected the claim that the passive display helper mutates hidden IK/Contact after source inspection proved public-display-only writes. Sibling MOVE/FK_MOVE no-arg display refreshes remain a later ownership-hardening note, not an E5 Rotate blocker.
+CODE/STATIC: 284/284 tests PASS; Ruff 0 on Main. New tests/test_rigped_transform_e5.py freezes OperationDomainSnapshot active ownership, disjoint/union coverage, active/passive/affected trace IDs, complete public+hidden cancel restoration, and frozen final reconciliation.
+BLENDER API/STATE: USER-FIRST fresh Blender 5.2.1 session 9661249eed604aa68218e2955e2c71e7. Four limbs were authored FREE then SLIDING. User performed 9 committed four-limb Sliding Rotate gestures across multiple axes/orientations, each logging active=4 passive=0 affected=4. User then performed one committed UpperArm.L-only Rotate logging active=1 passive=3 affected=4.
+GUI INPUT/SCREEN: USER PASS. User reported no visible anomaly through repeated four-limb Rotate, single-active/passive-three Rotate, and final overall check.
+UNDO/REDO/CANCEL: ESC cancel on UpperArm.L-only Rotate logged TRANSFORM_CANCEL reason=ESC with active=1 passive=3; user confirmed the active arm returned exactly to pre-gesture pose and passive limbs showed no visible jump/change.
+AUTO OFF: both AWB Auto and native Auto Key were OFF. Post-sequence state inspection showed 116 FCurves / 116 total keys / 116 frame-0 keys / max one frame-0 key per FCurve, exactly matching the preceding four-limb SLIDING C footprint; accepted Rotate gestures created zero additional keys.
+FROZEN REPLAY: debug/사용자최종테스트 리플레이/E5/user_final_replay.json
+FROZEN REPLAY SHA-256: f7755ff7370ffd073594b74535f98468d3e6e878c25466c80cf7719957edc69c
+OPEN RISK: none blocking E5. E6 still owns straight-limb singularity seed and inheritance-aware native conversion. E7 owns live body/ancestor dependency. Sibling MOVE/FK_MOVE post-write dynamic display rescans are recorded for later ownership hardening unless they become relevant earlier.
+NEXT ITEM ALLOWED: YES — proceed to E6 only.
+```
+
 ## 6. Explicit non-goals until this plan closes
 
 Do not start or redesign:
@@ -1003,17 +1022,23 @@ Do not start or redesign:
 
 ## 7. Immediate next action
 
-**E1 is USER PASS / CLOSED. Start at E2.**
+**E1 through E5 are USER PASS / CLOSED. Start at E6.**
 
-E2 owns explicit direct-subset planning only: add a narrow direct planner subset API while preserving the frozen full-selection provenance from the E1 operation-domain resolver. Do not start the E3 atomic mixed-C coordinator inside E2.
+E6 owns the Sliding evaluation foundation only:
 
-Use the standard item loop: PRE challenger -> Main judgment -> implementation -> POST challenger -> user-first debug handoff. Until challenger characteristics are better established, rotate DeepSeek / Qwen / GLM across decision boundaries rather than repeatedly favoring one provider.
+1. prove/fix the fully straight Sliding limb singularity with a deterministic transient preferred-bend seed that initializes Blender native IK without becoming a second final solver;
+2. replace/prove the inheritance-sensitive public/result conversion boundary using Blender-native / inheritance-aware pose conversion behavior;
+3. keep authored target/reference, transient solver seed, native solved result, and derived public display explicitly separate;
+4. do not start E7 live COM/Spine/Head dependency inside E6.
 
-After E2/E3/E4 close, continue directly into E5-E9 without treating the current passive overlay guard as proof that Sliding/COM is complete.
+Use the frozen item loop:
+`PRE challenger -> Main judgment -> implementation -> POST challenger -> install/fresh Blender -> USER FIRST DEBUG TEST -> log/replay loop -> USER FINAL CONFIRMATION`.
 
-The two 2026-09-18 P1 findings that must remain explicit until current Blender proof are:
+Challenger routing remains provisional. E5 used DeepSeek PRE and GLM Agent POST; use **Qwen for E6 PRE** to keep the real-sample rotation balanced, then choose the POST challenger from the evidence needs rather than hard-assigning provider roles.
 
-1. fully straight Sliding limb + COM/body motion can require a deterministic transient seed before native IK solves correctly;
+The two 2026-09-18 P1 findings are now the exact E6 entry criteria:
+
+1. fully straight Sliding arm/leg + COM/body motion can require a deterministic transient seed before native IK solves correctly;
 2. COM/Pelvis rotation needs inheritance-aware native pose conversion; the current manual rest/parent formula is not accepted as proof.
 
-Those are mandatory before calling Sliding IK core stabilized.
+E6 must close those two foundations before E7 body/ancestor integration begins. Do not treat E5's passive-overlay success as proof that the straight-limb or inheritance cases are already solved.
