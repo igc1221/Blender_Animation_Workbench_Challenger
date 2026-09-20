@@ -78,6 +78,12 @@ from .rigped_fit_transform import _axis_point, _plane_point, _rotation_vector
 from .rigped_humanoid_builder import configure_generated_rigped_ik_hinge_branch
 from .rigped_limb_math import preferred_two_bone_bend
 from .rigped_operation_domain import OperationDomainSnapshot, resolve_operation_domain
+from .rigped_sliding_evaluation import (
+    build_transient_solver_seed,
+    capture_native_solved_result,
+    derive_public_display,
+    native_pose_basis_from_matrix,
+)
 from .semantic_adapter import (
     ResolvedControl,
     control_context_for_context,
@@ -380,18 +386,11 @@ def _apply_pose_bone_rotation_from_matrix(
 ) -> None:
     """Show one solved result matrix on a generated public control without keying it."""
 
-    rest = pose_bone.bone.matrix_local.copy()
-    if pose_bone.parent is None:
-        basis = rest.inverted() @ desired_matrix
-    else:
-        parent_rest = pose_bone.parent.bone.matrix_local.copy()
-        parent_pose = (
-            parent_pose_matrix.copy()
-            if parent_pose_matrix is not None
-            else pose_bone.parent.matrix.copy()
-        )
-        basis = rest.inverted() @ parent_rest @ parent_pose.inverted() @ desired_matrix
-
+    basis = native_pose_basis_from_matrix(
+        pose_bone,
+        desired_matrix,
+        parent_pose_matrix=parent_pose_matrix,
+    )
     quaternion = basis.to_quaternion().normalized()
     if pose_bone.rotation_mode == "QUATERNION":
         pose_bone.rotation_quaternion = quaternion
@@ -528,26 +527,13 @@ def unregister_rigped_sliding_replay_handler() -> None:
 
 
 
-def _state_for_pose_matrix(
+def _state_for_pose_basis(
     resolved: ResolvedControl,
-    desired_matrix: Matrix,
-    *,
-    parent_pose_matrix: Matrix | None = None,
+    basis: Matrix,
 ) -> SnapControlState:
     pose_bone = resolved.target
     if not isinstance(pose_bone, bpy.types.PoseBone):
-        raise RigpedSemanticMoveError("Free semantic Move reconstruction currently requires PoseBone controls.")
-    rest = pose_bone.bone.matrix_local.copy()
-    if pose_bone.parent is None:
-        basis = rest.inverted() @ desired_matrix
-    else:
-        parent_rest = pose_bone.parent.bone.matrix_local.copy()
-        parent_pose = (
-            parent_pose_matrix.copy()
-            if parent_pose_matrix is not None
-            else pose_bone.parent.matrix.copy()
-        )
-        basis = rest.inverted() @ parent_rest @ parent_pose.inverted() @ desired_matrix
+        raise RigpedSemanticMoveError("Rigped pose reconstruction currently requires PoseBone controls.")
 
     property_name = rotation_property(pose_bone)
     quaternion = basis.to_quaternion().normalized()
@@ -564,6 +550,23 @@ def _state_for_pose_matrix(
         property_name,
         tuple(float(value) for value in rotation),
     )
+
+
+def _state_for_pose_matrix(
+    resolved: ResolvedControl,
+    desired_matrix: Matrix,
+    *,
+    parent_pose_matrix: Matrix | None = None,
+) -> SnapControlState:
+    pose_bone = resolved.target
+    if not isinstance(pose_bone, bpy.types.PoseBone):
+        raise RigpedSemanticMoveError("Rigped pose reconstruction currently requires PoseBone controls.")
+    basis = native_pose_basis_from_matrix(
+        pose_bone,
+        desired_matrix,
+        parent_pose_matrix=parent_pose_matrix,
+    )
+    return _state_for_pose_basis(resolved, basis)
 
 
 def _pose_residual(actual: Matrix, expected: Matrix) -> tuple[float, float]:
@@ -2050,23 +2053,20 @@ def _sync_sliding_public_pose_from_result(
     *,
     update: bool = True,
 ) -> None:
-    desired_first = capability.result_controls[0].target.matrix.copy()
-    desired_second = capability.result_controls[1].target.matrix.copy()
-    desired_terminal = capability.result_terminal.target.matrix.copy()
+    solved_result = capture_native_solved_result(capability)
+    public_display = derive_public_display(capability, solved_result)
 
-    first_state = _state_for_pose_matrix(
+    first_state = _state_for_pose_basis(
         capability.fk_controls[0],
-        desired_first,
+        public_display.first_basis,
     )
-    second_state = _state_for_pose_matrix(
+    second_state = _state_for_pose_basis(
         capability.fk_controls[1],
-        desired_second,
-        parent_pose_matrix=desired_first,
+        public_display.second_basis,
     )
-    terminal_state = _state_for_pose_matrix(
+    terminal_state = _state_for_pose_basis(
         capability.authored_terminal,
-        desired_terminal,
-        parent_pose_matrix=desired_second,
+        public_display.terminal_basis,
     )
     _apply_control_state(
         capability.fk_controls[0],
@@ -2144,7 +2144,7 @@ def apply_sliding_semantic_move_delta(
 ) -> None:
     requested_delta = Vector(world_delta)
     analytic = session.analytic_fk_session
-    preferred_seed: tuple[Vector, Vector] | None = None
+    solver_seed = None
     if analytic is not None:
         # Solve one continuous two-bone branch in world space first. This is a
         # pure geometry solve: it clamps fixed reach and updates only the
@@ -2158,13 +2158,20 @@ def apply_sliding_semantic_move_delta(
         )
         if solved is not None:
             desired_joint_world, desired_end_world = solved
-            preferred_seed = (
-                Vector(desired_joint_world),
-                Vector(desired_end_world),
-            )
             requested_delta = Vector(desired_end_world) - Vector(session.start_pivot_world)
 
             direction = Vector(desired_end_world) - Vector(analytic.root_world)
+            deterministic_bend = (
+                Vector(analytic.bend_plane_normal_world).cross(direction)
+            )
+            solver_seed = build_transient_solver_seed(
+                root_world=Vector(analytic.root_world),
+                target_world=Vector(desired_end_world),
+                preferred_bend_world=deterministic_bend,
+                first_length=float(analytic.first_length),
+                second_length=float(analytic.second_length),
+                minimum_bend_radians=radians(8.0),
+            )
             pole_reference = Vector(session.pole_perp_world)
             start_axis = Vector(session.start_axis_world)
             if (
@@ -2202,14 +2209,14 @@ def apply_sliding_semantic_move_delta(
     # MCH input pose on the analytic preferred branch with IK transiently muted,
     # then re-enable the native solve from that non-singular starting pose.
     native_ik = session.capability.native_ik.constraint
-    if analytic is not None and preferred_seed is not None:
+    if analytic is not None and solver_seed is not None:
         was_muted = bool(native_ik.mute)
         try:
             native_ik.mute = True
             if not _apply_solved_two_bone_fk_pose(
                 analytic,
-                preferred_seed[0],
-                preferred_seed[1],
+                Vector(solver_seed.joint_world),
+                Vector(solver_seed.end_world),
             ):
                 raise RigpedSemanticMoveError(
                     "Sliding preferred-bend seed could not reconstruct the public limb pose."
