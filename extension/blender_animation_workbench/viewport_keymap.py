@@ -251,6 +251,19 @@ def _cycle_transform_orientation(context) -> str:
     return next_orientation
 
 
+def _cycle_transform_orientation_preserving_semantic_mode(
+    context,
+    semantic_mode: str,
+) -> str:
+    """Cycle only orientation while keeping the active AWB transform route alive."""
+
+    next_orientation = _cycle_transform_orientation(context)
+    scene = getattr(context, "scene", None)
+    if scene is not None and hasattr(scene, "baw_rigped_semantic_transform_mode"):
+        scene.baw_rigped_semantic_transform_mode = str(semantic_mode)
+    return next_orientation
+
+
 def _reset_max_pick_cycle() -> None:
     global _MAX_PICK_POINT, _MAX_PICK_MODE, _MAX_PICK_CANDIDATES, _MAX_PICK_INDEX
     _MAX_PICK_POINT = None
@@ -1159,7 +1172,10 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
         if self.mode == "ROTATE" and direct_rotate_available(context):
             direct_mode = "DIRECT_ROTATE"
             if semantic_mode_before == direct_mode:
-                _cycle_transform_orientation(context)
+                next_orientation = _cycle_transform_orientation_preserving_semantic_mode(
+                    context,
+                    direct_mode,
+                )
                 trace_event(
                     "INPUT",
                     "TRANSFORM_TOOL_ACTIVATED",
@@ -1167,6 +1183,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                     requested_mode=self.mode,
                     semantic_mode=direct_mode,
                     cycled_orientation=True,
+                    orientation_after=next_orientation,
                     route_override="MIXED_ROTATE",
                 )
                 return {"FINISHED"}
@@ -1205,7 +1222,10 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                     if not _activate_awb_transform_workspace_tool(context, "MOVE"):
                         deactivate_rigped_semantic_tool(context)
                         return {"CANCELLED"}
-                    _cycle_transform_orientation(context)
+                    _cycle_transform_orientation_preserving_semantic_mode(
+                        context,
+                        "FK_MOVE",
+                    )
                     return {"FINISHED"}
                 if activate_rigped_fk_joint_move_tool(context):
                     if not _activate_awb_transform_workspace_tool(context, "MOVE"):
@@ -1220,7 +1240,10 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                     if not _activate_awb_transform_workspace_tool(context, "MOVE"):
                         deactivate_rigped_semantic_tool(context)
                         return {"CANCELLED"}
-                    _cycle_transform_orientation(context)
+                    _cycle_transform_orientation_preserving_semantic_mode(
+                        context,
+                        "MOVE",
+                    )
                     return {"FINISHED"}
                 if activate_rigped_semantic_move_tool(context):
                     if not _activate_awb_transform_workspace_tool(context, "MOVE"):
@@ -1241,7 +1264,10 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                         if not _activate_awb_transform_workspace_tool(context, "MOVE"):
                             deactivate_rigped_semantic_tool(context)
                             return {"CANCELLED"}
-                        _cycle_transform_orientation(context)
+                        _cycle_transform_orientation_preserving_semantic_mode(
+                            context,
+                            "MOVE",
+                        )
                         return {"FINISHED"}
                     if activate_rigped_semantic_move_tool(context):
                         if not _activate_awb_transform_workspace_tool(context, "MOVE"):
@@ -1255,7 +1281,10 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
             if rigped_decision.route == RigpedTransformRoute.NATIVE and self.mode in {"MOVE", "ROTATE"}:
                 direct_mode = "DIRECT_MOVE" if self.mode == "MOVE" else "DIRECT_ROTATE"
                 if semantic_mode_before == direct_mode:
-                    _cycle_transform_orientation(context)
+                    next_orientation = _cycle_transform_orientation_preserving_semantic_mode(
+                        context,
+                        direct_mode,
+                    )
                     trace_event(
                         "INPUT",
                         "TRANSFORM_TOOL_ACTIVATED",
@@ -1263,6 +1292,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                         requested_mode=self.mode,
                         semantic_mode=direct_mode,
                         cycled_orientation=True,
+                        orientation_after=next_orientation,
                     )
                     return {"FINISHED"}
                 scene.baw_rigped_semantic_transform_mode = direct_mode

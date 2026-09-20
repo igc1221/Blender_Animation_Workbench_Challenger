@@ -61,6 +61,7 @@ from .phase4_representation_snap import (
     execute_representation_snap,
     representation_payload_matches,
     resolve_limb_representation_capability,
+    set_limb_fk_feedback_muted,
 )
 from .phase4_verification import (
     Diagnostic,
@@ -4196,6 +4197,11 @@ def execute_contact_intent_plan(
                 stage_write,
             )
         journal.commit()
+        set_limb_fk_feedback_muted(
+            capability,
+            intent.target_type is not ContactKeyType.FREE,
+        )
+        bpy.context.view_layer.update()
         hook.enter(OperationStage.COMMIT, operation=contact_plan.operation_id)
         trace_event(
             "WRITER",
@@ -4819,6 +4825,12 @@ def execute_contact_batch_intent_plan(
                     stage_write,
                 )
         journal.commit()
+        for item in prepared_tuple:
+            set_limb_fk_feedback_muted(
+                item.capability,
+                item.intent.target_type is not ContactKeyType.FREE,
+            )
+        bpy.context.view_layer.update()
         hook.enter(OperationStage.COMMIT, operation=contact_plan.operation_id)
         mapping_types = tuple(
             (item.intent.mapping_id, item.intent.target_type)

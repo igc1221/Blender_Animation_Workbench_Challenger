@@ -38,6 +38,7 @@ from .rigped_auto_key import (
     plan_rigped_auto_direct_move,
     plan_rigped_auto_direct_rotate,
 )
+from .rigped_operation_domain import resolve_operation_domain
 from .rigped_transform import (
     _RIGPED_SLIDING_REPLAY_LIMBS,
     _apply_control_state,
@@ -46,6 +47,7 @@ from .rigped_transform import (
     _begin_direct_move_states,
     _begin_semantic_move_domains,
     _control_pivot_world,
+    _current_sliding_capabilities,
     _direct_rotate_auto_contexts,
     _direct_rotate_sliding_sync_sessions,
     _fk_move_auto_contexts,
@@ -251,9 +253,25 @@ def _execute_free_direct_rotate_action(context, action: dict[str, Any]) -> dict[
             "AWB semantic replay v1 direct Rotate requires at least one selected Rigped control."
         )
 
-    sliding_syncs = _direct_rotate_sliding_sync_sessions(context)
-    sliding_guard_capabilities = _passive_sliding_capabilities(
+    domain_resolution = resolve_operation_domain(
+        scene,
+        control_context_for_context(context),
+    )
+    if not domain_resolution.ok or domain_resolution.snapshot is None:
+        detail = (
+            domain_resolution.issues[0].detail
+            if domain_resolution.issues
+            else "AWB semantic replay Rotate could not freeze the operation domain."
+        )
+        raise RuntimeError(detail)
+    operation_domain = domain_resolution.snapshot
+    frozen_current_sliding = _current_sliding_capabilities(context)
+    sliding_syncs = _direct_rotate_sliding_sync_sessions(
         context,
+        operation_domain,
+    )
+    sliding_guard_capabilities = _passive_sliding_capabilities(
+        frozen_current_sliding,
         sliding_syncs,
     )
 

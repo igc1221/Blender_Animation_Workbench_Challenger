@@ -51,6 +51,7 @@ from .phase4_representation_snap import (
     build_representation_snap_payload,
     execute_representation_snap,
     resolve_limb_representation_capability,
+    set_limb_fk_feedback_muted,
 )
 from .phase4_writer import WriterTrigger
 from .rigped_auto_key import (
@@ -401,6 +402,57 @@ def _apply_pose_bone_rotation_from_matrix(
         pose_bone.rotation_euler = quaternion.to_euler(pose_bone.rotation_mode)
 
 
+def _sync_generated_sliding_hinge_branch_from_pole(solver_owner) -> bool:
+    name = str(getattr(solver_owner, "name", ""))
+    if not name.startswith("MCH_ForeArm"):
+        # Generated knees keep the anatomical/authored hinge branch established
+        # at rig/snap time. Deriving Calf branch from pole_angle can select the
+        # opposite local-X half-range and produce a visually inverted knee even
+        # though the native IK target is numerically satisfied.
+        return False
+    ik_constraint = next(
+        (constraint for constraint in solver_owner.constraints if constraint.type == "IK"),
+        None,
+    )
+    if ik_constraint is None:
+        return False
+    branch_sign = 1 if cos(float(ik_constraint.pole_angle)) < 0.0 else -1
+    return bool(
+        configure_generated_rigped_ik_hinge_branch(
+            solver_owner,
+            branch_sign,
+        )
+    )
+
+
+def _set_replay_limb_fk_feedback_muted(
+    rig,
+    pose,
+    public_names: tuple[str, ...],
+    result_names: tuple[str, ...],
+    muted: bool,
+) -> bool:
+    changed = False
+    for public_name, result_name in zip(public_names, result_names, strict=True):
+        result_bone = pose.get(result_name)
+        if result_bone is None:
+            continue
+        for constraint in result_bone.constraints:
+            if (
+                constraint.type != "COPY_ROTATION"
+                or constraint.target is not rig
+                or str(constraint.subtarget) != str(public_name)
+            ):
+                continue
+            target = bool(muted)
+            if bool(constraint.mute) == target:
+                break
+            constraint.mute = target
+            changed = True
+            break
+    return changed
+
+
 @persistent
 def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
     """Keep public Hand/Foot chains visually welded to the single Sliding IK solve.
@@ -431,20 +483,22 @@ def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
                     )
                 except (TypeError, ValueError):
                     continue
+
+                feedback_changed = _set_replay_limb_fk_feedback_muted(
+                    rig,
+                    pose,
+                    public_names,
+                    result_names,
+                    contact_type is not ContactKeyType.FREE,
+                )
+                touched = feedback_changed or touched
                 if contact_type is not ContactKeyType.SLIDING:
                     continue
 
-                if state_name.startswith("MCH_ForeArm"):
-                    ik_constraint = next(
-                        (constraint for constraint in state_bone.constraints if constraint.type == "IK"),
-                        None,
-                    )
-                    if ik_constraint is not None:
-                        branch_sign = 1 if cos(float(ik_constraint.pole_angle)) < 0.0 else -1
-                        if configure_generated_rigped_ik_hinge_branch(state_bone, branch_sign):
-                            view_layer = getattr(bpy.context, "view_layer", None)
-                            if view_layer is not None and getattr(bpy.context, "scene", None) is scene:
-                                view_layer.update()
+                if _sync_generated_sliding_hinge_branch_from_pole(state_bone):
+                    view_layer = getattr(bpy.context, "view_layer", None)
+                    if view_layer is not None and getattr(bpy.context, "scene", None) is scene:
+                        view_layer.update()
 
                 public = tuple(pose.get(name) for name in public_names)
                 result = tuple(pose.get(name) for name in result_names)
@@ -1434,11 +1488,12 @@ def _apply_solved_two_bone_fk_pose(
     desired_joint_world: Vector,
     desired_end_world: Vector,
 ) -> bool:
-    """Apply one already-solved two-bone pose to the public FK controls.
+    """Apply one already-solved two-bone pose to a two-bone control chain.
 
-    Sliding reuses this as a transient Preferred-Angle seed while native IK is
-    muted, so an exactly straight generated limb enters the intended bend branch
-    before Blender's iterative IK solver is asked to converge on the hidden goal.
+    Free FK gestures apply this to the public controls. Sliding singularity
+    recovery applies the same solved pose transiently to the hidden MCH result
+    controls while native IK is muted, then hands final authority back to
+    Blender's native IK solver.
     """
 
     owner = session.first_control.owner_object
@@ -2114,22 +2169,17 @@ def _converge_sliding_public_pose_from_result(
     *,
     max_passes: int = 6,
 ) -> None:
-    owner = capability.result_controls[0].owner_object
-    dimensions = getattr(owner, "dimensions", None)
-    scale = max(1e-6, float(getattr(dimensions, "length", 0.0) or 0.0))
-    # Converge substantially tighter than I12's release-time residual gate so
-    # its transient IK-off/IK-on verification still has numerical headroom.
-    position_tolerance = max(1e-7, scale * 2.5e-7)
+    # Public Sliding display projection writes rotation channels only.
+    # Position residual remains valuable evidence, but it is not a writable
+    # degree of freedom for this projection and therefore must not reject an
+    # otherwise converged native-result display.
     rotation_tolerance = 5e-7
     last_position = 0.0
     last_rotation = 0.0
     for _pass_index in range(max(1, int(max_passes))):
         _sync_sliding_public_pose_from_result(context, capability)
         last_position, last_rotation = _sliding_public_pose_residual(capability)
-        if (
-            last_position <= position_tolerance
-            and last_rotation <= rotation_tolerance
-        ):
+        if last_rotation <= rotation_tolerance:
             return
     raise RigpedSemanticMoveError(
         "Sliding public/result convergence failed: "
@@ -2996,7 +3046,12 @@ class BAW_OT_rigped_semantic_move_axis(bpy.types.Operator):
     def poll(cls, context):
         return (
             getattr(context, "mode", "") == "POSE"
-            and getattr(context.scene, "baw_rigped_semantic_transform_mode", "NONE") == "MOVE"
+            and getattr(
+                context.scene,
+                "baw_rigped_semantic_transform_mode",
+                "NONE",
+            )
+            in {"MOVE", "FK_MOVE", "DIRECT_MOVE"}
             and semantic_move_available(context)
         )
 
@@ -3587,8 +3642,12 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
     def poll(cls, context):
         return (
             getattr(context, "mode", "") == "POSE"
-            and getattr(context.scene, "baw_rigped_semantic_transform_mode", "NONE")
-            == "FK_MOVE"
+            and getattr(
+                context.scene,
+                "baw_rigped_semantic_transform_mode",
+                "NONE",
+            )
+            in {"MOVE", "FK_MOVE", "DIRECT_MOVE"}
             and fk_joint_move_available(context)
         )
 
@@ -4608,8 +4667,12 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
     def poll(cls, context):
         return (
             getattr(context, "mode", "") == "POSE"
-            and getattr(context.scene, "baw_rigped_semantic_transform_mode", "NONE")
-            == "DIRECT_MOVE"
+            and getattr(
+                context.scene,
+                "baw_rigped_semantic_transform_mode",
+                "NONE",
+            )
+            in {"MOVE", "FK_MOVE", "DIRECT_MOVE"}
             and direct_move_available(context)
         )
 
@@ -4784,12 +4847,37 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
             stable_delta = Vector(delta)
             if pixel_step <= 3.0:
                 stable_delta = self._last_delta.lerp(stable_delta, 0.68)
-            _apply_direct_move_delta(
-                context,
-                states,
-                stable_delta,
-                sliding_capabilities=self._sliding_guard_capabilities,
-            )
+            try:
+                _apply_direct_move_delta(
+                    context,
+                    states,
+                    stable_delta,
+                    sliding_capabilities=self._sliding_guard_capabilities,
+                )
+            except (RigpedSemanticMoveError, RuntimeError, ValueError, ReferenceError) as exc:
+                _restore_direct_move_states(
+                    context,
+                    states,
+                    sliding_capabilities=self._sliding_guard_capabilities,
+                )
+                _report_operator_error(
+                    self,
+                    context,
+                    exc,
+                    tool="MOVE",
+                    route="DIRECT_MOVE",
+                    axis=self.axis,
+                    phase="MOUSEMOVE",
+                    attempted_delta=tuple(float(value) for value in stable_delta),
+                )
+                self._states = ()
+                self._sliding_guard_capabilities = ()
+                self._auto_plan = None
+                _set_semantic_move_drag_active(context, False)
+                self._trace_operation_id = None
+                if context.area is not None:
+                    context.area.tag_redraw()
+                return {"CANCELLED"}
             self._last_delta = stable_delta
             self._move_last_mouse = mouse_now
             if context.area is not None:
@@ -5999,6 +6087,267 @@ def _sliding_capability_mapping_ids(
     )
 
 
+def _configured_generated_hinge_branch_sign(solver_owner) -> int | None:
+    name = str(getattr(solver_owner, "name", ""))
+    if name.startswith("MCH_ForeArm"):
+        if not bool(solver_owner.use_ik_limit_z):
+            return None
+        minimum = float(solver_owner.ik_min_z)
+        maximum = float(solver_owner.ik_max_z)
+    elif name.startswith("MCH_Calf"):
+        if not bool(solver_owner.use_ik_limit_x):
+            return None
+        minimum = float(solver_owner.ik_min_x)
+        maximum = float(solver_owner.ik_max_x)
+    else:
+        return None
+
+    epsilon = 1e-6
+    if minimum >= -epsilon and maximum > epsilon:
+        return 1
+    if maximum <= epsilon and minimum < -epsilon:
+        return -1
+    return None
+
+
+def _transient_solver_seed_branch_sign(
+    capability: LimbRepresentationCapability,
+    solved_result,
+    *,
+    root_world: Vector,
+    joint_world: Vector,
+    end_world: Vector,
+    desired_joint_world: Vector,
+    desired_end_world: Vector,
+    bend_plane_normal_world: Vector,
+) -> int | None:
+    owner = capability.result_controls[0].owner_object
+    owner_inverse = owner.matrix_world.inverted_safe()
+    owner_basis_inverse = owner.matrix_world.to_3x3().inverted_safe()
+
+    root = Vector(owner_inverse @ root_world)
+    start_joint = Vector(owner_inverse @ joint_world)
+    start_end = Vector(owner_inverse @ end_world)
+    desired_joint = Vector(owner_inverse @ desired_joint_world)
+    desired_end = Vector(owner_inverse @ desired_end_world)
+    start_plane = Vector(owner_basis_inverse @ bend_plane_normal_world)
+    desired_plane_world = (
+        Vector(desired_end_world) - Vector(root_world)
+    ).cross(Vector(desired_joint_world) - Vector(root_world))
+    if desired_plane_world.length <= 1e-8:
+        desired_plane_world = Vector(bend_plane_normal_world)
+    desired_plane = Vector(owner_basis_inverse @ desired_plane_world)
+
+    first_matrix = _plane_aligned_pose_matrix(
+        solved_result.first_pose,
+        root,
+        start_joint,
+        start_plane,
+        root,
+        desired_joint,
+        desired_plane,
+    )
+    second_matrix = _plane_aligned_pose_matrix(
+        solved_result.second_pose,
+        start_joint,
+        start_end,
+        start_plane,
+        desired_joint,
+        desired_end,
+        desired_plane,
+    )
+    if first_matrix is None or second_matrix is None:
+        return None
+
+    second_basis = native_pose_basis_from_matrix(
+        capability.result_controls[1].target,
+        second_matrix,
+        parent_pose_matrix=first_matrix,
+    )
+    quaternion = second_basis.to_quaternion().normalized()
+    solver_name = str(
+        getattr(capability.native_ik.solver_owner.target, "name", "")
+    )
+    if solver_name.startswith("MCH_ForeArm"):
+        component = float(quaternion.z)
+    elif solver_name.startswith("MCH_Calf"):
+        component = float(quaternion.x)
+    else:
+        return None
+
+    angle = 2.0 * atan2(component, float(quaternion.w))
+    angle = ((angle + pi) % (2.0 * pi)) - pi
+    if abs(angle) <= radians(0.25):
+        return None
+    return 1 if angle > 0.0 else -1
+
+
+def _seed_stalled_sliding_native_ik(
+    context,
+    capability: LimbRepresentationCapability,
+) -> bool:
+    """Escape a reachable near-straight native IK stall without moving authority."""
+
+    native_ik = capability.native_ik.constraint
+    if bool(native_ik.mute) or float(native_ik.influence) <= 1e-6:
+        return False
+    pole_target = capability.native_ik.pole_target
+    if pole_target is None:
+        return False
+
+    first_result = capability.result_controls[0].target
+    second_result = capability.result_controls[1].target
+    if not all(
+        isinstance(item, bpy.types.PoseBone)
+        for item in (first_result, second_result)
+    ):
+        return False
+
+    owner = capability.result_controls[0].owner_object
+    root_world = Vector(owner.matrix_world @ first_result.head)
+    joint_world = Vector(owner.matrix_world @ first_result.tail)
+    end_world = Vector(owner.matrix_world @ second_result.tail)
+    first_length = float((joint_world - root_world).length)
+    second_length = float((end_world - joint_world).length)
+    if first_length <= 1e-8 or second_length <= 1e-8:
+        return False
+
+    target_world = _world_position(capability.native_ik.ik_target)
+    target_axis = target_world - root_world
+    target_distance = float(target_axis.length)
+    total_length = first_length + second_length
+    reach_epsilon = max(1e-6, total_length * 1e-5)
+    if (
+        target_distance <= abs(first_length - second_length) + reach_epsilon
+        or target_distance >= total_length - reach_epsilon
+    ):
+        # Folded or reach-saturated chains are not straight-singularity stalls.
+        return False
+    target_direction = target_axis.normalized()
+
+    actual_tip_world = Vector(
+        evaluated_chain_tip_world_position(capability.native_ik)
+    )
+    target_error = float((actual_tip_world - target_world).length)
+    target_tolerance = max(1e-6, total_length * 1e-5)
+    if target_error <= target_tolerance:
+        return False
+
+    current_axis = end_world - root_world
+    current_distance = float(current_axis.length)
+    if current_distance <= 1e-9:
+        return False
+    current_direction = current_axis.normalized()
+    current_along = (
+        first_length * first_length
+        - second_length * second_length
+        + current_distance * current_distance
+    ) / (2.0 * current_distance)
+    current_perp = joint_world - (
+        root_world + current_direction * current_along
+    )
+    if current_perp.length > max(1e-5, total_length * 0.01):
+        return False
+
+    pole_world = _world_position(pole_target)
+    preferred_bend = pole_world - (
+        root_world
+        + target_direction
+        * float((pole_world - root_world).dot(target_direction))
+    )
+    if preferred_bend.length <= 1e-8:
+        return False
+    preferred_bend.normalize()
+
+    solved_result = capture_native_solved_result(capability)
+    configured_branch = _configured_generated_hinge_branch_sign(
+        capability.native_ik.solver_owner.target
+    )
+    selected_seed = None
+    candidate_bends = (
+        preferred_bend.copy(),
+        -preferred_bend.copy(),
+    )
+    for candidate_bend in candidate_bends:
+        solver_seed = build_transient_solver_seed(
+            root_world=root_world,
+            target_world=target_world,
+            preferred_bend_world=candidate_bend,
+            first_length=first_length,
+            second_length=second_length,
+            minimum_bend_radians=radians(8.0),
+        )
+        if solver_seed is None:
+            continue
+
+        bend_plane_normal = target_direction.cross(candidate_bend)
+        if bend_plane_normal.length <= 1e-8:
+            continue
+        bend_plane_normal.normalize()
+
+        if configured_branch is not None:
+            candidate_branch = _transient_solver_seed_branch_sign(
+                capability,
+                solved_result,
+                root_world=root_world,
+                joint_world=joint_world,
+                end_world=end_world,
+                desired_joint_world=Vector(solver_seed.joint_world),
+                desired_end_world=Vector(solver_seed.end_world),
+                bend_plane_normal_world=bend_plane_normal,
+            )
+            if candidate_branch != configured_branch:
+                continue
+
+        selected_seed = (
+            candidate_bend,
+            solver_seed,
+            bend_plane_normal,
+        )
+        break
+
+    if selected_seed is None:
+        return False
+    preferred_bend, solver_seed, bend_plane_normal = selected_seed
+    seed_session = FkTwoBoneMoveSession(
+        capability=capability,
+        active_control=capability.result_terminal,
+        first_control=capability.result_controls[0],
+        second_control=capability.result_controls[1],
+        terminal_control=capability.result_terminal,
+        first_start_basis=capability.result_controls[0].target.matrix_basis.copy(),
+        second_start_basis=capability.result_controls[1].target.matrix_basis.copy(),
+        terminal_start_basis=capability.result_terminal.target.matrix_basis.copy(),
+        first_start_matrix=solved_result.first_pose.copy(),
+        second_start_matrix=solved_result.second_pose.copy(),
+        terminal_start_matrix=solved_result.terminal_pose.copy(),
+        root_world=root_world,
+        joint_world=joint_world,
+        end_world=end_world,
+        baseline_perp_world=preferred_bend.copy(),
+        bend_plane_normal_world=bend_plane_normal.copy(),
+        last_direction_world=target_direction.copy(),
+        last_bend_world=preferred_bend.copy(),
+        first_length=first_length,
+        second_length=second_length,
+    )
+
+    was_muted = bool(native_ik.mute)
+    try:
+        native_ik.mute = True
+        if not _apply_solved_two_bone_fk_pose(
+            seed_session,
+            Vector(solver_seed.joint_world),
+            Vector(solver_seed.end_world),
+        ):
+            return False
+        context.view_layer.update()
+    finally:
+        native_ik.mute = was_muted
+    context.view_layer.update()
+    return True
+
+
 def _refresh_current_sliding_public_overlays(
     context,
     *,
@@ -6010,25 +6359,39 @@ def _refresh_current_sliding_public_overlays(
     if not capabilities:
         return 0
 
-    # Public FK is a derived cache while Sliding. Rebuild all Sliding limbs as
-    # one depsgraph batch and settle the public/result relation inside the same
-    # preview event, rather than leaking one convergence step into the next
-    # mouse event or release.
-    tolerances: dict[str, tuple[float, float]] = {}
+    feedback_changed = False
+    hinge_changed = False
     for capability in capabilities:
-        owner = capability.result_controls[0].owner_object
-        dimensions = getattr(owner, "dimensions", None)
-        scale = max(
-            1e-6,
-            float(getattr(dimensions, "length", 0.0) or 0.0),
+        feedback_changed = (
+            bool(set_limb_fk_feedback_muted(capability, True))
+            or feedback_changed
         )
-        tolerances[str(capability.native_ik.mapping_id)] = (
-            max(1e-7, scale * 2.5e-7),
-            5e-7,
+        hinge_changed = (
+            _sync_generated_sliding_hinge_branch_from_pole(
+                capability.native_ik.solver_owner.target
+            )
+            or hinge_changed
         )
+    if feedback_changed or hinge_changed:
+        context.view_layer.update()
+
+    # Public FK is a derived cache while Sliding. Rebuild all Sliding limbs as
+    # one depsgraph batch and settle the writable public/result relation inside
+    # the same preview event, rather than leaking one convergence step into the
+    # next mouse event or release. The projection writes rotation channels only;
+    # position residual is observed for diagnostics but is not a failure gate.
+    rotation_tolerance = 5e-7
+
+    # SolverSeed is singularity initialization only. It must not be
+    # re-injected on every public/result convergence pass or it becomes a
+    # competing iterative solver and can repeatedly perturb near-straight
+    # chains under non-identity ancestor transforms.
+    for capability in capabilities:
+        _seed_stalled_sliding_native_ik(context, capability)
 
     last_position = 0.0
     last_rotation = 0.0
+    residual_history: list[tuple[int, float, float]] = []
     for _pass_index in range(max(1, int(max_passes))):
         for capability in capabilities:
             _sync_sliding_public_pose_from_result(
@@ -6045,17 +6408,41 @@ def _refresh_current_sliding_public_overlays(
             position, rotation = _sliding_public_pose_residual(capability)
             last_position = max(last_position, position)
             last_rotation = max(last_rotation, rotation)
-            position_tolerance, rotation_tolerance = tolerances[
-                str(capability.native_ik.mapping_id)
-            ]
-            if (
-                position > position_tolerance
-                or rotation > rotation_tolerance
-            ):
+            if rotation > rotation_tolerance:
                 converged = False
+        residual_history.append(
+            (_pass_index + 1, float(last_position), float(last_rotation))
+        )
         if converged:
-            return len(capabilities)
+            # Constraint feedback can look converged in the same depsgraph tick
+            # that wrote the public overlay, then drift on the next evaluation
+            # because the always-on FK Copy Rotation inputs feed the public pose
+            # back into the native IK chain. Require one no-write stability
+            # update before accepting convergence.
+            context.view_layer.update()
+            stable = True
+            for capability in capabilities:
+                position, rotation = _sliding_public_pose_residual(capability)
+                last_position = max(last_position, position)
+                last_rotation = max(last_rotation, rotation)
+                if rotation > rotation_tolerance:
+                    stable = False
+            if stable:
+                return len(capabilities)
 
+    trace_event(
+        "DIAGNOSTIC",
+        "SLIDING_CONVERGENCE_FAILURE",
+        context=context,
+        mapping_ids=tuple(
+            str(capability.native_ik.mapping_id)
+            for capability in capabilities
+        ),
+        max_passes=max(1, int(max_passes)),
+        residual_history=tuple(residual_history),
+        final_position=float(last_position),
+        final_rotation=float(last_rotation),
+    )
     raise RigpedSemanticMoveError(
         "Sliding public/result batch convergence failed: "
         f"position={last_position:.9g} rotation={last_rotation:.9g}"
@@ -6878,7 +7265,17 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     self._apply_preview(context)
                 except RigpedSemanticMoveError as exc:
                     self._restore_preview(context)
-                    _report_operator_error(self, context, exc)
+                    _report_operator_error(
+                        self,
+                        context,
+                        exc,
+                        tool="ROTATE",
+                        route="DIRECT_ROTATE",
+                        phase="MOUSEMOVE",
+                        axis=self.axis,
+                        attempted_angle=float(candidate),
+                        orientation=str(self._orientation),
+                    )
                     self._states = ()
                     self._sliding_syncs = ()
                     self._active = None

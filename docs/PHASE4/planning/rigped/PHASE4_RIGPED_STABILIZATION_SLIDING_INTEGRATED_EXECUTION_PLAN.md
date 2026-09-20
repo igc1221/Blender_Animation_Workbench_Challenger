@@ -12,6 +12,21 @@
 > - `PHASE4_RIGPED_STABILIZATION_OWNERSHIP_PLAN.md` (2026-09-19 ownership gate)
 > - `docs/AGENT/ASTRA_REVIEW_RESPONSE_PHASE4_STABILIZATION_20260919.md` (2026-09-19 Astra architecture response)
 
+## 2026-09-20 execution override — E6 CLOSED / ASTRA E1–E6 REVIEW GATE
+
+E1 through E6 are **USER PASS / CLOSED**.
+
+E6 closure authority:
+- `debug/사용자최종테스트 리플레이/E6/evidence.json`
+- `debug/사용자최종테스트 리플레이/E6/README.md`
+- final regression/user gesture: `12_four_limb_nonidentity_inverse_left_knee_regression.json`
+- final accepted replay: `13_four_limb_nonidentity_user_final.json`
+- static gate: **297 passed, Ruff 0**
+
+The next gate is **one Astra comprehensive architecture review covering E1 through E6**. Do not run an Astra narrow E6-only review. E7 remains blocked until Main consumes that comprehensive review and resolves any accepted blocker.
+
+This override does not alter the normal narrow PRE/POST challenger policy for implementation items; it only defines Astra usage.
+
 ## 0. Purpose
 
 This document is the execution authority for the next Rigped stabilization sequence.
@@ -19,7 +34,7 @@ This document is the execution authority for the next Rigped stabilization seque
 It merges two valid but different layers of work:
 
 1. the 2026-09-19 ownership review, which fixes **who owns one operation, one domain, one transaction, and one replay meaning**;
-2. the 2026-09-18 Sliding implementation plan, which fixes **how Sliding/COM/Root evaluation actually behaves in Blender**, including straight-limb seeding, native matrix conversion, live body dependency, and multi-limb behavior.
+2. the 2026-09-18 Sliding implementation plan, which fixes **how Sliding/COM/Root evaluation actually behaves in Blender**, including max-extension / near-straight limb seeding, native matrix conversion, live body dependency, and multi-limb behavior.
 
 The newer ownership review does **not** replace the older Sliding/COM runtime findings. The older line numbers/source hashes are historical evidence only, but its P1 behavior findings and verification matrix remain active until re-proven on current source.
 
@@ -261,7 +276,7 @@ Freeze the current baseline, inventory already-captured evidence, and make sure 
 3. one Contact limb + direct controls;
 4. direct-only C;
 5. bent Sliding foot + COM W;
-6. **straight Sliding foot + COM W**;
+6. **max-extension / near-straight Sliding foot + COM W**;
 7. Sliding hand + Spine/Head Rotate;
 8. COM/Pelvis Rotate with Sliding limb;
 9. selected four-limb Sliding Rotate twice;
@@ -576,7 +591,7 @@ Questions:
 
 ## User debug target after implementation
 
-- straight + bent L/R arm and leg;
+- product max-extension / near-straight + bent L/R arm and leg;
 - COM down/up/side;
 - COM/Pelvis rotation;
 - non-identity Root/Object placement;
@@ -588,7 +603,7 @@ Questions:
 
 ## Exit
 
-Straight and rotation cases are native-solve correct before broad body integration.
+Max-extension / near-straight and rotation cases are native-solve correct before broad body integration.
 
 ---
 
@@ -867,7 +882,7 @@ At minimum:
 - Free multi Move/Rotate;
 - mixed Free + Sliding Move route;
 - direct body Move/Rotate with passive Sliding;
-- straight Sliding body solve;
+- max-extension / near-straight Sliding body solve;
 - multi-limb Sliding;
 - Sliding W/E;
 - AUTO ON/OFF;
@@ -1022,23 +1037,17 @@ Do not start or redesign:
 
 ## 7. Immediate next action
 
-**E1 through E5 are USER PASS / CLOSED. Start at E6.**
+**E1 through E6 are USER PASS / CLOSED.**
 
-E6 owns the Sliding evaluation foundation only:
+Do not start E7 yet.
 
-1. prove/fix the fully straight Sliding limb singularity with a deterministic transient preferred-bend seed that initializes Blender native IK without becoming a second final solver;
-2. replace/prove the inheritance-sensitive public/result conversion boundary using Blender-native / inheritance-aware pose conversion behavior;
-3. keep authored target/reference, transient solver seed, native solved result, and derived public display explicitly separate;
-4. do not start E7 live COM/Spine/Head dependency inside E6.
+Next:
+1. send one **Astra comprehensive architecture review** covering E1 through E6;
+2. require Astra to save the complete response to the specified local Markdown response file;
+3. Main classifies findings as blocker / improvement / deferred / rejected using current source, frozen contracts, and replay/runtime evidence;
+4. replay only any scenario affected by an accepted blocker;
+5. after the comprehensive review gate closes, proceed to E7.
 
-Use the frozen item loop:
-`PRE challenger -> Main judgment -> implementation -> POST challenger -> install/fresh Blender -> USER FIRST DEBUG TEST -> log/replay loop -> USER FINAL CONFIRMATION`.
+Do **not** send an Astra narrow E6-only review.
 
-Challenger routing remains provisional. E5 used DeepSeek PRE and GLM Agent POST; use **Qwen for E6 PRE** to keep the real-sample rotation balanced, then choose the POST challenger from the evidence needs rather than hard-assigning provider roles.
-
-The two 2026-09-18 P1 findings are now the exact E6 entry criteria:
-
-1. fully straight Sliding arm/leg + COM/body motion can require a deterministic transient seed before native IK solves correctly;
-2. COM/Pelvis rotation needs inheritance-aware native pose conversion; the current manual rest/parent formula is not accepted as proof.
-
-E6 must close those two foundations before E7 body/ancestor integration begins. Do not treat E5's passive-overlay success as proof that the straight-limb or inheritance cases are already solved.
+The ordinary narrow PRE/POST challenger loop remains the implementation workflow for later E-items. Astra is reserved for the comprehensive E1–E6 architecture gate requested here.

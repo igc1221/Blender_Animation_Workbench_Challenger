@@ -108,12 +108,17 @@ def _route_and_mode(context) -> tuple[str, str]:
     if getattr(context, "mode", "") == "POSE":
         if state == "DIRECT_ROTATE" and direct_rotate_available(context):
             return "DIRECT_ROTATE", "ROTATE"
-        if state == "DIRECT_MOVE" and direct_move_available(context):
-            return "DIRECT_MOVE", "MOVE"
-        if state == "FK_MOVE" and fk_joint_move_available(context):
-            return "FK_MOVE", "MOVE"
-        if state == "MOVE" and semantic_move_available(context):
-            return "SEMANTIC_MOVE", "MOVE"
+        if state in {"DIRECT_MOVE", "FK_MOVE", "MOVE"}:
+            # W means "Move" as a persistent tool intent. Re-resolve the
+            # semantic route from the current selection on every gizmo refresh
+            # so switching from a Sliding terminal to COM/Pelvis does not fall
+            # through to Blender's native transform path with stale state.
+            if direct_move_available(context):
+                return "DIRECT_MOVE", "MOVE"
+            if fk_joint_move_available(context):
+                return "FK_MOVE", "MOVE"
+            if semantic_move_available(context):
+                return "SEMANTIC_MOVE", "MOVE"
 
     mode = _native_mode(context)
     if mode and getattr(context, "active_object", None) is not None:

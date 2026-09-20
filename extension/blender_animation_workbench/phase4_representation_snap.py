@@ -46,6 +46,25 @@ class LimbRepresentationCapability:
     terminal_ik_constraint: Any
 
 
+def set_limb_fk_feedback_muted(
+    capability: LimbRepresentationCapability,
+    muted: bool,
+) -> int:
+    """Toggle derived public-FK feedback without changing its configured influence."""
+
+    changed = 0
+    for constraint in (
+        *capability.fk_copy_constraints,
+        capability.terminal_fk_constraint,
+    ):
+        target = bool(muted)
+        if bool(constraint.mute) == target:
+            continue
+        constraint.mute = target
+        changed += 1
+    return changed
+
+
 @dataclass(frozen=True, slots=True)
 class LimbRepresentationResolution:
     capability: LimbRepresentationCapability | None
@@ -1240,6 +1259,16 @@ def execute_representation_snap(
                 0.0,
                 "release terminal IK orientation correspondence",
             )
+            for constraint in (
+                *capability.fk_copy_constraints,
+                capability.terminal_fk_constraint,
+            ):
+                write_constraint(
+                    constraint,
+                    RawFieldKind.CONSTRAINT_MUTE,
+                    False,
+                    "restore FK feedback for Free authority",
+                )
 
         hook.enter(OperationStage.REEVALUATE, operation=plan.operation_id)
         bpy.context.view_layer.update()
