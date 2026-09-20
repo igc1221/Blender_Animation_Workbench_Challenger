@@ -1,0 +1,901 @@
+from __future__ import annotations
+
+import json
+import math
+from datetime import UTC, datetime
+from pathlib import Path
+from time import monotonic_ns
+from typing import Any
+from uuid import uuid4
+
+import bpy
+from bpy.app.handlers import persistent
+
+_TRACE_FILENAME = "awb_interaction_trace.jsonl"
+_PRECISION_TRACE_FILENAME = "awb_precision_trace.jsonl"
+_REPLAY_FILENAME = "awb_replay_latest.json"
+_TRACE_MAX_BYTES = 4 * 1024 * 1024
+_PRECISION_TRACE_MAX_BYTES = 2 * 1024 * 1024
+_TAIL_READ_CHUNK_BYTES = 64 * 1024
+
+_SESSION_ID = uuid4().hex
+_SEQUENCE = 0
+_PRECISION_SEQUENCE = 0
+_LAST_FRAME: tuple[int, float] | None = None
+_WRITE_GUARD = False
+_PRECISION_WRITE_GUARD = False
+_REPLAY_EXECUTION_ACTIVE = False
+_OPERATION_PARENTS: dict[str, str] = {}
+_SCRUB_STATE: dict[str, Any] | None = None
+_PRECISION_PREVIOUS_BONES: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def set_replay_execution_active(active: bool) -> None:
+    global _REPLAY_EXECUTION_ACTIVE
+    _REPLAY_EXECUTION_ACTIVE = bool(active)
+
+
+def replay_execution_active() -> bool:
+    return bool(_REPLAY_EXECUTION_ACTIVE)
+
+
+def new_trace_operation_id(prefix: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in str(prefix)).strip("-")
+    return f"{safe or 'awb'}:{uuid4().hex}"
+
+
+def link_trace_operation(child_operation_id: str | None, parent_operation_id: str | None) -> None:
+    if not child_operation_id or not parent_operation_id or child_operation_id == parent_operation_id:
+        return
+    _OPERATION_PARENTS[str(child_operation_id)] = str(parent_operation_id)
+
+
+def trace_scrub_begin(context, *, source: str) -> None:
+    global _SCRUB_STATE
+    scene = getattr(context, "scene", None)
+    if scene is None:
+        return
+    frame = int(getattr(scene, "frame_current", 0))
+    subframe = float(getattr(scene, "frame_subframe", 0.0))
+    if _SCRUB_STATE is not None:
+        trace_scrub_end(context, cancelled=False)
+    _PRECISION_PREVIOUS_BONES.clear()
+    _SCRUB_STATE = {
+        "source": str(source),
+        "start_frame": frame,
+        "start_subframe": subframe,
+        "min_frame": frame,
+        "max_frame": frame,
+        "frame_change_count": 0,
+    }
+    trace_event(
+        "INPUT",
+        "SCRUB_BEGIN",
+        context=context,
+        source=str(source),
+        start_frame=frame,
+        start_subframe=subframe,
+    )
+    _precision_frame_sample(scene)
+
+
+def trace_scrub_end(context, *, cancelled: bool) -> None:
+    global _SCRUB_STATE
+    state = _SCRUB_STATE
+    if state is None:
+        return
+    scene = getattr(context, "scene", None)
+    end_frame = int(getattr(scene, "frame_current", state["start_frame"])) if scene is not None else state["start_frame"]
+    end_subframe = float(getattr(scene, "frame_subframe", state["start_subframe"])) if scene is not None else state["start_subframe"]
+    trace_event(
+        "INPUT",
+        "SCRUB_END",
+        context=context,
+        source=state["source"],
+        start_frame=state["start_frame"],
+        start_subframe=state["start_subframe"],
+        end_frame=end_frame,
+        end_subframe=end_subframe,
+        min_frame=state["min_frame"],
+        max_frame=state["max_frame"],
+        frame_change_count=state["frame_change_count"],
+        cancelled=bool(cancelled),
+    )
+    _SCRUB_STATE = None
+
+
+def _debug_root_path() -> Path:
+    filepath = str(getattr(bpy.data, "filepath", "") or "")
+    if filepath:
+        blend_dir = Path(filepath).resolve().parent
+        if blend_dir.name.casefold() == "build":
+            return blend_dir.parent / "debug"
+        return blend_dir / "debug"
+    tempdir = str(getattr(bpy.app, "tempdir", "") or "")
+    if tempdir:
+        return Path(tempdir).resolve() / "awb_debug"
+    return Path.cwd() / "debug"
+
+
+def debug_root_path() -> str:
+    return str(_debug_root_path())
+
+
+def _trace_path() -> Path:
+    return _debug_root_path() / _TRACE_FILENAME
+
+
+def trace_path() -> str:
+    return str(_trace_path())
+
+
+def _precision_trace_path() -> Path:
+    return _trace_path().with_name(_PRECISION_TRACE_FILENAME)
+
+
+def precision_trace_path() -> str:
+    return str(_precision_trace_path())
+
+
+def _replay_path() -> Path:
+    return _trace_path().with_name(_REPLAY_FILENAME)
+
+
+def replay_path() -> str:
+    return str(_replay_path())
+
+
+def _archive_existing_session_file(path: Path) -> None:
+    try:
+        if not path.exists() or path.stat().st_size <= 0:
+            return
+        archive = path.with_name(f"{path.stem}.previous{path.suffix}")
+        if archive.exists():
+            archive.unlink()
+        path.replace(archive)
+    except OSError:
+        # Diagnostics must never block Blender startup.
+        return
+
+
+def _read_jsonl_tail(path: Path, limit: int) -> list[dict[str, Any]]:
+    limit = max(1, int(limit))
+    if not path.exists():
+        return []
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            position = handle.tell()
+            chunks: list[bytes] = []
+            newline_count = 0
+            while position > 0 and newline_count <= limit:
+                read_size = min(_TAIL_READ_CHUNK_BYTES, position)
+                position -= read_size
+                handle.seek(position)
+                chunk = handle.read(read_size)
+                chunks.append(chunk)
+                newline_count += chunk.count(b"\n")
+        raw = b"".join(reversed(chunks)).decode("utf-8", errors="replace")
+        records: list[dict[str, Any]] = []
+        for line in raw.splitlines()[-limit:]:
+            try:
+                item = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(item, dict):
+                records.append(item)
+        return records
+    except OSError:
+        return []
+
+
+def read_recent_trace_events(limit: int = 80, *, latest_session_only: bool = True) -> list[dict[str, Any]]:
+    records = _read_jsonl_tail(_trace_path(), limit)
+    if not latest_session_only or not records:
+        return records
+    latest_session = records[-1].get("session_id")
+    if not latest_session:
+        return records
+    return [item for item in records if item.get("session_id") == latest_session]
+
+
+def read_recent_precision_events(limit: int = 120, *, latest_session_only: bool = True) -> list[dict[str, Any]]:
+    records = _read_jsonl_tail(_precision_trace_path(), limit)
+    if not latest_session_only or not records:
+        return records
+    latest_session = records[-1].get("session_id")
+    if not latest_session:
+        return records
+    return [item for item in records if item.get("session_id") == latest_session]
+
+
+def summarize_recent_precision_events(limit: int = 600) -> dict[str, Any]:
+    records = read_recent_precision_events(limit, latest_session_only=True)
+    if not records:
+        return {
+            "sample_count": 0,
+            "frame_range": None,
+            "sampled_bones": [],
+            "largest_one_frame_rotation_steps": [],
+            "latest_limbs": [],
+        }
+
+    largest_by_bone: dict[str, dict[str, Any]] = {}
+    sampled_bones: set[str] = set()
+    skipped_step_count = 0
+    one_frame_step_count = 0
+
+    for record in records:
+        frame = int(record.get("frame", 0))
+        for bone_name, bone in (record.get("bones") or {}).items():
+            sampled_bones.add(str(bone_name))
+            frame_delta = bone.get("frame_delta")
+            one_frame_rotation = bone.get("one_frame_rotation_step_deg")
+            if frame_delta is not None and abs(abs(float(frame_delta)) - 1.0) > 1e-6:
+                skipped_step_count += 1
+            if one_frame_rotation is None:
+                continue
+            one_frame_step_count += 1
+            candidate = {
+                "bone": str(bone_name),
+                "frame": frame,
+                "frame_delta": float(frame_delta) if frame_delta is not None else None,
+                "rotation_step_deg": float(one_frame_rotation),
+                "translation_step": bone.get("one_frame_translation_step"),
+                "roles": bone.get("roles") or (),
+            }
+            existing = largest_by_bone.get(str(bone_name))
+            if existing is None or candidate["rotation_step_deg"] > existing["rotation_step_deg"]:
+                largest_by_bone[str(bone_name)] = candidate
+
+    largest = sorted(
+        largest_by_bone.values(),
+        key=lambda item: float(item["rotation_step_deg"]),
+        reverse=True,
+    )
+    return {
+        "sample_count": len(records),
+        "frame_range": [
+            min(int(item.get("frame", 0)) for item in records),
+            max(int(item.get("frame", 0)) for item in records),
+        ],
+        "sampled_bones": sorted(sampled_bones),
+        "one_frame_step_count": one_frame_step_count,
+        "skipped_step_count": skipped_step_count,
+        "largest_one_frame_rotation_steps": largest[:16],
+        "latest_selected_pose_bones": records[-1].get("selected_pose_bones") or (),
+        "latest_limbs": records[-1].get("limbs") or (),
+    }
+
+
+def _build_replay_script_from_records(
+    events: list[dict[str, Any]],
+    precision: list[dict[str, Any]],
+) -> dict[str, Any]:
+    session_id = events[-1].get("session_id") if events else None
+    actions: list[dict[str, Any]] = []
+    scrub_begin: dict[str, Any] | None = None
+
+    for event in events:
+        if bool(event.get("replay_execution", False)):
+            continue
+        data = event.get("data") or {}
+        replay_action = data.get("replay_action")
+        if isinstance(replay_action, dict):
+            action = dict(replay_action)
+            action["source_event"] = str(event.get("event") or "")
+            action["source_seq"] = event.get("seq")
+            action["operation_id"] = event.get("operation_id")
+            actions.append(action)
+            continue
+
+        event_name = str(event.get("event") or "")
+        if event_name == "SCRUB_BEGIN":
+            scrub_begin = event
+            continue
+        if event_name != "SCRUB_END":
+            continue
+
+        begin_ns = int(scrub_begin.get("monotonic_ns", 0)) if scrub_begin is not None else 0
+        end_ns = int(event.get("monotonic_ns", 0))
+        frames: list[tuple[int, float]] = []
+        for sample in precision:
+            sample_ns = int(sample.get("monotonic_ns", 0))
+            if sample_ns < begin_ns or sample_ns > end_ns:
+                continue
+            frame_item = (
+                int(sample.get("frame", 0)),
+                float(sample.get("subframe", 0.0)),
+            )
+            if not frames or frames[-1] != frame_item:
+                frames.append(frame_item)
+
+        if not frames:
+            start_frame = int(data.get("start_frame", 0))
+            start_subframe = float(data.get("start_subframe", 0.0))
+            end_frame = int(data.get("end_frame", start_frame))
+            end_subframe = float(data.get("end_subframe", start_subframe))
+            frames = [(start_frame, start_subframe)]
+            if frames[-1] != (end_frame, end_subframe):
+                frames.append((end_frame, end_subframe))
+
+        end_state = event.get("state") or {}
+        actions.append(
+            {
+                "kind": "SCRUB",
+                "source_event": "SCRUB_END",
+                "source_seq": event.get("seq"),
+                "source": str(data.get("source", "SCRUB")),
+                "controls": tuple(end_state.get("selected_pose_bones") or ()),
+                "frames": [
+                    {"frame": frame, "subframe": subframe}
+                    for frame, subframe in frames
+                ],
+                "cancelled": bool(data.get("cancelled", False)),
+            }
+        )
+        scrub_begin = None
+
+    return {
+        "schema": "awb-semantic-replay/v1",
+        "source_session_id": session_id,
+        "blend_file": (
+            str((events[-1].get("state") or {}).get("blend_file") or "")
+            if events
+            else ""
+        ),
+        "action_count": len(actions),
+        "actions": actions,
+    }
+
+
+def build_latest_replay_script(
+    *,
+    event_limit: int = 4000,
+    precision_limit: int = 12000,
+) -> dict[str, Any]:
+    events = read_recent_trace_events(event_limit, latest_session_only=True)
+    precision = read_recent_precision_events(precision_limit, latest_session_only=True)
+    return _build_replay_script_from_records(events, precision)
+
+
+def build_previous_replay_script(
+    *,
+    event_limit: int = 4000,
+    precision_limit: int = 12000,
+) -> dict[str, Any]:
+    event_path = _trace_path().with_name(f"{_trace_path().stem}.previous{_trace_path().suffix}")
+    precision_path = _precision_trace_path().with_name(
+        f"{_precision_trace_path().stem}.previous{_precision_trace_path().suffix}"
+    )
+    events = _read_jsonl_tail(event_path, event_limit)
+    precision = _read_jsonl_tail(precision_path, precision_limit)
+    if events:
+        latest_session = events[-1].get("session_id")
+        if latest_session:
+            events = [item for item in events if item.get("session_id") == latest_session]
+            precision = [item for item in precision if item.get("session_id") == latest_session]
+    return _build_replay_script_from_records(events, precision)
+
+
+def recover_previous_replay_script() -> str:
+    script = build_previous_replay_script()
+    path = _replay_path()
+    if int(script.get("action_count", 0)) <= 0:
+        return str(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f"{path.name}.tmp")
+        temp_path.write_text(
+            json.dumps(script, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp_path.replace(path)
+    except OSError:
+        return str(path)
+    return str(path)
+
+
+def persist_latest_replay_script() -> str:
+    script = build_latest_replay_script()
+    path = _replay_path()
+    if int(script.get("action_count", 0)) <= 0 and path.exists():
+        return str(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f"{path.name}.tmp")
+        temp_path.write_text(
+            json.dumps(script, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp_path.replace(path)
+    except OSError:
+        return str(path)
+    return str(path)
+
+
+def _json_safe(value: Any):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    enum_value = getattr(value, "value", None)
+    if isinstance(enum_value, (str, int, float, bool)):
+        return enum_value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list, set)):
+        return [_json_safe(item) for item in value]
+    try:
+        return [float(item) for item in value]
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _context_snapshot(context) -> dict[str, Any]:
+    context = context or getattr(bpy, "context", None)
+    scene = getattr(context, "scene", None) if context is not None else None
+    active_object = getattr(context, "active_object", None) if context is not None else None
+    selected_objects = []
+    selected_pose_bones = []
+    try:
+        selected_objects = [str(obj.name) for obj in tuple(getattr(context, "selected_objects", ()) or ())]
+    except (ReferenceError, RuntimeError):
+        pass
+    try:
+        selected_pose_bones = [
+            str(bone.name) for bone in tuple(getattr(context, "selected_pose_bones", ()) or ())
+        ]
+    except (ReferenceError, RuntimeError):
+        pass
+
+    frame = int(getattr(scene, "frame_current", 0)) if scene is not None else None
+    subframe = float(getattr(scene, "frame_subframe", 0.0)) if scene is not None else None
+    auto_key = bool(getattr(scene, "baw_auto_key_enabled", False)) if scene is not None else False
+    semantic_mode = (
+        str(getattr(scene, "baw_rigped_semantic_transform_mode", "NONE"))
+        if scene is not None
+        else "NONE"
+    )
+    tool_settings = getattr(scene, "tool_settings", None) if scene is not None else None
+    window_manager = getattr(context, "window_manager", None) if context is not None else None
+    return {
+        "blend_file": str(getattr(bpy.data, "filepath", "") or ""),
+        "mode": str(getattr(context, "mode", "")) if context is not None else "",
+        "frame": frame,
+        "subframe": subframe,
+        "active_object": str(getattr(active_object, "name", "")) if active_object is not None else None,
+        "selected_objects": selected_objects,
+        "selected_pose_bones": selected_pose_bones,
+        "awb_auto_key": auto_key,
+        "native_auto_key": bool(getattr(tool_settings, "use_keyframe_insert_auto", False)),
+        "semantic_transform_mode": semantic_mode,
+        "trackbar_frame_drag": bool(
+            getattr(window_manager, "baw_trackbar_frame_drag_active", False)
+        ) if window_manager is not None else False,
+        "rigped_transform_drag": bool(
+            getattr(window_manager, "baw_rigped_semantic_move_drag_active", False)
+        ) if window_manager is not None else False,
+    }
+
+
+def _rotate_if_needed(path: Path, *, max_bytes: int = _TRACE_MAX_BYTES) -> None:
+    try:
+        if not path.exists() or path.stat().st_size < int(max_bytes):
+            return
+        archive = path.with_name(f"{path.stem}.previous{path.suffix}")
+        if archive.exists():
+            archive.unlink()
+        path.replace(archive)
+    except OSError:
+        # Tracing is diagnostic-only and must never interfere with animation.
+        return
+
+
+def _precision_fallback_pose_bones(context) -> tuple[tuple[Any, Any, tuple[str, ...]], ...]:
+    try:
+        selected = tuple(getattr(context, "selected_pose_bones", ()) or ())
+    except (ReferenceError, RuntimeError):
+        return ()
+    active_object = getattr(context, "active_object", None)
+    if active_object is None:
+        return ()
+    ordered: list[tuple[Any, Any, tuple[str, ...]]] = []
+    seen: set[tuple[str, str]] = set()
+    for pose_bone in selected:
+        current = pose_bone
+        depth = 0
+        while current is not None and depth < 3:
+            name = str(getattr(current, "name", ""))
+            key = (str(getattr(active_object, "name", "")), name)
+            if name and key not in seen:
+                role = ("SELECTED",) if depth == 0 else (f"PARENT_{depth}",)
+                ordered.append((active_object, current, role))
+                seen.add(key)
+            current = getattr(current, "parent", None)
+            depth += 1
+    return tuple(ordered)
+
+
+def _precision_semantic_limb_targets(
+    context,
+    scene,
+) -> tuple[
+    tuple[tuple[Any, Any, tuple[str, ...]], ...],
+    tuple[dict[str, Any], ...],
+]:
+    """Resolve full generated Rigped limb(s) touched by the native selection.
+
+    Precision tracing must follow the whole semantic dependency domain rather
+    than only the currently selected public control. This lets a Calf selection
+    still capture the terminal Foot plus hidden IK target/pole/solver authority.
+    """
+
+    try:
+        from .character_metadata import resolve_character
+        from .phase4_contact_authoring import _selected_mappings
+        from .phase4_contact_model import AWB_CONTACT_STATE_PROPERTY, type_for_state_value
+        from .rigped_contract import resolve_rigped_target
+        from .semantic_adapter import control_context_for_context
+    except Exception:  # noqa: BLE001 -- tracing imports must degrade to fallback only
+        return _precision_fallback_pose_bones(context), ()
+
+    try:
+        resolution = resolve_rigped_target(scene, control_context_for_context(context))
+        target = resolution.target
+        if target is None or not target.selected_binding_ids:
+            return _precision_fallback_pose_bones(context), ()
+        view = resolve_character(scene, target.character_id)
+        mappings = _selected_mappings(view, target.selected_binding_ids)
+    except Exception:  # noqa: BLE001 -- precision tracing is best-effort diagnostics
+        return _precision_fallback_pose_bones(context), ()
+
+    if not mappings:
+        return _precision_fallback_pose_bones(context), ()
+
+    ordered: list[tuple[Any, Any, tuple[str, ...]]] = []
+    roles_by_key: dict[tuple[str, str], set[str]] = {}
+    target_by_key: dict[tuple[str, str], tuple[Any, Any]] = {}
+    limb_rows: list[dict[str, Any]] = []
+
+    def add_resolved(resolved, role: str) -> None:
+        if resolved is None:
+            return
+        owner = getattr(resolved, "owner_object", None)
+        pose_bone = getattr(resolved, "target", None)
+        if owner is None or not isinstance(pose_bone, bpy.types.PoseBone):
+            return
+        key = (str(getattr(owner, "name", "")), str(getattr(pose_bone, "name", "")))
+        if not key[1]:
+            return
+        roles_by_key.setdefault(key, set()).add(role)
+        target_by_key[key] = (owner, pose_bone)
+
+    for mapping, capability in mappings:
+        for resolved in tuple(getattr(capability, "fk_controls", ()) or ()):
+            add_resolved(resolved, "FK")
+        add_resolved(getattr(capability, "authored_terminal", None), "TERMINAL")
+        for resolved in tuple(getattr(capability, "result_controls", ()) or ()):
+            add_resolved(resolved, "RESULT")
+        add_resolved(getattr(capability, "result_terminal", None), "RESULT_TERMINAL")
+
+        native_ik = getattr(capability, "native_ik", None)
+        if native_ik is not None:
+            add_resolved(getattr(native_ik, "solver_owner", None), "IK_SOLVER")
+            add_resolved(getattr(native_ik, "ik_target", None), "IK_TARGET")
+            add_resolved(getattr(native_ik, "pole_target", None), "IK_POLE")
+
+        solver_resolved = getattr(native_ik, "solver_owner", None) if native_ik is not None else None
+        solver_bone = getattr(solver_resolved, "target", None)
+        raw_contact_state = None
+        contact_type = None
+        if isinstance(solver_bone, bpy.types.PoseBone):
+            try:
+                raw_contact_state = float(solver_bone.get(AWB_CONTACT_STATE_PROPERTY, -1.0))
+                resolved_type = type_for_state_value(raw_contact_state)
+                contact_type = resolved_type.value if resolved_type is not None else None
+            except Exception:  # noqa: BLE001 -- malformed trace data must not affect animation
+                raw_contact_state = None
+                contact_type = None
+
+        constraint = getattr(native_ik, "constraint", None) if native_ik is not None else None
+        terminal_constraint = getattr(capability, "terminal_ik_constraint", None)
+        limb_rows.append(
+            {
+                "mapping_id": str(getattr(mapping, "mapping_id", "")),
+                "contact_type": contact_type,
+                "contact_state_raw": raw_contact_state,
+                "ik_influence": (
+                    float(getattr(constraint, "influence", 0.0))
+                    if constraint is not None
+                    else None
+                ),
+                "terminal_ik_influence": (
+                    float(getattr(terminal_constraint, "influence", 0.0))
+                    if terminal_constraint is not None
+                    else None
+                ),
+                "pole_angle": (
+                    float(getattr(constraint, "pole_angle", 0.0))
+                    if constraint is not None
+                    else None
+                ),
+                "solver_bone": (
+                    str(getattr(solver_bone, "name", ""))
+                    if solver_bone is not None
+                    else None
+                ),
+                "ik_target": (
+                    str(getattr(getattr(getattr(native_ik, "ik_target", None), "target", None), "name", ""))
+                    if native_ik is not None
+                    else None
+                ),
+                "pole_target": (
+                    str(getattr(getattr(getattr(native_ik, "pole_target", None), "target", None), "name", ""))
+                    if native_ik is not None
+                    else None
+                ),
+            }
+        )
+
+    for key, pair in target_by_key.items():
+        owner, pose_bone = pair
+        ordered.append((owner, pose_bone, tuple(sorted(roles_by_key.get(key, ())))))
+    return tuple(ordered), tuple(limb_rows)
+
+
+def _quaternion_step_deg(
+    previous: tuple[float, ...] | None,
+    current: tuple[float, float, float, float],
+) -> float | None:
+    if previous is None or len(previous) != 4:
+        return None
+    dot = abs(sum(float(a) * float(b) for a, b in zip(previous, current)))
+    dot = max(-1.0, min(1.0, dot))
+    return math.degrees(2.0 * math.acos(dot))
+
+
+def _precision_frame_sample(scene) -> None:
+    global _PRECISION_SEQUENCE, _PRECISION_WRITE_GUARD
+    if _PRECISION_WRITE_GUARD or _SCRUB_STATE is None:
+        return
+    context = getattr(bpy, "context", None)
+    active_object = getattr(context, "active_object", None) if context is not None else None
+    if active_object is None or str(getattr(active_object, "type", "")) != "ARMATURE":
+        return
+    targets, limbs = _precision_semantic_limb_targets(context, scene)
+    if not targets:
+        return
+    _PRECISION_WRITE_GUARD = True
+    try:
+        path = _precision_trace_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_if_needed(path, max_bytes=_PRECISION_TRACE_MAX_BYTES)
+        payload: dict[str, Any] = {}
+        object_name = str(getattr(active_object, "name", ""))
+        current_frame = int(getattr(scene, "frame_current", 0))
+        current_subframe = float(getattr(scene, "frame_subframe", 0.0))
+        current_time = float(current_frame) + current_subframe
+        for owner, pose_bone, roles in targets:
+            owner_name = str(getattr(owner, "name", ""))
+            bone_name = str(getattr(pose_bone, "name", ""))
+            world_matrix = owner.matrix_world @ pose_bone.matrix
+            world_location = tuple(float(value) for value in world_matrix.to_translation())
+            world_quaternion = tuple(float(value) for value in world_matrix.to_quaternion())
+            basis_quaternion = tuple(float(value) for value in pose_bone.matrix_basis.to_quaternion())
+            key = (owner_name, bone_name)
+            previous = _PRECISION_PREVIOUS_BONES.get(key)
+            rotation_step = _quaternion_step_deg(
+                previous.get("world_quaternion") if previous is not None else None,
+                world_quaternion,
+            )
+            translation_step = None
+            frame_delta = None
+            if previous is not None:
+                prev_loc = previous.get("world_location")
+                if prev_loc is not None and len(prev_loc) == 3:
+                    translation_step = math.sqrt(
+                        sum((float(a) - float(b)) ** 2 for a, b in zip(prev_loc, world_location))
+                    )
+                previous_time = previous.get("frame_time")
+                if previous_time is not None:
+                    frame_delta = current_time - float(previous_time)
+            is_one_frame_step = (
+                frame_delta is not None
+                and abs(abs(float(frame_delta)) - 1.0) <= 1e-6
+            )
+            _PRECISION_PREVIOUS_BONES[key] = {
+                "world_quaternion": world_quaternion,
+                "world_location": world_location,
+                "frame_time": current_time,
+            }
+            payload[bone_name] = {
+                "owner_object": owner_name,
+                "roles": roles,
+                "world_location": world_location,
+                "world_quaternion": world_quaternion,
+                "basis_quaternion": basis_quaternion,
+                "frame_delta": frame_delta,
+                "rotation_step_deg": rotation_step,
+                "translation_step": translation_step,
+                "one_frame_rotation_step_deg": rotation_step if is_one_frame_step else None,
+                "one_frame_translation_step": translation_step if is_one_frame_step else None,
+            }
+        _PRECISION_SEQUENCE += 1
+        record = {
+            "schema": "awb-precision-trace/v1",
+            "session_id": _SESSION_ID,
+            "seq": _PRECISION_SEQUENCE,
+            "replay_execution": bool(_REPLAY_EXECUTION_ACTIVE),
+            "utc": datetime.now(UTC).isoformat(timespec="milliseconds"),
+            "monotonic_ns": monotonic_ns(),
+            "frame": current_frame,
+            "subframe": current_subframe,
+            "source": str(_SCRUB_STATE.get("source", "SCRUB")),
+            "active_object": object_name,
+            "selected_pose_bones": [
+                str(getattr(item, "name", "")) for item in tuple(getattr(context, "selected_pose_bones", ()) or ())
+            ],
+            "limbs": limbs,
+            "bones": payload,
+        }
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+            handle.write("\n")
+    except Exception:  # noqa: BLE001, S110 -- diagnostics must never alter user operations
+        pass
+    finally:
+        _PRECISION_WRITE_GUARD = False
+
+
+def trace_event(
+    channel: str,
+    event: str,
+    *,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
+    context=None,
+    **data,
+) -> None:
+    global _SEQUENCE, _WRITE_GUARD
+    if _WRITE_GUARD:
+        return
+    _WRITE_GUARD = True
+    try:
+        path = _trace_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_if_needed(path)
+        _SEQUENCE += 1
+        resolved_parent = parent_operation_id
+        if resolved_parent is None and operation_id is not None:
+            resolved_parent = _OPERATION_PARENTS.get(str(operation_id))
+        record = {
+            "schema": "awb-interaction-trace/v1",
+            "session_id": _SESSION_ID,
+            "seq": _SEQUENCE,
+            "replay_execution": bool(_REPLAY_EXECUTION_ACTIVE),
+            "utc": datetime.now(UTC).isoformat(timespec="milliseconds"),
+            "monotonic_ns": monotonic_ns(),
+            "channel": str(channel),
+            "event": str(event),
+            "operation_id": operation_id,
+            "parent_operation_id": resolved_parent,
+            "state": _context_snapshot(context),
+            "data": _json_safe(data),
+        }
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+            handle.write("\n")
+        if (
+            not _REPLAY_EXECUTION_ACTIVE
+            and str(event) in {
+                "AUTO_KEY_TOGGLE",
+                "CONTACT_COMMIT",
+                "TRANSFORM_COMMIT",
+                "SCRUB_END",
+            }
+        ):
+            persist_latest_replay_script()
+    except Exception:  # noqa: BLE001, S110 -- trace persistence is strictly non-blocking
+        # Never let diagnostics alter the user's Blender operation.
+        pass
+    finally:
+        _WRITE_GUARD = False
+
+
+def trace_exception(
+    channel: str,
+    event: str,
+    exc: BaseException,
+    *,
+    operation_id: str | None = None,
+    context=None,
+    **data,
+) -> None:
+    trace_event(
+        channel,
+        event,
+        operation_id=operation_id,
+        context=context,
+        error_type=type(exc).__name__,
+        error=str(exc),
+        **data,
+    )
+
+
+@persistent
+def _trace_frame_change_post(scene, *_args) -> None:
+    global _LAST_FRAME
+    current = (
+        int(getattr(scene, "frame_current", 0)),
+        float(getattr(scene, "frame_subframe", 0.0)),
+    )
+    previous = _LAST_FRAME
+    _LAST_FRAME = current
+    if previous is None or previous == current:
+        return
+    if _SCRUB_STATE is not None:
+        _SCRUB_STATE["frame_change_count"] = int(_SCRUB_STATE["frame_change_count"]) + 1
+        _SCRUB_STATE["min_frame"] = min(int(_SCRUB_STATE["min_frame"]), current[0])
+        _SCRUB_STATE["max_frame"] = max(int(_SCRUB_STATE["max_frame"]), current[0])
+        _precision_frame_sample(scene)
+        return
+    trace_event(
+        "INPUT",
+        "FRAME_CHANGE",
+        context=bpy.context,
+        from_frame=previous[0],
+        from_subframe=previous[1],
+        to_frame=current[0],
+        to_subframe=current[1],
+    )
+
+
+@persistent
+def _trace_load_post(*_args) -> None:
+    global _LAST_FRAME, _SCRUB_STATE
+    _SCRUB_STATE = None
+    _OPERATION_PARENTS.clear()
+    # At addon registration time Blender may not yet expose the target .blend
+    # filepath, so the initial trace path can live under the temp directory.
+    # Once load_post fires, preserve and rotate any existing trace beside the
+    # actual loaded file before appending this session's FILE_LOAD event.
+    persist_latest_replay_script()
+    _archive_existing_session_file(_trace_path())
+    _archive_existing_session_file(_precision_trace_path())
+    _PRECISION_PREVIOUS_BONES.clear()
+    scene = getattr(bpy.context, "scene", None)
+    _LAST_FRAME = (
+        int(getattr(scene, "frame_current", 0)),
+        float(getattr(scene, "frame_subframe", 0.0)),
+    ) if scene is not None else None
+    trace_event("LIFECYCLE", "FILE_LOAD", context=bpy.context)
+
+
+def register_debug_trace_handlers() -> None:
+    global _LAST_FRAME
+    # Preserve the outgoing session's semantic replay before rotating its
+    # bounded trace files. Replay-only sessions produce zero user actions, and
+    # persist_latest_replay_script() deliberately leaves an existing compact
+    # replay untouched in that case.
+    persist_latest_replay_script()
+    _archive_existing_session_file(_trace_path())
+    _archive_existing_session_file(_precision_trace_path())
+    _OPERATION_PARENTS.clear()
+    _PRECISION_PREVIOUS_BONES.clear()
+    scene = getattr(bpy.context, "scene", None)
+    _LAST_FRAME = (
+        int(getattr(scene, "frame_current", 0)),
+        float(getattr(scene, "frame_subframe", 0.0)),
+    ) if scene is not None else None
+    if _trace_frame_change_post not in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.append(_trace_frame_change_post)
+    if _trace_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_trace_load_post)
+    trace_event("LIFECYCLE", "SESSION_START", context=bpy.context, trace_path=trace_path())
+
+
+def unregister_debug_trace_handlers() -> None:
+    trace_event("LIFECYCLE", "SESSION_END", context=bpy.context)
+    if _trace_frame_change_post in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(_trace_frame_change_post)
+    if _trace_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_trace_load_post)

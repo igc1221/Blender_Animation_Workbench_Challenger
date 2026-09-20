@@ -1,0 +1,12 @@
+schema_version = "1.0.0"
+id = "blender_animation_workbench"
+version = "0.0.1"
+name = "Blender Animation Workbench"
+tagline = "Character animation workflow research and tooling"
+maintainer = "Blender Animation Workbench Project"
+type = "add-on"
+blender_version_min = "5.2.0"
+license = ["SPDX:GPL-2.0-or-later"]
+
+[permissions]
+files = "Write local AWB diagnostic trace logs"
