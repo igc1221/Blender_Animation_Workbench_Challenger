@@ -12,6 +12,27 @@
 > - `PHASE4_RIGPED_STABILIZATION_OWNERSHIP_PLAN.md` (2026-09-19 ownership gate)
 > - `docs/AGENT/ASTRA_REVIEW_RESPONSE_PHASE4_STABILIZATION_20260919.md` (2026-09-19 Astra architecture response)
 
+## 2026-09-20 handoff override — E6 CLOSED / ASTRA + GLM REVIEW GATE
+
+Before E7, Main must consume and adjudicate two comprehensive E1–E6 reviews:
+
+1. Astra manual architecture review:
+   - request: `docs/AGENT/ASTRA_REVIEW_REQUEST_E1_E6_COMPREHENSIVE_20260920.md`
+   - required response: `docs/AGENT/ASTRA_REVIEW_RESPONSE_E1_E6_COMPREHENSIVE_20260920.md`
+2. GLM External Web Bridge review:
+   - provider: `glm`
+   - task id: `awb-e1-e6-comprehensive-glm-20260920-01`
+   - bridge source mirror commit: `2dab31174c26e9362e6bd8a9ed78e072d2c314a0`
+
+Main must compare findings by contract/source/runtime evidence, not by reviewer vote. Accepted blockers get the smallest correction plus affected replay/static proof. E7 remains blocked until this gate is explicitly closed.
+
+Worker state at handoff:
+- Luna high-1/high-2/high-3/max-1 clean
+- active Luna executions 0
+- pending worker-learning reviews 0
+
+---
+
 ## 2026-09-20 execution override — E6 CLOSED / ASTRA E1–E6 REVIEW GATE
 
 E1 through E6 are **USER PASS / CLOSED**.
