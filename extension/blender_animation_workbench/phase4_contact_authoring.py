@@ -806,6 +806,58 @@ def _journal_contact_authoring_latch(
     _set_contact_authoring_latch(capability, contact_type)
 
 
+def _trace_contact_rollback_report(
+    event: str,
+    *,
+    operation_id: str,
+    journal: MutationJournal,
+    context,
+    rollback=None,
+    **data,
+) -> None:
+    payload = {
+        "journal_state": getattr(journal.state, "value", str(journal.state)),
+        "receipt_count": len(journal.receipts),
+        **data,
+    }
+    if rollback is not None:
+        payload.update(
+            rollback_status=getattr(rollback.status, "value", str(rollback.status)),
+            residue_count=len(rollback.residue_receipts),
+            residue_receipts=tuple(
+                {
+                    "ordinal": int(receipt.ordinal),
+                    "type": type(receipt).__name__,
+                }
+                for receipt in rollback.residue_receipts
+            ),
+            quarantine=tuple(
+                {
+                    "character_id": item.character_id,
+                    "setup_revision": int(item.setup_revision),
+                    "setup_signature": item.setup_signature,
+                    "owner_ptr": item.owner_ptr,
+                    "bag_ptr": item.bag_ptr,
+                }
+                for item in rollback.quarantine_keys
+            ),
+            rollback_diagnostics=tuple(
+                {
+                    "code": item.code,
+                    "detail": item.detail,
+                }
+                for item in rollback.diagnostics
+            ),
+        )
+    trace_event(
+        "WRITER",
+        event,
+        operation_id=operation_id,
+        context=context,
+        **payload,
+    )
+
+
 def _reset_contact_authoring_latch(capability) -> None:
     solver_bone = capability.native_ik.solver_owner.target
     solver_bone[AWB_CONTACT_AUTHORING_STATE_PROPERTY] = float(ContactStateValue.UNINITIALIZED)
@@ -4175,6 +4227,17 @@ def execute_contact_intent_plan(
             operation=contact_plan.operation_id,
             detail="rollback failed Contact bundle",
         )
+        _trace_contact_rollback_report(
+            "CONTACT_ROLLBACK_BEGIN",
+            operation_id=contact_plan.operation_id,
+            journal=journal,
+            context=bpy.context,
+            trigger=trigger.value,
+            mapping_id=intent.mapping_id,
+            target_type=intent.target_type.value,
+            rows_written=rows_written,
+            created_fcurves=created_fcurves,
+        )
         rollback = journal.rollback()
         _reevaluate_contact_frame_preserving_public_pose(
             scene,
@@ -4182,6 +4245,18 @@ def execute_contact_intent_plan(
             contact_plan.subframe,
         )
         hook.enter(OperationStage.ROLLBACK_VERIFY, operation=contact_plan.operation_id)
+        _trace_contact_rollback_report(
+            "CONTACT_ROLLBACK_END",
+            operation_id=contact_plan.operation_id,
+            journal=journal,
+            context=bpy.context,
+            rollback=rollback,
+            trigger=trigger.value,
+            mapping_id=intent.mapping_id,
+            target_type=intent.target_type.value,
+            rows_written=rows_written,
+            created_fcurves=created_fcurves,
+        )
         if rollback.residue_receipts:
             detail = " | ".join(item.detail for item in rollback.diagnostics)
             raise ContactAuthoringError(
@@ -4790,6 +4865,15 @@ def execute_contact_batch_intent_plan(
             operation=contact_plan.operation_id,
             detail="rollback failed I20 multi-limb Contact bundle",
         )
+        _trace_contact_rollback_report(
+            "CONTACT_BATCH_ROLLBACK_BEGIN",
+            operation_id=contact_plan.operation_id,
+            journal=journal,
+            context=bpy.context,
+            trigger=trigger.value,
+            rows_written=rows_written,
+            created_fcurves=created_fcurves,
+        )
         rollback = journal.rollback()
         _reevaluate_contact_frame_preserving_public_pose(
             scene,
@@ -4797,6 +4881,16 @@ def execute_contact_batch_intent_plan(
             contact_plan.subframe,
         )
         hook.enter(OperationStage.ROLLBACK_VERIFY, operation=contact_plan.operation_id)
+        _trace_contact_rollback_report(
+            "CONTACT_BATCH_ROLLBACK_END",
+            operation_id=contact_plan.operation_id,
+            journal=journal,
+            context=bpy.context,
+            rollback=rollback,
+            trigger=trigger.value,
+            rows_written=rows_written,
+            created_fcurves=created_fcurves,
+        )
         if rollback.residue_receipts:
             detail = " | ".join(item.detail for item in rollback.diagnostics)
             raise ContactAuthoringError(

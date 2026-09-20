@@ -127,3 +127,46 @@ def test_e3_contact_latch_is_journaled_before_persistent_commit() -> None:
             assert len(call.args) >= 4
             assert isinstance(call.args[3], ast.Name)
             assert call.args[3].id == "journal"
+
+
+def test_e4_mixed_contact_failure_traces_rollback_result_and_residue() -> None:
+    helper = _function("_trace_contact_rollback_report")
+    helper_source = ast.get_source_segment(
+        SOURCE_PATH.read_text(encoding="utf-8"),
+        helper,
+    )
+    assert helper_source is not None
+    for field in (
+        "journal_state",
+        "receipt_count",
+        "rollback_status",
+        "residue_count",
+        "residue_receipts",
+        "quarantine",
+        "rollback_diagnostics",
+    ):
+        assert field in helper_source
+
+    expectations = (
+        (
+            "execute_contact_intent_plan",
+            "CONTACT_ROLLBACK_BEGIN",
+            "CONTACT_ROLLBACK_END",
+        ),
+        (
+            "execute_contact_batch_intent_plan",
+            "CONTACT_BATCH_ROLLBACK_BEGIN",
+            "CONTACT_BATCH_ROLLBACK_END",
+        ),
+    )
+    for function_name, begin_event, end_event in expectations:
+        function = _function(function_name)
+        source = ast.get_source_segment(
+            SOURCE_PATH.read_text(encoding="utf-8"),
+            function,
+        )
+        assert source is not None
+        assert source.count(f'\"{begin_event}\"') == 1
+        assert source.count(f'\"{end_event}\"') == 1
+        assert source.index(f'\"{begin_event}\"') < source.index("rollback = journal.rollback()")
+        assert source.index("rollback = journal.rollback()") < source.index(f'\"{end_event}\"')
