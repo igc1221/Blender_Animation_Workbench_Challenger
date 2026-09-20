@@ -168,5 +168,12 @@ def test_e4_mixed_contact_failure_traces_rollback_result_and_residue() -> None:
         assert source is not None
         assert source.count(f'\"{begin_event}\"') == 1
         assert source.count(f'\"{end_event}\"') == 1
-        assert source.index(f'\"{begin_event}\"') < source.index("rollback = journal.rollback()")
-        assert source.index("rollback = journal.rollback()") < source.index(f'\"{end_event}\"')
+        rollback_index = source.index("rollback = journal.rollback()")
+        end_index = source.index(f'\"{end_event}\"', rollback_index)
+        reevaluate_index = source.index(
+            "_reevaluate_contact_frame_preserving_public_pose(",
+            rollback_index,
+        )
+        assert source.index(f'\"{begin_event}\"') < rollback_index
+        assert rollback_index < end_index
+        assert end_index < reevaluate_index

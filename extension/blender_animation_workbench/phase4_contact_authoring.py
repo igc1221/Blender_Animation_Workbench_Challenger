@@ -4239,12 +4239,6 @@ def execute_contact_intent_plan(
             created_fcurves=created_fcurves,
         )
         rollback = journal.rollback()
-        _reevaluate_contact_frame_preserving_public_pose(
-            scene,
-            contact_plan.frame,
-            contact_plan.subframe,
-        )
-        hook.enter(OperationStage.ROLLBACK_VERIFY, operation=contact_plan.operation_id)
         _trace_contact_rollback_report(
             "CONTACT_ROLLBACK_END",
             operation_id=contact_plan.operation_id,
@@ -4257,6 +4251,12 @@ def execute_contact_intent_plan(
             rows_written=rows_written,
             created_fcurves=created_fcurves,
         )
+        _reevaluate_contact_frame_preserving_public_pose(
+            scene,
+            contact_plan.frame,
+            contact_plan.subframe,
+        )
+        hook.enter(OperationStage.ROLLBACK_VERIFY, operation=contact_plan.operation_id)
         if rollback.residue_receipts:
             detail = " | ".join(item.detail for item in rollback.diagnostics)
             raise ContactAuthoringError(
@@ -4875,12 +4875,6 @@ def execute_contact_batch_intent_plan(
             created_fcurves=created_fcurves,
         )
         rollback = journal.rollback()
-        _reevaluate_contact_frame_preserving_public_pose(
-            scene,
-            contact_plan.frame,
-            contact_plan.subframe,
-        )
-        hook.enter(OperationStage.ROLLBACK_VERIFY, operation=contact_plan.operation_id)
         _trace_contact_rollback_report(
             "CONTACT_BATCH_ROLLBACK_END",
             operation_id=contact_plan.operation_id,
@@ -4891,6 +4885,12 @@ def execute_contact_batch_intent_plan(
             rows_written=rows_written,
             created_fcurves=created_fcurves,
         )
+        _reevaluate_contact_frame_preserving_public_pose(
+            scene,
+            contact_plan.frame,
+            contact_plan.subframe,
+        )
+        hook.enter(OperationStage.ROLLBACK_VERIFY, operation=contact_plan.operation_id)
         if rollback.residue_receipts:
             detail = " | ".join(item.detail for item in rollback.diagnostics)
             raise ContactAuthoringError(
