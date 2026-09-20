@@ -44,6 +44,7 @@ from .phase4_preflight import (
     _find_fcurve,
     _rotation_descriptor,
     _runtime_pointer,
+    build_direct_key_plan,
     build_kinematic_dependency_plan,
     validate_plan_fresh,
 )
@@ -76,6 +77,7 @@ from .phase4_writer import (
     _write_channel_key,
 )
 from .rigped_contract import RigpedCapability, resolve_rigped_target
+from .rigped_operation_domain import resolve_operation_domain
 from .semantic_adapter import (
     assigned_channelbag,
     channel_binding_token,
@@ -3868,6 +3870,14 @@ def execute_contact_intent_plan(
         point_location_path = control_property_path(hold.point_control.target, "location")
         anchor_location_paths = {hold_location_path, point_location_path}
         for channel in transform_rows:
+            _prepare_semantic_state_property(
+                owner,
+                channel,
+                contact_plan,
+                journal,
+                stage_write,
+                semantic_properties_prepared,
+            )
             fcurve, created = _ensure_fcurve(owner, bag, channel, contact_plan, journal, stage_write)
             created_fcurves += int(created)
             _write_channel_key(owner, bag, fcurve, channel, time, contact_plan, journal, stage_write)
@@ -4340,6 +4350,7 @@ def execute_contact_batch_intent_plan(
 
     rows_written = 0
     created_fcurves = 0
+    semantic_properties_prepared: set[tuple[int, str]] = set()
     time = float(contact_plan.frame) + float(contact_plan.subframe)
     constant_anchor_paths = {
         control_property_path(item.hold.control.target, "location")
@@ -4412,6 +4423,14 @@ def execute_contact_batch_intent_plan(
                     rows_written += 1
 
         for channel in group.channels:
+            _prepare_semantic_state_property(
+                owner,
+                channel,
+                contact_plan,
+                journal,
+                stage_write,
+                semantic_properties_prepared,
+            )
             fcurve, created = _ensure_fcurve(
                 owner,
                 bag,
@@ -4746,16 +4765,57 @@ def execute_contact_command(
     selector_character_id: str | None = None,
     hook: StageHook | None = None,
 ) -> ContactAuthoringResult:
-    resolution = resolve_rigped_target(
+    """Coordinate one explicit C operation from one frozen selection domain.
+
+    E3 keeps Contact as the transaction owner.  Supported direct controls are
+    planned independently through the E2 subset API, then supplied as Contact
+    closure rows so one Contact journal owns every persistent mutation, rollback,
+    verification pass, and commit.  Direct-only C remains fail-closed.
+    """
+
+    operation_domain = resolve_operation_domain(
         scene,
         control_context,
         selector_character_id=selector_character_id,
     )
-    selected_mapping_id: str | None = None
-    if resolution.target is not None:
-        view = resolve_character(scene, resolution.target.character_id)
-        selected_mappings = _selected_contact_command_mappings(view, resolution.target)
-        if len(selected_mappings) > 1:
+    snapshot = operation_domain.snapshot
+    if snapshot is None or operation_domain.issues:
+        character_id = snapshot.character_id if snapshot is not None else None
+        return ContactAuthoringResult(
+            False,
+            diagnostics=tuple(
+                _diagnostic(
+                    operation_id,
+                    issue.code,
+                    issue.detail,
+                    character_id=character_id,
+                )
+                for issue in operation_domain.issues
+            ),
+        )
+
+    mapping_ids = tuple(snapshot.contact_mapping_ids)
+    if not mapping_ids:
+        # Direct-only C is intentionally not part of this stabilization.
+        return ContactAuthoringResult(False)
+
+    direct_plan: OperationPlan | None = None
+    if snapshot.supported_direct_binding_ids:
+        direct_built = build_direct_key_plan(
+            scene,
+            control_context,
+            operation_id=operation_id,
+            selector_character_id=selector_character_id,
+            include_rigped_free_marker=True,
+            binding_ids=tuple(snapshot.supported_direct_binding_ids),
+            operation_domain=operation_domain,
+        )
+        if not direct_built.ok or direct_built.plan is None:
+            return ContactAuthoringResult(False, diagnostics=direct_built.diagnostics)
+        direct_plan = direct_built.plan
+
+    try:
+        if len(mapping_ids) > 1:
             batch_build = build_contact_batch_intent_plan(
                 scene,
                 control_context,
@@ -4765,6 +4825,7 @@ def execute_contact_command(
                 plant_space=plant_space,
                 contact_point_local=contact_point_local,
                 selector_character_id=selector_character_id,
+                mapping_ids=mapping_ids,
             )
             if not batch_build.ok or batch_build.plan is None:
                 return ContactAuthoringResult(False, diagnostics=batch_build.diagnostics)
@@ -4772,32 +4833,29 @@ def execute_contact_command(
                 scene,
                 control_context,
                 batch_build.plan,
+                closure_plan=direct_plan,
                 selector_character_id=selector_character_id,
                 hook=hook,
             )
-        if len(selected_mappings) == 1:
-            selected_mapping_id = str(selected_mappings[0][0].mapping_id)
-        else:
-            return ContactAuthoringResult(False)
 
-    planned = build_contact_intent_plan(
-        scene,
-        control_context,
-        operation_id=operation_id,
-        mode=ContactAuthoringMode.CYCLE,
-        enabled_types=enabled_types,
-        plant_space=plant_space,
-        contact_point_local=contact_point_local,
-        mapping_id=selected_mapping_id,
-        selector_character_id=selector_character_id,
-    )
-    if not planned.ok or planned.plan is None:
-        return ContactAuthoringResult(False, diagnostics=planned.diagnostics)
-    try:
+        planned = build_contact_intent_plan(
+            scene,
+            control_context,
+            operation_id=operation_id,
+            mode=ContactAuthoringMode.CYCLE,
+            enabled_types=enabled_types,
+            plant_space=plant_space,
+            contact_point_local=contact_point_local,
+            mapping_id=mapping_ids[0],
+            selector_character_id=selector_character_id,
+        )
+        if not planned.ok or planned.plan is None:
+            return ContactAuthoringResult(False, diagnostics=planned.diagnostics)
         return execute_contact_intent_plan(
             scene,
             control_context,
             planned.plan,
+            closure_plan=direct_plan,
             selector_character_id=selector_character_id,
             hook=hook,
         )
