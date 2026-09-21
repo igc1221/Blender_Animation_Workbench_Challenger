@@ -1,7 +1,7 @@
 ﻿# Phase 4 Rigped — Stabilization + Sliding Integrated Execution Plan
 
-> Updated: **2026-09-20 00:00 KST**
-> Status: **ACTIVE EXECUTION PLAN / CHALLENGER-REVIEWED**
+> Updated: **2026-09-22 KST**
+> Status: **ACTIVE EXECUTION PLAN / E1-E6 COMPREHENSIVE-REVIEW STABILIZATION CLOSED / E7 NEXT**
 > Runtime target: **Blender 5.2.1 LTS**
 > Main authority: **Sol Main**
 > Mandatory challenger policy: **every implementation/stabilization item receives a narrow pre-implementation challenger review and a narrow post-implementation challenger review; challenger output is advisory evidence and Main decides whether a finding blocks, improves, defers, or is rejected**
@@ -12,20 +12,30 @@
 > - `PHASE4_RIGPED_STABILIZATION_OWNERSHIP_PLAN.md` (2026-09-19 ownership gate)
 > - `docs/AGENT/ASTRA_REVIEW_RESPONSE_PHASE4_STABILIZATION_20260919.md` (2026-09-19 Astra architecture response)
 
-## 2026-09-20 execution override — E6 CLOSED / ASTRA E1–E6 REVIEW GATE
+## 2026-09-22 execution override — E1-E6 COMPREHENSIVE-REVIEW STABILIZATION CLOSED / E7 UNBLOCKED
 
-E1 through E6 are **USER PASS / CLOSED**.
+E1 through E6 remain **USER PASS / CLOSED**. The later Astra comprehensive review produced three accepted stabilization blockers before E7:
 
-E6 closure authority:
-- `debug/user_final_tests/E6/evidence.json`
-- `debug/user_final_tests/E6/README.md`
-- final regression/user gesture: `12_four_limb_nonidentity_inverse_left_knee_regression.json`
-- final accepted replay: `13_four_limb_nonidentity_user_final.json`
-- static gate: **297 passed, Ruff 0**
+- **B1** — Sliding Rotate active public input was disconnected from hidden result derivation while FK feedback was muted.
+- **B2** — final Contact feedback-authority mutation/update occurred after `journal.commit()`.
+- **B3** — E6 hidden SolverSeed raw result mutation was not fully owned by gesture cancel/failure restore.
 
-The next gate is **one Astra comprehensive architecture review covering E1 through E6**. Do not run an Astra narrow E6-only review. E7 remains blocked until Main consumes that comprehensive review and resolves any accepted blocker.
+Main resolved B1-B3 as one coherent stabilization batch without adding a second solver or new animation authority. GLM N1 replay hardening was also closed; remaining broad Move ownership convergence is assigned to the first E7 implementation batch.
 
-This override does not alter the normal narrow PRE/POST challenger policy for implementation items; it only defines Astra usage.
+Closure evidence on current source:
+
+- `awb-check`: **388 pytest PASS + Ruff PASS**.
+- Blender 5.2.1 `awb-phase4-i12-runtime-verify`: **FULL PASS**, including L/R Arm+Leg FK↔IK, opposite-bend Contact playback, Sliding Rotate→C pose preservation, live red-pivot sync, exact rollback, limits, and singular fallback.
+- Blender 5.2.1 `awb-phase4-i13-runtime-verify`: **FULL PASS**, including same-frame Free↔Sliding continuity, fault rollback, single-journal Contact closure, and Rigped K complete no-op.
+- Clean-baseline frozen `E5` replay: **PASS**.
+- Clean-baseline frozen `E6` replay: **PASS**.
+- `debug/user_final_tests/current.json` was restored to `Figure_F6` after replay verification.
+- POST round consumed exactly once with independent **Qwen = CLEAR** and **DeepSeek = CLEAR**.
+- Main source-level disposition: no remaining B1/B2/B3 blocker. DeepSeek's source-inline caveat was accepted as a future review-evidence process improvement, not a product blocker.
+
+The stabilization gate is therefore **CLOSED**. E7 is now the active next implementation item.
+
+This override does not alter the normal narrow PRE/POST challenger policy for later implementation items.
 
 ## 0. Purpose
 
@@ -1037,17 +1047,18 @@ Do not start or redesign:
 
 ## 7. Immediate next action
 
-**E1 through E6 are USER PASS / CLOSED.**
+**E1 through E6 are USER PASS / CLOSED, and the comprehensive-review stabilization gate is CLOSED.**
 
-Do not start E7 yet.
+Proceed to **E7 — Live COM / Spine / Head dependency behavior**.
 
-Next:
-1. send one **Astra comprehensive architecture review** covering E1 through E6;
-2. require Astra to save the complete response to the specified local Markdown response file;
-3. Main classifies findings as blocker / improvement / deferred / rejected using current source, frozen contracts, and replay/runtime evidence;
-4. replay only any scenario affected by an accepted blocker;
-5. after the comprehensive review gate closes, proceed to E7.
+E7 entry requirements:
+1. run exactly one PRE challenger round with two independent Web Bridge providers;
+2. consume the frozen E1 operation-domain snapshot instead of rescanning gesture ownership;
+3. treat body/ancestor dependency as pinned-target maintenance, never as direct Sliding target transport;
+4. include the GLM authority-preservation harness: per-preview target/pole/result measurements and reachable-vs-unreachable distinction;
+5. converge the remaining Move ownership/dynamic-refresh seam (GLM N2/N3) inside the E7 gesture-lifecycle boundary;
+6. keep AUTO OFF for the first E7 proof; do not pull E11 Auto work forward.
 
-Do **not** send an Astra narrow E6-only review.
+After E7 implementation, run exactly one POST round with two independent reviewers, then focused runtime/frozen verification before any new user-final request.
 
-The ordinary narrow PRE/POST challenger loop remains the implementation workflow for later E-items. Astra is reserved for the comprehensive E1–E6 architecture gate requested here.
+Do not reopen the closed E1-E6 stabilization batch without new concrete regression evidence.

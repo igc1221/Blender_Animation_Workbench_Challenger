@@ -412,27 +412,24 @@ def _apply_pose_bone_rotation_from_matrix(
         pose_bone.rotation_euler = quaternion.to_euler(pose_bone.rotation_mode)
 
 
-def _sync_generated_sliding_hinge_branch_from_pole(solver_owner) -> bool:
+def _sync_generated_sliding_hinge_branch_from_public_pose(
+    solver_owner,
+    public_lower,
+) -> bool:
+    """Restore the generated hidden hinge branch from evaluated authored FK data."""
+
     name = str(getattr(solver_owner, "name", ""))
-    if not name.startswith("MCH_ForeArm"):
-        # Generated knees keep the anatomical/authored hinge branch established
-        # at rig/snap time. Deriving Calf branch from pole_angle can select the
-        # opposite local-X half-range and produce a visually inverted knee even
-        # though the native IK target is numerically satisfied.
+    if name in {"MCH_ForeArm.L", "MCH_ForeArm.R"}:
+        quaternion = public_lower.matrix_basis.to_quaternion().normalized()
+        angle = 2.0 * atan2(float(quaternion.z), float(quaternion.w))
+        angle = ((angle + pi) % (2.0 * pi)) - pi
+        fallback = -1 if name.endswith(".R") else 1
+        branch_sign = fallback if abs(angle) <= radians(0.25) else (1 if angle > 0.0 else -1)
+    elif name in {"MCH_Calf.L", "MCH_Calf.R"}:
+        branch_sign = 1
+    else:
         return False
-    ik_constraint = next(
-        (constraint for constraint in solver_owner.constraints if constraint.type == "IK"),
-        None,
-    )
-    if ik_constraint is None:
-        return False
-    branch_sign = 1 if cos(float(ik_constraint.pole_angle)) < 0.0 else -1
-    return bool(
-        configure_generated_rigped_ik_hinge_branch(
-            solver_owner,
-            branch_sign,
-        )
-    )
+    return bool(configure_generated_rigped_ik_hinge_branch(solver_owner, branch_sign))
 
 
 def _set_replay_limb_fk_feedback_muted(
@@ -494,6 +491,14 @@ def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
                 except (TypeError, ValueError):
                     continue
 
+                branch_changed = False
+                if contact_type is ContactKeyType.SLIDING:
+                    public_lower = pose.get(public_names[1])
+                    if public_lower is not None:
+                        branch_changed = _sync_generated_sliding_hinge_branch_from_public_pose(
+                            state_bone,
+                            public_lower,
+                        )
                 feedback_changed = _set_replay_limb_fk_feedback_muted(
                     rig,
                     pose,
@@ -501,7 +506,11 @@ def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
                     result_names,
                     contact_type in {ContactKeyType.SLIDING, ContactKeyType.PLANTED},
                 )
-                touched = feedback_changed or touched
+                if branch_changed or feedback_changed:
+                    view_layer = getattr(bpy.context, "view_layer", None)
+                    if view_layer is not None and getattr(bpy.context, "scene", None) is scene:
+                        view_layer.update()
+                touched = branch_changed or feedback_changed or touched
                 if contact_type is not ContactKeyType.SLIDING:
                     continue
 

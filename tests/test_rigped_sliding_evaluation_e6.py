@@ -255,13 +255,14 @@ def test_e6_sliding_runtime_mutes_public_fk_feedback_without_changing_influence(
     assert "intent.target_type is not ContactKeyType.FREE" in single
     assert "item.intent.target_type is not ContactKeyType.FREE" in batch
     assert "contact_type in {ContactKeyType.SLIDING, ContactKeyType.PLANTED}" in replay
-    assert "_sync_generated_sliding_hinge_branch_from_pole(state_bone)" not in replay
+    assert "_sync_generated_sliding_hinge_branch_from_public_pose(" in replay
     branch_sync = _source(
         TRANSFORM_SOURCE,
-        _function(TRANSFORM_TREE, "_sync_generated_sliding_hinge_branch_from_pole"),
+        _function(TRANSFORM_TREE, "_sync_generated_sliding_hinge_branch_from_public_pose"),
     )
-    assert 'name.startswith("MCH_ForeArm")' in branch_sync
-    assert "MCH_Calf" not in branch_sync
+    assert "public_lower.matrix_basis.to_quaternion()" in branch_sync
+    assert '"MCH_Calf.L"' in branch_sync and '"MCH_Calf.R"' in branch_sync
+    assert "pole_angle" not in branch_sync
     assert '"restore FK feedback for Free authority"' in snap
     assert "RawFieldKind.CONSTRAINT_MUTE" in snap
 

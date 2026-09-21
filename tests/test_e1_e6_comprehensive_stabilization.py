@@ -110,3 +110,18 @@ def test_n1_contact_capture_includes_per_mapping_results_for_mixed_batch_replay(
 def test_uninitialized_contact_replay_feedback_uses_free_fk_baseline() -> None:
     sync = _function(TRANSFORM_PATH, "_sync_rigped_sliding_replay_display")
     assert "contact_type in {ContactKeyType.SLIDING, ContactKeyType.PLANTED}" in sync
+
+
+
+def test_replay_restores_sliding_hinge_branch_from_evaluated_public_fk() -> None:
+    replay = _function(TRANSFORM_PATH, "_sync_rigped_sliding_replay_display")
+    helper = _function(
+        TRANSFORM_PATH,
+        "_sync_generated_sliding_hinge_branch_from_public_pose",
+    )
+    assert replay.index("_sync_generated_sliding_hinge_branch_from_public_pose(") < replay.index(
+        "_set_replay_limb_fk_feedback_muted("
+    )
+    assert "public_lower.matrix_basis.to_quaternion()" in helper
+    assert "configure_generated_rigped_ik_hinge_branch" in helper
+    assert "pole_angle" not in helper
