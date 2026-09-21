@@ -35,6 +35,7 @@ from .rigped_humanoid_builder import (
     discard_generated_rigped_humanoid,
     ensure_generated_rigped_ik_hinge_limits,
 )
+from .rigped_rigify_reference import rigify_reference_humanoid_spec
 from .semantic_adapter import control_context_for_context, runtime_control_key
 from .ui_language import language_for_context
 from .ui_language import text as ui_text
@@ -77,6 +78,17 @@ class _FitUiState:
 
 _FIT_STATES: dict[int, _FitUiState] = {}
 _INTERNAL_HELPERS_HIDDEN_PROPERTY = "awb_internal_helpers_hidden_v1"
+_BIPED_BOX_WIRE_PROPERTY = "awb_biped_box_wire_v1"
+_BIPED_BOX_WIRE_SHAPE_OBJECT = "AWB_BipedBoxWireShape"
+_BIPED_BOX_WIRE_DEFAULT_WIDTH = 1.5
+_BIPED_BOX_WIRE_DEFAULT_LEFT = (28.0 / 255.0, 28.0 / 255.0, 177.0 / 255.0)
+_BIPED_BOX_WIRE_DEFAULT_RIGHT = (6.0 / 255.0, 134.0 / 255.0, 6.0 / 255.0)
+_BIPED_BOX_WIRE_DEFAULT_CENTER = (8.0 / 255.0, 110.0 / 255.0, 134.0 / 255.0)
+_BIPED_BOX_WIRE_DEFAULT_PELVIS = (224.0 / 255.0, 198.0 / 255.0, 87.0 / 255.0)
+_BIPED_BOX_WIRE_DEFAULT_HEAD = (166.0 / 255.0, 202.0 / 255.0, 240.0 / 255.0)
+_BIPED_BOX_WIRE_DEFAULT_COM = (0.92, 0.72, 0.18)
+_BIPED_BOX_WIRE_DEFAULT_SELECTED = (1.0, 0.72, 0.18)
+_BIPED_BOX_WIRE_DEFAULT_ACTIVE = (1.0, 0.92, 0.35)
 
 
 def _safe_pointer(value) -> int | None:
@@ -151,6 +163,114 @@ def _rig_owner_for_character(scene, character_id: str):
     if len(armatures) != 1:
         raise RigpedFitRuntimeError("FIT_UI_ARMATURE_OWNER_AMBIGUOUS")
     return armatures[0]
+
+
+def rigped_box_wire_enabled(rig_object) -> bool:
+    return bool(
+        rig_object is not None
+        and hasattr(rig_object, "get")
+        and rig_object.get(_BIPED_BOX_WIRE_PROPERTY, False)
+    )
+
+
+def _authored_pose_bones(rig_object) -> tuple[Any, ...]:
+    collection = rig_object.data.collections.get("Authored")
+    if collection is None:
+        return ()
+    names = {bone.name for bone in collection.bones}
+    return tuple(
+        pose_bone
+        for pose_bone in rig_object.pose.bones
+        if pose_bone.name in names and not pose_bone.bone.hide
+    )
+
+
+def _scene_wire_color(scene, pose_bone) -> tuple[float, float, float]:
+    name = str(pose_bone.name)
+    if name == "Pelvis":
+        value = getattr(scene, "baw_rigped_box_wire_pelvis_color", _BIPED_BOX_WIRE_DEFAULT_PELVIS)
+    elif name == "COM":
+        value = getattr(scene, "baw_rigped_box_wire_com_color", _BIPED_BOX_WIRE_DEFAULT_COM)
+    elif name == "Head":
+        value = getattr(scene, "baw_rigped_box_wire_head_color", _BIPED_BOX_WIRE_DEFAULT_HEAD)
+    elif name.endswith(".L"):
+        value = getattr(scene, "baw_rigped_box_wire_left_color", _BIPED_BOX_WIRE_DEFAULT_LEFT)
+    elif name.endswith(".R"):
+        value = getattr(scene, "baw_rigped_box_wire_right_color", _BIPED_BOX_WIRE_DEFAULT_RIGHT)
+    else:
+        value = getattr(scene, "baw_rigped_box_wire_center_color", _BIPED_BOX_WIRE_DEFAULT_CENTER)
+    return tuple(float(component) for component in value[:3])
+
+
+def _lighter(color: tuple[float, float, float], amount: float) -> tuple[float, float, float]:
+    return tuple(min(1.0, component + ((1.0 - component) * amount)) for component in color)
+
+
+def _apply_biped_box_wire_colors(rig_object, scene) -> None:
+    rig_object.data.show_bone_colors = True
+    for pose_bone in _authored_pose_bones(rig_object):
+        normal = _scene_wire_color(scene, pose_bone)
+        selected = tuple(
+            float(component)
+            for component in getattr(
+                scene,
+                "baw_rigped_box_wire_selected_color",
+                _BIPED_BOX_WIRE_DEFAULT_SELECTED,
+            )[:3]
+        )
+        active = tuple(
+            float(component)
+            for component in getattr(
+                scene,
+                "baw_rigped_box_wire_active_color",
+                _BIPED_BOX_WIRE_DEFAULT_ACTIVE,
+            )[:3]
+        )
+        for color in (pose_bone.bone.color, pose_bone.color):
+            color.palette = "CUSTOM"
+            color.custom.normal = normal
+            color.custom.select = selected
+            color.custom.active = active
+
+
+def set_rigped_box_wire_display(rig_object, enabled: bool, scene=None) -> None:
+    if rig_object is None or getattr(rig_object, "type", None) != "ARMATURE":
+        raise RigpedFitRuntimeError("RIGPED_BOX_WIRE_REQUIRES_ARMATURE")
+
+    scene = scene or bpy.context.scene
+    _apply_biped_box_wire_colors(rig_object, scene)
+    authored = _authored_pose_bones(rig_object)
+    shape_object = bpy.data.objects.get(_BIPED_BOX_WIRE_SHAPE_OBJECT)
+    if shape_object is not None:
+        for pose_bone in authored:
+            if pose_bone.custom_shape is shape_object:
+                pose_bone.custom_shape = None
+
+    # Box Display is presentation-only. Do not mutate Blender's native
+    # armature display mode or custom-shape visibility. Suppress only Blender's
+    # native bone viewport overlay so the authoritative bones stay usable while
+    # AWB Box Wire becomes the sole visible rig representation.
+    rig_object[_BIPED_BOX_WIRE_PROPERTY] = bool(enabled)
+    from .rigped_box_wire_overlay import sync_native_bone_overlay_visibility
+
+    sync_native_bone_overlay_visibility()
+
+
+def update_rigped_box_wire_options(_owner, context) -> None:
+    if context is None or getattr(context, "scene", None) is None:
+        return
+    character_id = active_rigped_character_id(context)
+    if character_id is None:
+        return
+    try:
+        rig = _rig_owner_for_character(context.scene, character_id)
+        set_rigped_box_wire_display(
+            rig,
+            rigped_box_wire_enabled(rig),
+            scene=context.scene,
+        )
+    except (CharacterMetadataError, RigpedFitRuntimeError, RuntimeError, ReferenceError):
+        return
 
 
 def active_rigped_character_id(context) -> str | None:
@@ -297,6 +417,20 @@ def redo_fit_structural_change(context) -> bool:
     state.history_cursor += 1
     return True
 
+def _enter_fit_box_wire_display(rig, scene) -> None:
+    _apply_biped_box_wire_colors(rig, scene)
+    if not rigped_box_wire_enabled(rig):
+        return
+
+    # Fit rollback: make Blender's native Edit bones visible first. The custom
+    # Box Wire renderer is intentionally disabled in Edit mode until a stable
+    # Fit-specific display path is proven.
+    rig.data.display_type = "BBONE"
+    from .rigped_box_wire_overlay import show_native_bone_overlays_for_fit
+
+    show_native_bone_overlays_for_fit()
+
+
 def _begin_fit(context, character_id: str) -> _FitUiState:
     window_key = _window_key(context)
     if window_key is None:
@@ -318,6 +452,7 @@ def _begin_fit(context, character_id: str) -> _FitUiState:
     original_pivot_point = str(context.scene.tool_settings.transform_pivot_point)
     orientation_slot = context.scene.transform_orientation_slots[0]
     original_orientation = str(orientation_slot.type)
+    _enter_fit_box_wire_display(rig, context.scene)
     _select_only_object(context, rig)
     bpy.ops.object.mode_set(mode="EDIT")
     bpy.ops.wm.tool_set_by_id(name="baw.select_edit_armature")
@@ -345,6 +480,10 @@ def _begin_fit(context, character_id: str) -> _FitUiState:
 def _restore_fit_transform_settings(context, state: _FitUiState) -> None:
     context.scene.tool_settings.transform_pivot_point = state.original_pivot_point
     context.scene.transform_orientation_slots[0].type = state.original_orientation
+    if rigped_box_wire_enabled(state.rig_object):
+        from .rigped_box_wire_overlay import sync_native_bone_overlay_visibility
+
+        sync_native_bone_overlay_visibility()
 
 
 def _semantic_root_pose_bone(scene, character_id: str):
@@ -662,8 +801,13 @@ class BAW_OT_create_rigped_drag(bpy.types.Operator):
             return {"CANCELLED"}
         try:
             origin = _viewport_placement_location(context, event, self._window_region)
-            spec = fitted_humanoid_spec(self._initial_height, origin)
+            spec = fitted_humanoid_spec(
+                self._initial_height,
+                origin,
+                base=rigify_reference_humanoid_spec(),
+            )
             result = build_generated_rigped_humanoid(context.scene, spec)
+            _apply_biped_box_wire_colors(result.armature_object, context.scene)
             self._created_result = result
             _select_only_object(context, result.armature_object)
         except (RuntimeError, ValueError) as exc:
@@ -700,8 +844,13 @@ class BAW_OT_create_rigped_drag(bpy.types.Operator):
         try:
             _ensure_object_mode()
             discard_generated_rigped_humanoid(context.scene, preview)
-            final_spec = fitted_humanoid_spec(self._preview_height, origin)
+            final_spec = fitted_humanoid_spec(
+                self._preview_height,
+                origin,
+                base=rigify_reference_humanoid_spec(),
+            )
             result = build_generated_rigped_humanoid(context.scene, final_spec)
+            _apply_biped_box_wire_colors(result.armature_object, context.scene)
             self._created_result = result
             _select_only_object(context, result.armature_object)
         except (RuntimeError, ValueError) as exc:
@@ -785,6 +934,57 @@ class BAW_OT_rigped_selection_mode(bpy.types.Operator):
     def execute(self, context):
         _transition_to_rig_selection(context)
         self.report({"INFO"}, "Select active")
+        return {"FINISHED"}
+
+
+class BAW_OT_rigped_box_wire_toggle(bpy.types.Operator):
+    bl_idname = "baw.rigped_box_wire_toggle"
+    bl_label = "Biped Box Wire"
+    bl_description = "Toggle Biped-style wireframe box display for this Rigped"
+    bl_options: ClassVar[set[str]] = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if getattr(context, "area", None) is None or context.area.type != "VIEW_3D":
+            return False
+        character_id = active_rigped_character_id(context)
+        return character_id is not None and fit_ui_state(context) is None
+
+    def execute(self, context):
+        character_id = active_rigped_character_id(context)
+        if character_id is None:
+            return {"CANCELLED"}
+        try:
+            rig = _rig_owner_for_character(context.scene, character_id)
+            enabled = not rigped_box_wire_enabled(rig)
+            set_rigped_box_wire_display(rig, enabled, scene=context.scene)
+        except (CharacterMetadataError, RigpedFitRuntimeError, RuntimeError, ReferenceError) as exc:
+            self.report({"ERROR"}, f"Biped Box Wire failed: {exc}")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Biped Box Wire ON" if enabled else "Biped Box Wire OFF")
+        if context.area is not None:
+            context.area.tag_redraw()
+        return {"FINISHED"}
+
+
+class BAW_OT_rigped_box_wire_reset(bpy.types.Operator):
+    bl_idname = "baw.rigped_box_wire_reset"
+    bl_label = "Reset Biped Colors"
+    bl_description = "Restore the classic Biped wire width and color palette"
+    bl_options: ClassVar[set[str]] = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        scene = context.scene
+        scene.baw_rigped_box_wire_width = _BIPED_BOX_WIRE_DEFAULT_WIDTH
+        scene.baw_rigped_box_wire_left_color = _BIPED_BOX_WIRE_DEFAULT_LEFT
+        scene.baw_rigped_box_wire_right_color = _BIPED_BOX_WIRE_DEFAULT_RIGHT
+        scene.baw_rigped_box_wire_center_color = _BIPED_BOX_WIRE_DEFAULT_CENTER
+        scene.baw_rigped_box_wire_pelvis_color = _BIPED_BOX_WIRE_DEFAULT_PELVIS
+        scene.baw_rigped_box_wire_head_color = _BIPED_BOX_WIRE_DEFAULT_HEAD
+        scene.baw_rigped_box_wire_com_color = _BIPED_BOX_WIRE_DEFAULT_COM
+        scene.baw_rigped_box_wire_selected_color = _BIPED_BOX_WIRE_DEFAULT_SELECTED
+        scene.baw_rigped_box_wire_active_color = _BIPED_BOX_WIRE_DEFAULT_ACTIVE
+        self.report({"INFO"}, "Biped Box Wire options reset")
         return {"FINISHED"}
 
 
@@ -1061,6 +1261,48 @@ def draw_rigped_workflow(layout, context) -> None:
         text=ui_text("rigped.animate", context),
         icon="POSE_HLT",
     )
+
+    if character_id is not None:
+        try:
+            rig = _rig_owner_for_character(context.scene, character_id)
+        except (CharacterMetadataError, RigpedFitRuntimeError, RuntimeError, ReferenceError):
+            rig = None
+        if rig is not None:
+            wire_row = box.row(align=True)
+            wire_row.operator(
+                "baw.rigped_box_wire_toggle",
+                text="Biped Box Wire",
+                depress=rigped_box_wire_enabled(rig),
+            )
+            wire_row.prop(
+                context.scene,
+                "baw_rigped_box_wire_options_expanded",
+                text="",
+                icon="PREFERENCES",
+                toggle=True,
+            )
+            if context.scene.baw_rigped_box_wire_options_expanded:
+                options = box.box()
+                options.prop(context.scene, "baw_rigped_box_wire_width", text="Wire Width")
+                colors = options.grid_flow(
+                    row_major=True,
+                    columns=2,
+                    even_columns=True,
+                    align=True,
+                )
+                colors.prop(context.scene, "baw_rigped_box_wire_left_color", text="Left")
+                colors.prop(context.scene, "baw_rigped_box_wire_right_color", text="Right")
+                colors.prop(context.scene, "baw_rigped_box_wire_center_color", text="Center")
+                colors.prop(context.scene, "baw_rigped_box_wire_pelvis_color", text="Pelvis")
+                colors.prop(context.scene, "baw_rigped_box_wire_head_color", text="Head")
+                colors.prop(context.scene, "baw_rigped_box_wire_com_color", text="COM")
+                colors.prop(context.scene, "baw_rigped_box_wire_selected_color", text="Selected")
+                colors.prop(context.scene, "baw_rigped_box_wire_active_color", text="Active")
+                options.operator(
+                    "baw.rigped_box_wire_reset",
+                    text="Reset Biped Defaults",
+                    icon="LOOP_BACK",
+                )
 
     status = box.row(align=True)
     if mode == "POSE" and character_id is not None:

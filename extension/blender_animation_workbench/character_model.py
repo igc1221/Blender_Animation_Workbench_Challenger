@@ -19,6 +19,7 @@ AWB_CANONICAL_SEMANTIC_KEYS = frozenset(
         "awb.upper_arm",
         "awb.forearm",
         "awb.hand",
+        "awb.finger",
         "awb.leg",
         "awb.thigh",
         "awb.calf",

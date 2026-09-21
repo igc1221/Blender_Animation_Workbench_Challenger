@@ -228,6 +228,21 @@ def _create_bones(armature_object, bones: tuple[HumanoidBoneSpec, ...]) -> None:
     finally:
         bpy.ops.object.mode_set(mode="OBJECT")
 
+    # Biped-style default display sizing. Pelvis ends at each Thigh center, so
+    # each thigh is visually overlapped by about half its width without moving
+    # either hip socket. COM starts as a square/cube-like box centered in Pelvis.
+    pelvis = armature_object.data.bones.get("Pelvis")
+    com = armature_object.data.bones.get("COM")
+    thigh_l = armature_object.data.bones.get("Thigh.L")
+    thigh_r = armature_object.data.bones.get("Thigh.R")
+    if pelvis is not None and thigh_l is not None and thigh_r is not None:
+        hip_half_span = 0.5 * float((thigh_l.head_local - thigh_r.head_local).length)
+        pelvis.bbone_x = max(1e-6, hip_half_span)
+    if com is not None:
+        com_half_size = max(1e-6, 0.5 * float(com.length))
+        com.bbone_x = com_half_size
+        com.bbone_z = com_half_size
+
     # Biped-style pelvis hierarchy: pelvis is a pose joint, not the whole-body
     # rotational root. Spine is parented directly to COM in the humanoid spec;
     # upper-leg links keep pelvis-relative hip position but break pelvis rotation

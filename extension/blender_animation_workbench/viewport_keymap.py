@@ -13,6 +13,11 @@ from mathutils import Vector
 from .character_query import characters_for_context
 from .debug_trace import trace_event
 from .phase4_contact_ui import transform_orientation_cycle
+from .rigped_box_wire_overlay import (
+    box_display_names,
+    box_world_vertices,
+    rigped_box_display_enabled,
+)
 from .rigped_contract import (
     RigpedTransformGesture,
     RigpedTransformRoute,
@@ -338,6 +343,9 @@ def _native_pick_name(
         rig = getattr(context, "active_object", None)
         if rig is None or getattr(rig, "type", None) != "ARMATURE":
             return None
+        if rigped_box_display_enabled(rig):
+            picked = _box_bone_pick_name(context, rig, location)
+            return picked if picked not in excluded_names else None
         selected_before = tuple(
             str(bone.name) for bone in (getattr(context, "selected_pose_bones", ()) or ())
         )
@@ -375,6 +383,9 @@ def _native_pick_name(
         return picked
 
     if mode == "OBJECT":
+        box_pick = _box_object_pick_name(context, location)
+        if box_pick is not None and box_pick not in excluded_names:
+            return box_pick
         selected_before = tuple(
             str(obj.name) for obj in (getattr(context, "selected_objects", ()) or ())
         )
@@ -430,6 +441,9 @@ def _native_pick_name(
         rig = getattr(context, "active_object", None)
         if rig is None or getattr(rig, "type", None) != "ARMATURE":
             return None
+        if rigped_box_display_enabled(rig):
+            picked = _box_bone_pick_name(context, rig, location)
+            return picked if picked not in excluded_names else None
 
         edit_bones = rig.data.edit_bones
         active_before = getattr(edit_bones, "active", None)
@@ -594,6 +608,35 @@ def _point_in_polygon_2d(point, polygon) -> bool:
     return inside
 
 
+def _point_segment_distance_2d(point, start, end) -> float:
+    px, py = float(point[0]), float(point[1])
+    x1, y1 = float(start[0]), float(start[1])
+    x2, y2 = float(end[0]), float(end[1])
+    dx = x2 - x1
+    dy = y2 - y1
+    length_sq = (dx * dx) + (dy * dy)
+    if length_sq <= 1e-9:
+        return hypot(px - x1, py - y1)
+    t = ((px - x1) * dx + (py - y1) * dy) / length_sq
+    t = max(0.0, min(1.0, t))
+    closest_x = x1 + (dx * t)
+    closest_y = y1 + (dy * t)
+    return hypot(px - closest_x, py - closest_y)
+
+
+def _point_hits_polygon_2d(point, polygon, tolerance: float = 6.0) -> bool:
+    if _point_in_polygon_2d(point, polygon):
+        return True
+    if len(polygon) < 2:
+        return False
+    previous = polygon[-1]
+    for current in polygon:
+        if _point_segment_distance_2d(point, previous, current) <= tolerance:
+            return True
+        previous = current
+    return False
+
+
 def _polygon_intersects_rect(polygon, rect) -> bool:
     if not polygon:
         return False
@@ -634,6 +677,81 @@ def _convex_hull_2d(points):
             upper.pop()
         upper.append(point)
     return lower[:-1] + upper[:-1]
+
+
+def _project_box_polygon(context, rv3d, vertices):
+    projected = []
+    for vertex in vertices:
+        point = location_3d_to_region_2d(
+            context.region,
+            rv3d,
+            Vector(vertex),
+        )
+        if point is not None:
+            projected.append(point)
+    return _convex_hull_2d(projected) if projected else ()
+
+
+def _box_view_depth(rv3d, vertices) -> float:
+    center = Vector((0.0, 0.0, 0.0))
+    for vertex in vertices:
+        center += Vector(vertex)
+    center /= max(len(vertices), 1)
+    return float((rv3d.view_matrix @ center).z)
+
+
+def _box_bone_pick_name(context, rig, location: tuple[int, int]) -> str | None:
+    rv3d = getattr(context, "region_data", None) or getattr(
+        getattr(context, "space_data", None), "region_3d", None
+    )
+    if rv3d is None or not rigped_box_display_enabled(rig):
+        return None
+
+    hits = []
+    for name in box_display_names(rig):
+        vertices = box_world_vertices(rig, name)
+        if len(vertices) != 8:
+            continue
+        polygon = _project_box_polygon(context, rv3d, vertices)
+        if polygon and _point_in_polygon_2d(location, polygon):
+            hits.append((_box_view_depth(rv3d, vertices), name))
+    if not hits:
+        return None
+    return max(hits, key=lambda item: item[0])[1]
+
+
+def _box_display_rigs(context):
+    scene = getattr(context, "scene", None)
+    if scene is None:
+        return ()
+    return tuple(
+        obj
+        for obj in scene.objects
+        if rigped_box_display_enabled(obj)
+        and not obj.hide_get()
+        and not bool(getattr(obj, "hide_select", False))
+    )
+
+
+def _box_object_pick_name(context, location: tuple[int, int]) -> str | None:
+    rv3d = getattr(context, "region_data", None) or getattr(
+        getattr(context, "space_data", None), "region_3d", None
+    )
+    if rv3d is None:
+        return None
+
+    hits = []
+    for rig in _box_display_rigs(context):
+        for name in box_display_names(rig):
+            vertices = box_world_vertices(rig, name)
+            if len(vertices) != 8:
+                continue
+            polygon = _project_box_polygon(context, rv3d, vertices)
+            if polygon and _point_hits_polygon_2d(location, polygon):
+                hits.append((_box_view_depth(rv3d, vertices), str(rig.name)))
+    if not hits:
+        return None
+    return max(hits, key=lambda item: item[0])[1]
 
 
 def _mesh_object_intersects_rect(context, rv3d, obj, rect, depsgraph) -> bool:
@@ -696,8 +814,24 @@ def _object_box_crossing_hits(context, rect) -> tuple[object, ...]:
 
     depsgraph = context.evaluated_depsgraph_get()
     hits = []
+    box_rigs = _box_display_rigs(context)
+    box_rig_names = {str(rig.name) for rig in box_rigs}
+
+    for rig in box_rigs:
+        matched = False
+        for name in box_display_names(rig):
+            vertices = box_world_vertices(rig, name)
+            if len(vertices) != 8:
+                continue
+            polygon = _project_box_polygon(context, rv3d, vertices)
+            if polygon and _polygon_intersects_rect(polygon, rect):
+                matched = True
+                break
+        if matched:
+            hits.append(rig)
+
     for obj in tuple(getattr(context, "visible_objects", ()) or ()):
-        if bool(getattr(obj, "hide_select", False)):
+        if bool(getattr(obj, "hide_select", False)) or str(obj.name) in box_rig_names:
             continue
 
         if getattr(obj, "type", "") == "MESH":
@@ -733,6 +867,19 @@ def _edit_bone_box_crossing_hits(context, rect) -> tuple[object, ...]:
         return ()
 
     hits = []
+    if rigped_box_display_enabled(rig):
+        for name in box_display_names(rig):
+            edit_bone = rig.data.edit_bones.get(name)
+            if edit_bone is None or bool(getattr(edit_bone, "hide", False)) or bool(
+                getattr(edit_bone, "hide_select", False)
+            ):
+                continue
+            vertices = box_world_vertices(rig, name)
+            polygon = _project_box_polygon(context, rv3d, vertices)
+            if polygon and _polygon_intersects_rect(polygon, rect):
+                hits.append(edit_bone)
+        return tuple(hits)
+
     for edit_bone in rig.data.edit_bones:
         if bool(getattr(edit_bone, "hide", False)) or bool(
             getattr(edit_bone, "hide_select", False)
@@ -765,6 +912,33 @@ def _edit_bone_box_crossing_hits(context, rect) -> tuple[object, ...]:
     return tuple(hits)
 
 
+def _pose_bone_box_crossing_hits(context, rect) -> tuple[object, ...]:
+    rig = getattr(context, "active_object", None)
+    rv3d = getattr(context, "region_data", None) or getattr(
+        getattr(context, "space_data", None), "region_3d", None
+    )
+    if (
+        rig is None
+        or getattr(rig, "type", None) != "ARMATURE"
+        or rv3d is None
+        or not rigped_box_display_enabled(rig)
+    ):
+        return ()
+
+    hits = []
+    for name in box_display_names(rig):
+        pose_bone = rig.pose.bones.get(name)
+        if pose_bone is None or bool(getattr(pose_bone.bone, "hide", False)) or bool(
+            getattr(pose_bone.bone, "hide_select", False)
+        ):
+            continue
+        vertices = box_world_vertices(rig, name)
+        polygon = _project_box_polygon(context, rv3d, vertices)
+        if polygon and _polygon_intersects_rect(polygon, rect):
+            hits.append(pose_bone)
+    return tuple(hits)
+
+
 def _apply_crossing_hits(context, hits, action: str, mode: str):
     if mode == "OBJECT":
         if action == "SET":
@@ -784,13 +958,28 @@ def _apply_crossing_hits(context, hits, action: str, mode: str):
             return {"CANCELLED"}
         if action == "SET":
             for edit_bone in rig.data.edit_bones:
-                edit_bone.select = False
+                _set_edit_bone_selected(edit_bone, False)
         for edit_bone in hits:
-            edit_bone.select = action != "REMOVE"
+            _set_edit_bone_selected(edit_bone, action != "REMOVE")
         if action != "REMOVE" and hits:
             rig.data.edit_bones.active = hits[-1]
         elif action == "SET" and not hits:
             rig.data.edit_bones.active = None
+        return {"FINISHED"}
+
+    if mode == "POSE":
+        rig = getattr(context, "active_object", None)
+        if rig is None or getattr(rig, "type", None) != "ARMATURE":
+            return {"CANCELLED"}
+        if action == "SET":
+            for pose_bone in rig.pose.bones:
+                pose_bone.select = False
+        for pose_bone in hits:
+            pose_bone.select = action != "REMOVE"
+        if action != "REMOVE" and hits:
+            rig.data.bones.active = rig.data.bones.get(str(hits[-1].name))
+        elif action == "SET" and not hits:
+            rig.data.bones.active = None
         return {"FINISHED"}
 
     return {"CANCELLED"}
@@ -822,6 +1011,15 @@ def _apply_box_pick(
             action,
             mode,
         )
+    if mode == "POSE":
+        rig = getattr(context, "active_object", None)
+        if rig is not None and rigped_box_display_enabled(rig):
+            return _apply_crossing_hits(
+                context,
+                _pose_bone_box_crossing_hits(context, rect),
+                action,
+                mode,
+            )
 
     mode_map = {"SET": "SET", "ADD": "ADD", "REMOVE": "SUB"}
     select_mode = mode_map[action]

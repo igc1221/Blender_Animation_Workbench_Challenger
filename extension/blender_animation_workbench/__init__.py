@@ -89,9 +89,15 @@ from .rigped_animation_baseline import (
     BAW_OT_rigped_free_key,
     unregister_rigped_free_keymap,
 )
+from .rigped_box_wire_overlay import (
+    register_rigped_box_wire_overlay,
+    unregister_rigped_box_wire_overlay,
+)
 from .rigped_create_fit_ui import (
     BAW_OT_create_rigped_drag,
     BAW_OT_rigped_animate_mode,
+    BAW_OT_rigped_box_wire_reset,
+    BAW_OT_rigped_box_wire_toggle,
     BAW_OT_rigped_fit_cancel,
     BAW_OT_rigped_fit_off,
     BAW_OT_rigped_fit_on,
@@ -99,6 +105,7 @@ from .rigped_create_fit_ui import (
     draw_rigped_workflow,
     register_rigped_internal_visibility_handlers,
     unregister_rigped_internal_visibility_handlers,
+    update_rigped_box_wire_options,
 )
 from .rigped_fit_transform import (
     BAW_OT_rigped_fit_commit_transform,
@@ -361,6 +368,8 @@ _CLASSES = (
     BAW_OT_select_character_kinematic,
     BAW_OT_create_rigped_drag,
     BAW_OT_rigped_selection_mode,
+    BAW_OT_rigped_box_wire_toggle,
+    BAW_OT_rigped_box_wire_reset,
     BAW_OT_rigped_fit_on,
     BAW_OT_rigped_fit_off,
     BAW_OT_rigped_fit_cancel,
@@ -518,6 +527,99 @@ def register():
         default=False,
         options={"HIDDEN", "SKIP_SAVE"},
     )
+    bpy.types.Scene.baw_rigped_box_wire_options_expanded = BoolProperty(
+        name="Biped Box Wire Options",
+        description="Show Biped Box Wire display options",
+        default=False,
+    )
+    bpy.types.Scene.baw_rigped_box_wire_width = FloatProperty(
+        name="Wire Width",
+        description="Line width for Biped Box Wire custom bone shapes",
+        default=1.5,
+        min=1.0,
+        max=16.0,
+        update=update_rigped_box_wire_options,
+    )
+    bpy.types.Scene.baw_rigped_box_wire_left_color = FloatVectorProperty(
+        name="Left",
+        description="Classic Biped-style color for left-side controls",
+        size=3,
+        subtype="COLOR",
+        min=0.0,
+        max=1.0,
+        default=(28.0 / 255.0, 28.0 / 255.0, 177.0 / 255.0),
+        update=update_rigped_box_wire_options,
+    )
+    bpy.types.Scene.baw_rigped_box_wire_right_color = FloatVectorProperty(
+        name="Right",
+        description="Classic Biped-style color for right-side controls",
+        size=3,
+        subtype="COLOR",
+        min=0.0,
+        max=1.0,
+        default=(6.0 / 255.0, 134.0 / 255.0, 6.0 / 255.0),
+        update=update_rigped_box_wire_options,
+    )
+    bpy.types.Scene.baw_rigped_box_wire_center_color = FloatVectorProperty(
+        name="Center",
+        description="Classic Biped-style color for Root, COM, Spine and Neck",
+        size=3,
+        subtype="COLOR",
+        min=0.0,
+        max=1.0,
+        default=(8.0 / 255.0, 110.0 / 255.0, 134.0 / 255.0),
+        update=update_rigped_box_wire_options,
+    )
+    bpy.types.Scene.baw_rigped_box_wire_pelvis_color = FloatVectorProperty(
+        name="Pelvis",
+        description="Classic Biped-style pelvis color",
+        size=3,
+        subtype="COLOR",
+        min=0.0,
+        max=1.0,
+        default=(224.0 / 255.0, 198.0 / 255.0, 87.0 / 255.0),
+        update=update_rigped_box_wire_options,
+    )
+    bpy.types.Scene.baw_rigped_box_wire_head_color = FloatVectorProperty(
+        name="Head",
+        description="Classic Biped-style head color",
+        size=3,
+        subtype="COLOR",
+        min=0.0,
+        max=1.0,
+        default=(166.0 / 255.0, 202.0 / 255.0, 240.0 / 255.0),
+        update=update_rigped_box_wire_options,
+    )
+    bpy.types.Scene.baw_rigped_box_wire_com_color = FloatVectorProperty(
+        name="COM",
+        description="Rigped COM display color used in Select, Fit, and Animate modes",
+        size=3,
+        subtype="COLOR",
+        min=0.0,
+        max=1.0,
+        default=(0.92, 0.72, 0.18),
+        update=update_rigped_box_wire_options,
+    )
+    bpy.types.Scene.baw_rigped_box_wire_selected_color = FloatVectorProperty(
+        name="Selected",
+        description="Color used by selected Rigped controls in every Rigped mode",
+        size=3,
+        subtype="COLOR",
+        min=0.0,
+        max=1.0,
+        default=(1.0, 0.72, 0.18),
+        update=update_rigped_box_wire_options,
+    )
+    bpy.types.Scene.baw_rigped_box_wire_active_color = FloatVectorProperty(
+        name="Active",
+        description="Color used by the active Rigped control in every Rigped mode",
+        size=3,
+        subtype="COLOR",
+        min=0.0,
+        max=1.0,
+        default=(1.0, 0.92, 0.35),
+        update=update_rigped_box_wire_options,
+    )
     bpy.types.Scene.baw_rigped_semantic_transform_mode = EnumProperty(
         name="AWB Rigped Semantic Transform Mode",
         description="Transient animator tool state for AWB-owned Rigped transforms",
@@ -655,6 +757,7 @@ def register():
     # A5 Sliding reintroduces the Biped-style visible red IK/contact pivot cue.
     # The overlay remains state-driven: Free hides it, Sliding shows it.
     register_rigped_ik_pivot_overlay()
+    register_rigped_box_wire_overlay()
     register_development_workspace()
 
 
@@ -663,6 +766,7 @@ def unregister():
     unregister_debug_trace_handlers()
     unregister_global_gizmo_load_handler()
     unregister_global_gizmo_theme(bpy.context)
+    unregister_rigped_box_wire_overlay()
     unregister_rigped_ik_pivot_overlay()
     unregister_rigped_sliding_replay_handler()
     unregister_rigped_internal_visibility_handlers()
@@ -714,6 +818,16 @@ def unregister():
         "baw_contact_point_local",
         "baw_contact_plant_space",
         "baw_rigped_body_picker_enabled",
+        "baw_rigped_box_wire_active_color",
+        "baw_rigped_box_wire_selected_color",
+        "baw_rigped_box_wire_com_color",
+        "baw_rigped_box_wire_head_color",
+        "baw_rigped_box_wire_pelvis_color",
+        "baw_rigped_box_wire_center_color",
+        "baw_rigped_box_wire_right_color",
+        "baw_rigped_box_wire_left_color",
+        "baw_rigped_box_wire_width",
+        "baw_rigped_box_wire_options_expanded",
         "baw_rigped_semantic_transform_mode",
         "baw_trajectory_edit_mode",
         "baw_key_mode",

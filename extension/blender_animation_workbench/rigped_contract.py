@@ -137,6 +137,7 @@ _POSE_ROTATION_SEMANTICS = frozenset(
         "awb.neck",
         "awb.head",
         "awb.clavicle",
+        "awb.finger",
         "awb.toe",
     }
 )
