@@ -68,6 +68,8 @@ class FitNativeBeforeImage:
     descriptor_value: Any
     constraint_signature: tuple
     animation_signature: tuple
+    object_matrix_signature: tuple[float, ...]
+    pose_signature: tuple
     active_object: Any
     selected_objects: tuple[Any, ...]
 
@@ -172,6 +174,24 @@ def _exact_primary_driver(bone, baseline_by_name) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def _derived_driver_name(
+    bone,
+    baseline_by_name,
+    current_by_name,
+    *,
+    side: str,
+) -> str | None:
+    direct_name = _strip_direct_prefix(str(bone.name))
+    if direct_name in baseline_by_name and direct_name in current_by_name:
+        return direct_name
+
+    contact_name = _contact_source_name(str(bone.name), side)
+    if contact_name in baseline_by_name and contact_name in current_by_name:
+        return contact_name
+
+    return _exact_primary_driver(bone, baseline_by_name)
+
+
 def _derived_orientation(
     bone,
     *,
@@ -179,16 +199,9 @@ def _derived_orientation(
     target_tail: Vector,
     baseline_by_name,
     current_by_name,
+    driver_name: str | None,
 ) -> Quaternion:
     base_q = _bone_rest_orientation(bone)
-    driver_name = _strip_direct_prefix(str(bone.name))
-    if driver_name not in baseline_by_name or driver_name not in current_by_name:
-        driver_name = _exact_primary_driver(bone, baseline_by_name)
-    if driver_name is None:
-        contact_name = _contact_source_name(str(bone.name), "")
-        if contact_name in baseline_by_name and contact_name in current_by_name:
-            driver_name = contact_name
-
     candidate = base_q
     if driver_name is not None:
         base_driver = Quaternion(baseline_by_name[driver_name].orientation).normalized()
@@ -212,9 +225,15 @@ def _derived_correspondence_target(
     *,
     usage: str,
     semantic_key: str,
+    side: str,
     definition_by_name,
 ) -> FitBoneTarget | None:
-    driver_name = _exact_primary_driver(bone, baseline_by_name)
+    driver_name = _derived_driver_name(
+        bone,
+        baseline_by_name,
+        current_by_name,
+        side=side,
+    )
     direct_driver = current_by_name.get(driver_name) if driver_name is not None else None
     if direct_driver is not None:
         head = Vector(direct_driver.head)
@@ -230,6 +249,7 @@ def _derived_correspondence_target(
         target_tail=tail,
         baseline_by_name=baseline_by_name,
         current_by_name=current_by_name,
+        driver_name=driver_name,
     )
     owned_clone = (
         driver_name is not None
@@ -405,6 +425,7 @@ def compute_fit_commit_manifest(scene, semantic_session) -> FitCommitManifest:
             current_by_name,
             usage=usage,
             semantic_key=semantic_key,
+            side=side,
             definition_by_name=definition_by_name,
         )
         if derived_target is not None:
@@ -467,6 +488,38 @@ def _constraint_signature(rig) -> tuple:
     return tuple(rows)
 
 
+def _matrix_signature(matrix) -> tuple[float, ...]:
+    return tuple(
+        round(float(matrix[row][column]), 9)
+        for row in range(4)
+        for column in range(4)
+    )
+
+
+def _pose_signature(rig) -> tuple:
+    pose = getattr(rig, "pose", None)
+    rows = []
+    for bone in getattr(pose, "bones", ()) if pose is not None else ():
+        custom_shape = getattr(bone, "custom_shape", None)
+        rows.append(
+            (
+                str(bone.name),
+                str(getattr(bone, "rotation_mode", "")),
+                tuple(float(value) for value in bone.location),
+                tuple(float(value) for value in bone.rotation_euler),
+                tuple(float(value) for value in bone.rotation_quaternion),
+                tuple(float(value) for value in bone.rotation_axis_angle),
+                tuple(float(value) for value in bone.scale),
+                tuple(bool(value) for value in bone.lock_location),
+                tuple(bool(value) for value in bone.lock_rotation),
+                tuple(bool(value) for value in bone.lock_scale),
+                bool(getattr(bone, "lock_rotation_w", False)),
+                str(getattr(custom_shape, "name", "")) if custom_shape is not None else None,
+            )
+        )
+    return tuple(rows)
+
+
 def _select_only(rig) -> None:
     if bpy.context.object is not None and bpy.context.mode != "OBJECT":
         bpy.ops.object.mode_set(mode="OBJECT")
@@ -507,14 +560,20 @@ def capture_fit_native_before_image(scene, semantic_session) -> FitNativeBeforeI
     selected = tuple(bpy.context.selected_objects)
     constraints = _constraint_signature(rig)
     animation = _animation_signature(view)
-    edit_bones = _capture_edit_bones(rig)
-    _restore_context_objects(active, selected)
+    object_matrix_signature = _matrix_signature(rig.matrix_world)
+    pose_signature = _pose_signature(rig)
+    try:
+        edit_bones = _capture_edit_bones(rig)
+    finally:
+        _restore_context_objects(active, selected)
     return FitNativeBeforeImage(
         edit_bones=edit_bones,
         descriptor_exists=exists,
         descriptor_value=value,
         constraint_signature=constraints,
         animation_signature=animation,
+        object_matrix_signature=object_matrix_signature,
+        pose_signature=pose_signature,
         active_object=active,
         selected_objects=selected,
     )
@@ -610,6 +669,10 @@ def _verify_restored_before_image(scene, semantic_session, before: FitNativeBefo
         raise FitCommitTransactionError("FIT_F4_ROLLBACK_CONSTRAINT_MISMATCH")
     if _animation_signature(view) != before.animation_signature:
         raise FitCommitTransactionError("FIT_F4_ROLLBACK_ANIMATION_MISMATCH")
+    if _matrix_signature(rig.matrix_world) != before.object_matrix_signature:
+        raise FitCommitTransactionError("FIT_F4_ROLLBACK_OBJECT_MATRIX_MISMATCH")
+    if _pose_signature(rig) != before.pose_signature:
+        raise FitCommitTransactionError("FIT_F4_ROLLBACK_POSE_MISMATCH")
 
 
 def restore_fit_native_before_image(scene, semantic_session, before: FitNativeBeforeImage) -> None:
@@ -629,15 +692,35 @@ def restore_fit_native_before_image(scene, semantic_session, before: FitNativeBe
 
 
 def _apply_manifest(rig, manifest: FitCommitManifest, before: FitNativeBeforeImage) -> None:
+    target_by_name = {target.name: target for target in manifest.targets}
+    before_by_name = {item.name: item for item in before.edit_bones}
+    for item in before.edit_bones:
+        if (
+            item.use_connect
+            and item.name not in target_by_name
+            and item.parent_name in target_by_name
+        ):
+            parent_before = before_by_name.get(item.parent_name)
+            parent_target = target_by_name[item.parent_name]
+            if (
+                parent_before is not None
+                and not _vector_close(parent_before.tail, parent_target.tail)
+            ):
+                raise FitCommitTransactionError(
+                    f"FIT_F4_NON_TARGET_CONNECTED_CHILD:{item.name}"
+                )
+
     _select_only(rig)
     bpy.ops.object.mode_set(mode="EDIT")
     try:
         edit_bones = rig.data.edit_bones
+        for bone in edit_bones:
+            bone.use_connect = False
+
         for target in manifest.targets:
             bone = edit_bones.get(target.name)
             if bone is None:
                 raise FitCommitTransactionError(f"FIT_F4_TARGET_BONE_MISSING:{target.name}")
-            bone.use_connect = False
 
         for target in manifest.targets:
             bone = edit_bones[target.name]
@@ -652,6 +735,9 @@ def _apply_manifest(rig, manifest: FitCommitManifest, before: FitNativeBeforeIma
             bone.bbone_x = max(float(target.width), 1e-6)
             bone.bbone_z = max(float(target.depth), 1e-6)
 
+        for item in before.edit_bones:
+            if item.name not in target_by_name:
+                edit_bones[item.name].use_connect = bool(item.use_connect)
         for target in manifest.targets:
             edit_bones[target.name].use_connect = bool(target.use_connect)
     finally:
@@ -671,6 +757,20 @@ def _orientation_close(a, b, tolerance=FIT_REST_ROUNDTRIP_TOLERANCE) -> bool:
 
 def _verify_manifest(scene, semantic_session, manifest: FitCommitManifest, before: FitNativeBeforeImage) -> None:
     rig = semantic_session.rig_object
+    target_names = {target.name for target in manifest.targets}
+    current_edit_bones = _capture_edit_bones(rig)
+    current_non_targets = tuple(
+        item for item in current_edit_bones if item.name not in target_names
+    )
+    before_non_targets = tuple(
+        item for item in before.edit_bones if item.name not in target_names
+    )
+    if not _edit_bone_before_images_match(
+        current_non_targets,
+        before_non_targets,
+    ):
+        raise FitCommitTransactionError("FIT_F4_NON_TARGET_REST_CHANGED")
+
     bones = rig.data.bones
     for target in manifest.targets:
         bone = bones.get(target.name)
@@ -701,6 +801,10 @@ def _verify_manifest(scene, semantic_session, manifest: FitCommitManifest, befor
     view = resolve_character(scene, semantic_session.character_id)
     if _animation_signature(view) != before.animation_signature:
         raise FitCommitTransactionError("FIT_F4_ANIMATION_CHANGED")
+    if _matrix_signature(rig.matrix_world) != before.object_matrix_signature:
+        raise FitCommitTransactionError("FIT_F4_OBJECT_MATRIX_CHANGED")
+    if _pose_signature(rig) != before.pose_signature:
+        raise FitCommitTransactionError("FIT_F4_POSE_CHANGED")
 
 
 def commit_fit_semantic_session_atomic(context, semantic_session) -> FitCommitResult:
@@ -730,6 +834,12 @@ def commit_fit_semantic_session_atomic(context, semantic_session) -> FitCommitRe
     )
     manifest = compute_fit_commit_manifest(context.scene, semantic_session)
     before = capture_fit_native_before_image(context.scene, semantic_session)
+    issues = validate_fit_semantic_session(context, semantic_session)
+    if issues:
+        raise FitCommitTransactionError(
+            "FIT_F4_BEFORE_IMAGE_STALE:" + ",".join(str(issue) for issue in issues)
+        )
+
     try:
         _apply_manifest(semantic_session.rig_object, manifest, before)
         context.view_layer.update()

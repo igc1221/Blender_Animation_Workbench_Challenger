@@ -21,6 +21,7 @@ def test_f4_dirty_apply_routes_through_atomic_transaction_only():
     assert "FIT_F4_GESTURE_ACTIVE" in commit
     assert "compute_fit_commit_manifest(context.scene, semantic_session)" in commit
     assert "capture_fit_native_before_image(context.scene, semantic_session)" in commit
+    assert "FIT_F4_BEFORE_IMAGE_STALE" in commit
 
 
 def test_f4_manifest_covers_primary_owned_carriers_targets_contacts_and_poles():
@@ -53,6 +54,12 @@ def test_f4_before_image_owns_every_native_field_that_commit_mutates():
     assert "descriptor_value:" in commit
     assert "constraint_signature:" in commit
     assert "animation_signature:" in commit
+    assert "object_matrix_signature:" in commit
+    assert "pose_signature:" in commit
+    assert "FIT_F4_OBJECT_MATRIX_CHANGED" in commit
+    assert "FIT_F4_POSE_CHANGED" in commit
+    assert "FIT_F4_ROLLBACK_OBJECT_MATRIX_MISMATCH" in commit
+    assert "FIT_F4_ROLLBACK_POSE_MISMATCH" in commit
     assert "pole_angle" in commit
 
 
