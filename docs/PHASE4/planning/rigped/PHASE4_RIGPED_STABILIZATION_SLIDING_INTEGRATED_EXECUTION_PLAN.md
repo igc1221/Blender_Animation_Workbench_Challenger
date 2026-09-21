@@ -20,20 +20,23 @@ E1 through E6 remain **USER PASS / CLOSED**. The later Astra comprehensive revie
 - **B2** — final Contact feedback-authority mutation/update occurred after `journal.commit()`.
 - **B3** — E6 hidden SolverSeed raw result mutation was not fully owned by gesture cancel/failure restore.
 
-Main resolved B1-B3 as one coherent stabilization batch without adding a second solver or new animation authority. GLM N1 replay hardening was also closed; remaining broad Move ownership convergence is assigned to the first E7 implementation batch.
+Main resolved B1-B3 as one coherent stabilization batch without adding a second solver or new animation authority. GLM N1 replay hardening is closed. GLM N2/N3 remain assigned to the first E7 implementation batch.
 
 Closure evidence on current source:
 
-- `awb-check`: **388 pytest PASS + Ruff PASS**.
+- `awb-check`: **389 pytest PASS + Ruff PASS**.
 - Blender 5.2.1 `awb-phase4-i12-runtime-verify`: **FULL PASS**, including L/R Arm+Leg FK↔IK, opposite-bend Contact playback, Sliding Rotate→C pose preservation, live red-pivot sync, exact rollback, limits, and singular fallback.
 - Blender 5.2.1 `awb-phase4-i13-runtime-verify`: **FULL PASS**, including same-frame Free↔Sliding continuity, fault rollback, single-journal Contact closure, and Rigped K complete no-op.
 - Clean-baseline frozen `E5` replay: **PASS**.
-- Clean-baseline frozen `E6` replay: **PASS**.
-- `debug/user_final_tests/current.json` was restored to `Figure_F6` after replay verification.
-- POST round consumed exactly once with independent **Qwen = CLEAR** and **DeepSeek = CLEAR**.
-- Main source-level disposition: no remaining B1/B2/B3 blocker. DeepSeek's source-inline caveat was accepted as a future review-evidence process improvement, not a product blocker.
+- Newly launched clean-baseline frozen `E6` replay: **PASS**.
+- Figure/Fit current pointer was not repointed for this stabilization.
+- POST round consumed exactly once with two independent reviewers:
+  - **Qwen = CLEAR / no blockers**.
+  - **DeepSeek = REVIEW / no source-backed product blocker**; its only material point was insufficient inline source evidence in the packet.
+- Main accepted DeepSeek's packet-construction lesson into the `review-evidence` skill and independently verified the exact current-source callsites, including no fallible product-state mutation or required verification after `journal.commit()`.
+- Mandatory post-review rerun: **389 pytest + Ruff PASS, I12 FULL PASS, I13 FULL PASS**.
 
-The stabilization gate is therefore **CLOSED**. E7 is now the active next implementation item.
+The stabilization gate is therefore **CLOSED**. E7 is now unblocked and becomes the next implementation item.
 
 This override does not alter the normal narrow PRE/POST challenger policy for later implementation items.
 
