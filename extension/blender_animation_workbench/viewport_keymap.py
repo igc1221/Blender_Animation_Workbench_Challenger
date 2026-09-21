@@ -1721,23 +1721,22 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                 )
             return {"FINISHED"}
 
-        if fit_state is not None and context.mode == "EDIT_ARMATURE":
-            fit_mode_before = fit_transform_mode(context)
-            set_fit_transform_mode(context, self.mode)
-            # Fit owns W/E/R as structural tools. Move/Rotate use an AWB modal
-            # that propagates the active EditBone transform through native
-            # descendants without selecting them; Scale keeps its Fit-only
-            # structural gizmo. Never fall through to Blender's ordinary
-            # single-bone transform tools while a Fit session is active.
+        if fit_host_present:
+            # Figure is Object-hosted. Any externally forced non-Object mode is
+            # stale/unsupported while the semantic session is alive. Consume
+            # W/E/R here so native EditBone/Pose/Object transforms cannot become
+            # a fallback authoring path.
+            set_fit_transform_mode(context, "NONE")
             deactivate_rigped_semantic_tool(context)
             context.space_data.show_gizmo = True
             _hide_native_tool_gizmo(context)
-            if fit_mode_before == self.mode:
-                # JJTools-style state cycle: pressing the active W/E/R tool
-                # again toggles only between Global and true bone-Local. Fit
-                # owns this state; do not route Local through Blender NORMAL.
-                current = fit_orientation_mode(context)
-                set_fit_orientation_mode(context, "WORLD" if current == "LOCAL" else "LOCAL")
+            trace_event(
+                "INPUT",
+                "FIT_F5_NON_OBJECT_TRANSFORM_BLOCKED",
+                context=context,
+                requested_mode=self.mode,
+                host_mode=str(context.mode),
+            )
             return {"FINISHED"}
 
         rigped_decision = _rigped_transform_decision(context, self.mode)
@@ -2079,6 +2078,53 @@ def _unregister_awb_selection_tools() -> None:
     for tool_cls in reversed(_AWB_SELECTION_TOOLS):
         bpy.utils.unregister_tool(tool_cls)
     _AWB_SELECTION_TOOLS_REGISTERED = False
+
+
+class BAW_OT_guard_figure_native_edit(bpy.types.Operator):
+    """Keep an active Figure session from falling through to native edit transforms."""
+
+    bl_idname = "baw.guard_figure_native_edit"
+    bl_label = "Guard Figure Native Edit"
+    bl_options: ClassVar[set[str]] = {"INTERNAL"}
+
+    action: EnumProperty(
+        items=(
+            ("BLOCK", "Block", "Consume a native transform while Figure owns authoring"),
+            ("RESTORE_OBJECT", "Restore Object", "Return a forced non-Object Figure host to Object Mode"),
+        ),
+        default="BLOCK",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return fit_ui_state_present(context)
+
+    def execute(self, context):
+        host_mode = str(getattr(context, "mode", ""))
+        if self.action == "RESTORE_OBJECT" and host_mode != "OBJECT":
+            try:
+                bpy.ops.object.mode_set(mode="OBJECT")
+            except RuntimeError:
+                trace_event(
+                    "ERROR",
+                    "FIT_F5_OBJECT_HOST_RESTORE_FAILED",
+                    context=context,
+                    host_mode=host_mode,
+                )
+                return {"FINISHED"}
+            try:
+                bpy.ops.wm.tool_set_by_id(name="baw.select_object")
+            except RuntimeError:
+                pass
+            set_fit_transform_mode(context, "NONE")
+        trace_event(
+            "INPUT",
+            "FIT_F5_NATIVE_EDIT_BLOCKED",
+            context=context,
+            action=self.action,
+            host_mode=host_mode,
+        )
+        return {"FINISHED"}
 
 
 class BAW_OT_block_native_select_click(bpy.types.Operator):
@@ -2427,25 +2473,26 @@ def register_viewport_keymaps() -> None:
     _register_transform_hotkeys(km)
 
     # R conflicts strongly with Blender's default transform bindings, so put
-    # W/E/R at the head of the mode-specific maps as well. Armature is Blender's
-    # Edit Mode keymap for armatures, which keeps Fit on the same Max-style W/E/R.
+    # W/E/R at the head of the mode-specific maps as well.
     for name in ("Object Mode", "Pose", "Armature"):
         mode_km = kc.keymaps.get(name)
         if mode_km is None:
             mode_km = kc.keymaps.new(name=name, space_type="EMPTY")
         _register_transform_hotkeys(mode_km)
-        if name == "Armature":
-            # Fit owns a bounded structural history while the session is open.
-            # These operators poll false outside Fit, so ordinary Edit Mode can
-            # still fall through to Blender's native global Undo/Redo bindings.
-            _add_keymap_item(mode_km, "baw.rigped_fit_history_undo", "Z", ctrl=True)
-            _add_keymap_item(
-                mode_km,
-                "baw.rigped_fit_history_redo",
-                "Z",
-                ctrl=True,
-                shift=True,
-            )
+        guard_tab = _add_keymap_item(
+            mode_km,
+            BAW_OT_guard_figure_native_edit.bl_idname,
+            "TAB",
+        )
+        guard_tab.properties.action = "RESTORE_OBJECT"
+        if name in {"Object Mode", "Pose", "Armature"}:
+            for event_type in ("G", "S"):
+                guard_transform = _add_keymap_item(
+                    mode_km,
+                    BAW_OT_guard_figure_native_edit.bl_idname,
+                    event_type,
+                )
+                guard_transform.properties.action = "BLOCK"
 
 
 def unregister_viewport_keymaps() -> None:

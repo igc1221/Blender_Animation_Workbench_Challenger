@@ -525,6 +525,7 @@ class RepresentationSnapResult:
     ik_target_state: SnapControlState | None = None
     pole_target_state: SnapControlState | None = None
     pole_angle: float | None = None
+    hinge_branch: int | None = None
 
 
 def _snap_diagnostic(plan, code: str, detail: str):
@@ -1206,10 +1207,14 @@ def execute_representation_snap(
         bpy.context.view_layer.update()
         hook.enter(OperationStage.VERIFY, operation=plan.operation_id)
         residuals = _residuals_for_expected(capability, expected_result, expected_terminal)
-        if not _residuals_within_tolerance(residuals, scale=_character_scale(capability)):
+        residual_scale = _character_scale(capability)
+        position_tolerance = _position_tolerance(residual_scale)
+        if not _residuals_within_tolerance(residuals, scale=residual_scale):
             raise RepresentationSnapError(
                 "I12_RESIDUAL_GATE_FAILED: "
                 f"mapping={payload.mapping_id} "
+                f"scale={residual_scale:.9g} "
+                f"pos_tol={position_tolerance:.9g} "
                 f"chain_pos={residuals.max_position_error:.9g} "
                 f"chain_rot={residuals.max_rotation_error:.9g} "
                 f"terminal_pos={residuals.terminal_position_error:.9g} "
@@ -1267,6 +1272,7 @@ def execute_representation_snap(
             ik_target_state=ik_target_state,
             pole_target_state=pole_target_state,
             pole_angle=captured_pole_angle,
+            hinge_branch=hinge_branch,
         )
     except Exception:
         if hinge_snapshot is not None:

@@ -353,6 +353,22 @@ def _raw_attribute(field: RawFieldKind) -> str:
         return rotation
     if field in {RawFieldKind.OBJECT_SCALE, RawFieldKind.POSE_BONE_SCALE}:
         return "scale"
+    pose_ik_fields = {
+        RawFieldKind.POSE_BONE_LOCK_IK_X: "lock_ik_x",
+        RawFieldKind.POSE_BONE_LOCK_IK_Y: "lock_ik_y",
+        RawFieldKind.POSE_BONE_LOCK_IK_Z: "lock_ik_z",
+        RawFieldKind.POSE_BONE_USE_IK_LIMIT_X: "use_ik_limit_x",
+        RawFieldKind.POSE_BONE_USE_IK_LIMIT_Y: "use_ik_limit_y",
+        RawFieldKind.POSE_BONE_USE_IK_LIMIT_Z: "use_ik_limit_z",
+        RawFieldKind.POSE_BONE_IK_MIN_X: "ik_min_x",
+        RawFieldKind.POSE_BONE_IK_MAX_X: "ik_max_x",
+        RawFieldKind.POSE_BONE_IK_MIN_Y: "ik_min_y",
+        RawFieldKind.POSE_BONE_IK_MAX_Y: "ik_max_y",
+        RawFieldKind.POSE_BONE_IK_MIN_Z: "ik_min_z",
+        RawFieldKind.POSE_BONE_IK_MAX_Z: "ik_max_z",
+    }
+    if field in pose_ik_fields:
+        return pose_ik_fields[field]
     if field is RawFieldKind.CONSTRAINT_INFLUENCE:
         return "influence"
     if field is RawFieldKind.CONSTRAINT_MUTE:

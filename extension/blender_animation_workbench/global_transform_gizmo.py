@@ -51,15 +51,6 @@ from .rigped_fit_session import (
     fit_figure_scale_available,
     fit_semantic_session,
 )
-from .rigped_fit_transform import (
-    BAW_OT_rigped_fit_scale_axis,
-    BAW_OT_rigped_fit_transform_axis,
-    _active_edit_bone,
-    _fit_orientation_axes,
-    _fit_pivot_local,
-    _plane_point,
-    _rotation_vector,
-)
 from .rigped_transform import (
     BAW_OT_rigped_direct_move_axis,
     BAW_OT_rigped_direct_rotate_axis,
@@ -77,6 +68,8 @@ from .rigped_transform import (
     semantic_move_axes,
     semantic_move_pivot,
 )
+from .viewport_transform_math import plane_point as _plane_point
+from .viewport_transform_math import rotation_vector as _rotation_vector
 
 
 def _active_tool_id(context) -> str:
@@ -128,10 +121,15 @@ def _route_and_mode(context) -> tuple[str, str]:
     if bool(getattr(getattr(context, "scene", None), "baw_trajectory_edit_mode", False)):
         return "", ""
 
-    if fit_ui_state_present(context) and getattr(context, "mode", "") == "OBJECT":
+    if fit_ui_state_present(context):
+        if getattr(context, "mode", "") != "OBJECT":
+            # Figure is Object-hosted. If external UI or a stale Blender action
+            # forces another mode while the semantic session is alive, never
+            # expose a native/EditBone transform route.
+            return "", ""
         # A raw Figure/Fit host suppresses native Object transforms even if the
         # semantic session became stale/missing. Only a fully valid Figure
-        # state may expose the migrated semantic Move route.
+        # state may expose the migrated semantic transform route.
         state = fit_ui_state(context)
         if state is None:
             return "", ""
@@ -143,11 +141,6 @@ def _route_and_mode(context) -> tuple[str, str]:
         if mode == "SCALE" and fit_figure_scale_available(context):
             return "FIGURE", "SCALE"
         return "", ""
-
-    # Fit deliberately keeps the AWB Select workspace tool active and owns its
-    # transform mode internally, so resolve Fit before the Select-tool guard.
-    if getattr(context, "mode", "") == "EDIT_ARMATURE" and fit_ui_state(context) is not None:
-        return "FIT", str(fit_transform_mode(context) or "")
 
     active_tool = _active_tool_id(context)
     if active_tool in {
@@ -298,6 +291,19 @@ def _orientation_axes(context, local_basis: Matrix) -> dict[str, Vector] | None:
     }
 
 
+def _active_edit_bone(context):
+    obj = getattr(context, "active_object", None)
+    if obj is None or getattr(obj, "type", None) != "ARMATURE":
+        return None
+    edit_bones = getattr(obj.data, "edit_bones", None)
+    if edit_bones is None:
+        return None
+    bone = getattr(edit_bones, "active", None)
+    if bone is None or not bool(getattr(bone, "select", False)):
+        return None
+    return bone
+
+
 def _native_pivot_axes(context) -> tuple[Vector | None, dict[str, Vector] | None]:
     obj = getattr(context, "active_object", None)
     if obj is None:
@@ -340,13 +346,6 @@ def _pivot_axes(
             context,
             orientation_mode=fit_orientation_mode(context),
         )
-    if route == "FIT":
-        rig = getattr(context, "active_object", None)
-        bone = _active_edit_bone(context)
-        axes = _fit_orientation_axes(context)
-        if rig is None or bone is None or axes is None:
-            return None, None
-        return Vector(rig.matrix_world @ _fit_pivot_local(bone)), axes
 
     # Pose mode can retain an active pose bone after clicking empty viewport
     # space, even though the actual selection has been cleared. Never let that
@@ -1657,7 +1656,6 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
         handles = ("X", "Y", "Z", "XY", "XZ", "YZ")
         for route, operator in (
             ("NATIVE", BAW_OT_global_native_transform_axis.bl_idname),
-            ("FIT", BAW_OT_rigped_fit_transform_axis.bl_idname),
             ("FIGURE", BAW_OT_figure_fit_move_axis.bl_idname),
             ("DIRECT_MOVE", BAW_OT_rigped_direct_move_axis.bl_idname),
             ("FK_MOVE", BAW_OT_rigped_fk_joint_move_axis.bl_idname),
@@ -1686,8 +1684,6 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
                     props.mode = "MOVE"
                     props.axis = handle
                 else:
-                    if route == "FIT":
-                        props.mode = "MOVE"
                     props.axis = handle
                 route_hits[handle] = (hit, props)
             self.hit_routes["MOVE"][route] = route_hits
@@ -1695,7 +1691,6 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
     def _setup_rotate_hits(self):
         for route, operator in (
             ("NATIVE", BAW_OT_global_native_transform_axis.bl_idname),
-            ("FIT", BAW_OT_rigped_fit_transform_axis.bl_idname),
             ("FIGURE", BAW_OT_figure_fit_rotate_axis.bl_idname),
             ("DIRECT_ROTATE", BAW_OT_rigped_direct_rotate_axis.bl_idname),
         ):
@@ -1719,8 +1714,6 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
                     props.mode = "ROTATE"
                     props.axis = handle
                 else:
-                    if route == "FIT":
-                        props.mode = "ROTATE"
                     props.axis = handle
                 route_hits[handle] = (hit, props)
             self.hit_routes["ROTATE"][route] = route_hits
@@ -1728,7 +1721,6 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
     def _setup_scale_hits(self):
         for route, operator in (
             ("NATIVE", BAW_OT_global_native_transform_axis.bl_idname),
-            ("FIT", BAW_OT_rigped_fit_scale_axis.bl_idname),
             ("FIGURE", BAW_OT_figure_fit_scale_axis.bl_idname),
         ):
             route_hits = {}

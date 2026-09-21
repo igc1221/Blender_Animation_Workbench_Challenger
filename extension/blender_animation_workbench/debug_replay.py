@@ -218,17 +218,53 @@ def _execute_contact_action(context, action: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(detail or "AWB semantic replay Contact action failed.")
 
     actual = result.contact_type.value if result.contact_type is not None else None
+    actual_mappings = tuple(
+        (str(mapping_id), getattr(contact_type, "value", str(contact_type)))
+        for mapping_id, contact_type in getattr(result, "mapping_contact_types", ())
+    )
     expected = action.get("contact_type")
-    if expected is not None and actual is not None and str(actual) != str(expected):
-        raise RuntimeError(
-            f"AWB semantic replay Contact mismatch: expected {expected}, got {actual}."
+    expected_mappings = action.get("mapping_contact_types")
+    if expected is not None:
+        if actual is None:
+            raise RuntimeError(
+                "AWB semantic replay Contact mismatch: "
+                f"expected {expected}, got None (per-limb results={actual_mappings!r})."
+            )
+        if str(actual) != str(expected):
+            raise RuntimeError(
+                f"AWB semantic replay Contact mismatch: expected {expected}, got {actual}."
+            )
+    if expected_mappings is not None:
+        if not actual_mappings:
+            raise RuntimeError(
+                "AWB semantic replay Contact mapping mismatch: expected per-limb results, got none."
+            )
+        if isinstance(expected_mappings, dict):
+            expected_mapping_items = tuple(expected_mappings.items())
+        else:
+            expected_mapping_items = tuple(
+                (item[0], item[1])
+                for item in tuple(expected_mappings)
+                if isinstance(item, (list, tuple)) and len(item) == 2
+            )
+        normalized_expected = tuple(
+            (str(mapping_id), str(contact_type))
+            for mapping_id, contact_type in expected_mapping_items
         )
-    return {
+        if actual_mappings != normalized_expected:
+            raise RuntimeError(
+                "AWB semantic replay Contact mapping mismatch: "
+                f"expected {normalized_expected!r}, got {actual_mappings!r}."
+            )
+    replay_result = {
         "kind": "CONTACT",
         "frame": frame,
         "controls": controls,
         "contact_type": actual,
     }
+    if actual_mappings:
+        replay_result["mapping_contact_types"] = actual_mappings
+    return replay_result
 
 
 def _execute_free_direct_rotate_action(context, action: dict[str, Any]) -> dict[str, Any]:

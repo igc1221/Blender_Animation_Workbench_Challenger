@@ -67,9 +67,42 @@ class FitSemanticSession:
     active_move_gesture: FitMoveGestureBaseline | None = None
     active_rotate_gesture: FitRotateGestureBaseline | None = None
     active_scale_gesture: FitScaleGestureBaseline | None = None
+    # Window pointers can be recycled after close/reopen. Pair the pointer-key
+    # with transient Screen identity to detect a new Window generation.
+    window_screen_pointer: int | None = None
+    scene_pointer: int | None = None
 
 
 _SESSIONS: dict[int, FitSemanticSession] = {}
+
+
+def clear_fit_semantic_sessions() -> None:
+    """Discard only the non-serialized Figure semantic session map."""
+
+    _SESSIONS.clear()
+
+
+def prune_fit_semantic_sessions(live_windows) -> int:
+    """Drop sessions whose Window, Screen, or file Scene generation changed."""
+
+    removed = 0
+    for key, session in tuple(_SESSIONS.items()):
+        generation = live_windows.get(key)
+        if generation is None:
+            _SESSIONS.pop(key, None)
+            removed += 1
+            continue
+        screen_pointer, scene_pointer = generation
+        if (
+            session.window_screen_pointer is not None
+            and screen_pointer != session.window_screen_pointer
+        ) or (
+            session.scene_pointer is not None
+            and scene_pointer != session.scene_pointer
+        ):
+            _SESSIONS.pop(key, None)
+            removed += 1
+    return removed
 
 
 class FitSemanticSessionError(RuntimeError):
@@ -164,6 +197,15 @@ def _safe_pointer(value) -> int | None:
 
 def _window_key(context) -> int | None:
     return _safe_pointer(getattr(context, "window", None))
+
+
+def _window_screen_pointer(context) -> int | None:
+    window = getattr(context, "window", None)
+    return _safe_pointer(getattr(window, "screen", None))
+
+
+def _scene_pointer(context) -> int | None:
+    return _safe_pointer(getattr(context, "scene", None))
 
 
 def _matrix_signature(matrix) -> tuple[float, ...]:
@@ -344,6 +386,8 @@ def begin_fit_semantic_session(
         matrix_signature=matrix_signature,
         matrix_world_frozen=matrix_world_frozen,
         geometry=geometry,
+        window_screen_pointer=_window_screen_pointer(context),
+        scene_pointer=_scene_pointer(context),
     )
     _SESSIONS[key] = session
     return session
@@ -355,6 +399,16 @@ def fit_semantic_session(context) -> FitSemanticSession | None:
         return None
     session = _SESSIONS.get(key)
     if session is None:
+        return None
+    if (
+        session.window_screen_pointer is not None
+        and _window_screen_pointer(context) != session.window_screen_pointer
+    ):
+        return None
+    if (
+        session.scene_pointer is not None
+        and _scene_pointer(context) != session.scene_pointer
+    ):
         return None
     rig = session.rig_object
     if rig is None or _safe_pointer(rig) != session.geometry.rig_pointer:

@@ -24,10 +24,14 @@ from .phase4_contact_model import (
     type_for_state_value,
 )
 from .phase4_mutation_journal import (
+    ConstraintMutationReceipt,
     FCurveMutationReceipt,
     FCurveSnapshot,
     IDPropertyMutationReceipt,
     MutationJournal,
+    RawFieldKind,
+    RawFieldMutationReceipt,
+    RawFieldSnapshot,
 )
 from .phase4_mutation_journal_blender import BlenderRollbackExecutor
 from .phase4_operation_plan import (
@@ -61,7 +65,6 @@ from .phase4_representation_snap import (
     execute_representation_snap,
     representation_payload_matches,
     resolve_limb_representation_capability,
-    set_limb_fk_feedback_muted,
 )
 from .phase4_verification import (
     Diagnostic,
@@ -114,14 +117,24 @@ def _reevaluate_contact_frame_preserving_public_pose(
     scene,
     frame: int,
     subframe: float,
+    *,
+    feedback_constraints: tuple[Any, ...] = (),
 ) -> None:
     # Contact C authors semantic/IK authority. It must not visibly re-pose an
     # unrelated Sliding limb merely because Blender re-evaluates the same frame.
     # Snapshot animator-facing Authored channels immediately before the required
     # FCurve evaluation, then restore those pose channels before the next redraw.
+    #
+    # frame_change_post derives FK-feedback mute from the evaluated Contact
+    # state. During an authoring transaction that derived representation change
+    # must not escape ahead of the journal-owned final authority step, so freeze
+    # and restore only the affected feedback constraints across frame_set().
     snapshots = _authored_public_pose_snapshot(scene)
+    feedback_mutes = tuple(bool(constraint.mute) for constraint in feedback_constraints)
     scene.frame_set(frame, subframe=subframe)
     view_layer = getattr(bpy.context, "view_layer", None)
+    for constraint, muted in zip(feedback_constraints, feedback_mutes, strict=True):
+        constraint.mute = bool(muted)
     if view_layer is not None:
         view_layer.update()
     for pose_bone, matrix_basis in snapshots:
@@ -245,6 +258,7 @@ class ContactPreparedIntent:
     transform_rows: tuple[PlannedChannel, ...]
     expected_result: tuple[Any, ...]
     expected_terminal: Any
+    hinge_branch: int | None
     hold_state: SnapControlState | None
     point_state: SnapControlState | None
 
@@ -805,6 +819,228 @@ def _journal_contact_authoring_latch(
     )
     stage_write("set Contact authoring latch")
     _set_contact_authoring_latch(capability, contact_type)
+
+
+def _raw_pose_field_value(target, field: RawFieldKind) -> tuple[float, ...]:
+    if field is RawFieldKind.POSE_BONE_LOCATION:
+        value = target.location
+    elif field is RawFieldKind.POSE_BONE_ROTATION_EULER:
+        value = target.rotation_euler
+    elif field is RawFieldKind.POSE_BONE_ROTATION_QUATERNION:
+        value = target.rotation_quaternion
+    elif field is RawFieldKind.POSE_BONE_ROTATION_AXIS_ANGLE:
+        value = target.rotation_axis_angle
+    elif field is RawFieldKind.POSE_BONE_SCALE:
+        value = target.scale
+    else:
+        raise ValueError(f"Unsupported Contact pose raw field: {field!r}")
+    return tuple(float(component) for component in value)
+
+
+def _journal_pose_matrix_seed(
+    resolved,
+    desired_matrix,
+    plan: OperationPlan,
+    journal: MutationJournal,
+    stage_write,
+    *,
+    label: str,
+    parent_pose_matrix=None,
+) -> None:
+    owner_ptr = _runtime_pointer(resolved.owner_object)
+    target_ptr = _runtime_pointer(resolved.target)
+    if owner_ptr is None or target_ptr is None:
+        raise ContactAuthoringError(
+            "Contact feedback authority lost hidden result runtime identity before commit."
+        )
+    scope = _scope(plan, owner_ptr=int(owner_ptr), bag_ptr=None)
+    for field in (
+        RawFieldKind.POSE_BONE_LOCATION,
+        RawFieldKind.POSE_BONE_ROTATION_EULER,
+        RawFieldKind.POSE_BONE_ROTATION_QUATERNION,
+        RawFieldKind.POSE_BONE_ROTATION_AXIS_ANGLE,
+        RawFieldKind.POSE_BONE_SCALE,
+    ):
+        journal.record(
+            RawFieldMutationReceipt(
+                journal.next_ordinal(),
+                scope,
+                int(owner_ptr),
+                int(target_ptr),
+                RawFieldSnapshot(field, _raw_pose_field_value(resolved.target, field)),
+            )
+        )
+
+    pose_bone = resolved.target
+    rest = pose_bone.bone.matrix_local.copy()
+    if pose_bone.parent is None:
+        basis = rest.inverted() @ desired_matrix
+    else:
+        parent_rest = pose_bone.parent.bone.matrix_local.copy()
+        parent_pose = (
+            parent_pose_matrix.copy()
+            if parent_pose_matrix is not None
+            else pose_bone.parent.matrix.copy()
+        )
+        basis = rest.inverted() @ parent_rest @ parent_pose.inverted() @ desired_matrix
+    property_name, _representation, _indices, _values, mode = _rotation_descriptor(pose_bone)
+    quaternion = basis.to_quaternion().normalized()
+    if property_name == "rotation_quaternion":
+        rotation = (quaternion.w, quaternion.x, quaternion.y, quaternion.z)
+    elif property_name == "rotation_axis_angle":
+        axis = quaternion.axis
+        rotation = (quaternion.angle, axis.x, axis.y, axis.z)
+    else:
+        rotation = tuple(float(component) for component in quaternion.to_euler(mode))
+
+    stage_write(label)
+    pose_bone.location = basis.to_translation()
+    setattr(pose_bone, property_name, rotation)
+
+
+def _journal_generated_hinge_branch(
+    capability,
+    branch_sign: int | None,
+    plan: OperationPlan,
+    journal: MutationJournal,
+    stage_write,
+) -> None:
+    if branch_sign is None:
+        return
+    solver_owner = capability.native_ik.solver_owner.target
+    owner = capability.native_ik.solver_owner.owner_object
+    owner_ptr = _runtime_pointer(owner)
+    target_ptr = _runtime_pointer(solver_owner)
+    if owner_ptr is None or target_ptr is None:
+        raise ContactAuthoringError(
+            "Sliding hinge authority lost hidden solver runtime identity before commit."
+        )
+    scope = _scope(plan, owner_ptr=int(owner_ptr), bag_ptr=None)
+    raw_fields = (
+        (RawFieldKind.POSE_BONE_LOCK_IK_X, "lock_ik_x"),
+        (RawFieldKind.POSE_BONE_LOCK_IK_Y, "lock_ik_y"),
+        (RawFieldKind.POSE_BONE_LOCK_IK_Z, "lock_ik_z"),
+        (RawFieldKind.POSE_BONE_USE_IK_LIMIT_X, "use_ik_limit_x"),
+        (RawFieldKind.POSE_BONE_USE_IK_LIMIT_Y, "use_ik_limit_y"),
+        (RawFieldKind.POSE_BONE_USE_IK_LIMIT_Z, "use_ik_limit_z"),
+        (RawFieldKind.POSE_BONE_IK_MIN_X, "ik_min_x"),
+        (RawFieldKind.POSE_BONE_IK_MAX_X, "ik_max_x"),
+        (RawFieldKind.POSE_BONE_IK_MIN_Y, "ik_min_y"),
+        (RawFieldKind.POSE_BONE_IK_MAX_Y, "ik_max_y"),
+        (RawFieldKind.POSE_BONE_IK_MIN_Z, "ik_min_z"),
+        (RawFieldKind.POSE_BONE_IK_MAX_Z, "ik_max_z"),
+    )
+    for field, attribute in raw_fields:
+        value = getattr(solver_owner, attribute)
+        before = bool(value) if isinstance(value, bool) else float(value)
+        journal.record(
+            RawFieldMutationReceipt(
+                journal.next_ordinal(),
+                scope,
+                int(owner_ptr),
+                int(target_ptr),
+                RawFieldSnapshot(field, before),
+            )
+        )
+    stage_write(f"configure hidden Sliding hinge branch={int(branch_sign)}")
+    from .rigped_humanoid_builder import configure_generated_rigped_ik_hinge_branch
+
+    configure_generated_rigped_ik_hinge_branch(solver_owner, int(branch_sign))
+
+
+def _journal_limb_fk_feedback_muted(
+    capability,
+    muted: bool,
+    plan: OperationPlan,
+    journal: MutationJournal,
+    stage_write,
+    *,
+    expected_result: tuple[Any, ...] | None = None,
+    expected_terminal=None,
+    hinge_branch: int | None = None,
+) -> None:
+    """Apply derived FK-feedback authority while the Contact journal is still OPEN."""
+
+    owner = capability.native_ik.solver_owner.owner_object
+    owner_ptr = _runtime_pointer(owner)
+    if owner_ptr is None:
+        raise ContactAuthoringError(
+            "Contact feedback authority lost owner runtime identity before commit."
+        )
+    constraints = (
+        *capability.fk_copy_constraints,
+        capability.terminal_fk_constraint,
+    )
+    desired = bool(muted)
+
+    # Entering IK authority disconnects public FK Copy Rotation from the hidden
+    # result chain. Seed the current evaluated result into hidden raw channels
+    # inside the same journal first so native IK starts from the exact visible
+    # pose instead of losing the axial/bend input supplied by FK feedback.
+    if desired and any(not bool(constraint.mute) for constraint in constraints):
+        if expected_result is None or expected_terminal is None:
+            raise ContactAuthoringError(
+                "Sliding feedback transition is missing its frozen result pose seed."
+            )
+        if len(expected_result) != len(capability.result_controls):
+            raise ContactAuthoringError(
+                "Sliding feedback transition result seed cardinality changed."
+            )
+        for index, (control, expected) in enumerate(
+            zip(capability.result_controls, expected_result, strict=True)
+        ):
+            _journal_pose_matrix_seed(
+                control,
+                expected,
+                plan,
+                journal,
+                stage_write,
+                label=f"seed hidden Sliding result control {index}",
+                parent_pose_matrix=(expected_result[index - 1] if index else None),
+            )
+        _journal_pose_matrix_seed(
+            capability.result_terminal,
+            expected_terminal,
+            plan,
+            journal,
+            stage_write,
+            label="seed hidden Sliding result terminal",
+            parent_pose_matrix=expected_result[-1],
+        )
+
+    if desired:
+        _journal_generated_hinge_branch(
+            capability,
+            hinge_branch,
+            plan,
+            journal,
+            stage_write,
+        )
+
+    for constraint in constraints:
+        before = bool(constraint.mute)
+        if before == desired:
+            continue
+        constraint_ptr = _runtime_pointer(constraint)
+        if constraint_ptr is None:
+            raise ContactAuthoringError(
+                "Contact feedback authority lost constraint runtime identity before commit."
+            )
+        journal.record(
+            ConstraintMutationReceipt(
+                journal.next_ordinal(),
+                _scope(plan, owner_ptr=int(owner_ptr), bag_ptr=None),
+                int(owner_ptr),
+                int(constraint_ptr),
+                RawFieldSnapshot(RawFieldKind.CONSTRAINT_MUTE, before),
+            )
+        )
+        stage_write(
+            "mute FK feedback for Sliding authority"
+            if desired
+            else "restore FK feedback for Free authority"
+        )
+        constraint.mute = desired
 
 
 def _trace_contact_rollback_report(
@@ -2622,7 +2858,12 @@ def _quaternion_state_compatible_with_existing_keys(
     return replace(state, rotation=tuple(-float(value) for value in state.rotation))
 
 
-def _state_for_pose_matrix(contract, desired_matrix) -> SnapControlState:
+def _state_for_pose_matrix(
+    contract,
+    desired_matrix,
+    *,
+    parent_pose_matrix=None,
+) -> SnapControlState:
     """Resolve raw PoseBone channels that reproduce one desired armature-space matrix."""
 
     resolved = contract.target
@@ -2632,7 +2873,11 @@ def _state_for_pose_matrix(contract, desired_matrix) -> SnapControlState:
         basis = rest.inverted() @ desired_matrix
     else:
         parent_rest = pose_bone.parent.bone.matrix_local.copy()
-        parent_pose = pose_bone.parent.matrix.copy()
+        parent_pose = (
+            parent_pose_matrix.copy()
+            if parent_pose_matrix is not None
+            else pose_bone.parent.matrix.copy()
+        )
         basis = rest.inverted() @ parent_rest @ parent_pose.inverted() @ desired_matrix
 
     property_name, _representation, _indices, _values, mode = _rotation_descriptor(pose_bone)
@@ -3269,9 +3514,20 @@ def _probe_sliding_public_pose_to_ik(
 
     native_before = float(native_ik.influence)
     terminal_before = float(terminal_ik.influence)
+    feedback_constraints = (
+        *capability.fk_copy_constraints,
+        capability.terminal_fk_constraint,
+    )
+    feedback_before = tuple(bool(constraint.mute) for constraint in feedback_constraints)
     try:
         native_ik.influence = 0.0
         terminal_ik.influence = 0.0
+        # B1 active-input bridge: Sliding normally disconnects public FK from
+        # the hidden result chain.  While native IK is disabled, temporarily
+        # expose the user's current public overlay so the FK->IK probe samples
+        # the actual rotated pose rather than the stale hidden result.
+        for constraint in feedback_constraints:
+            constraint.mute = False
         bpy.context.view_layer.update()
         desired_result = tuple(
             control.target.matrix.copy() for control in capability.result_controls
@@ -3287,6 +3543,13 @@ def _probe_sliding_public_pose_to_ik(
         )
         return snap_result, desired_result, desired_terminal
     finally:
+        for constraint, muted in zip(
+            feedback_constraints,
+            feedback_before,
+            strict=True,
+        ):
+            constraint.mute = bool(muted)
+        bpy.context.view_layer.update()
         native_ik.influence = native_before
         terminal_ik.influence = terminal_before
         bpy.context.view_layer.update()
@@ -3544,6 +3807,7 @@ def _prepare_contact_intent_for_batch(
             transform_rows,
             expected_result,
             expected_terminal,
+            (snap_result.hinge_branch if snap_result is not None else None),
             hold_state,
             point_state,
         ),
@@ -4085,11 +4349,16 @@ def execute_contact_intent_plan(
             _set_constant_at(fcurve, time)
             rows_written += 1
 
+        feedback_constraints = (
+            *capability.fk_copy_constraints,
+            capability.terminal_fk_constraint,
+        )
         hook.enter(OperationStage.REEVALUATE, operation=contact_plan.operation_id)
         _reevaluate_contact_frame_preserving_public_pose(
             scene,
             contact_plan.frame,
             contact_plan.subframe,
+            feedback_constraints=feedback_constraints,
         )
         hook.enter(OperationStage.VERIFY, operation=contact_plan.operation_id)
 
@@ -4176,17 +4445,6 @@ def execute_contact_intent_plan(
         # noise as an authored pose jump. Rotation stays on the stricter guard.
         position_tolerance = max(1e-7, scale * 1e-5)
         rotation_tolerance = 1e-6
-        for control, expected in zip(capability.result_controls, expected_result, strict=True):
-            position, rotation = _pose_residual(control.target.matrix, expected)
-            if position > position_tolerance or rotation > rotation_tolerance:
-                raise ContactAuthoringError(
-                    "Persistent Contact transition changed the evaluated result-chain pose "
-                    f"at {getattr(control.target, 'name', '<unknown>')} "
-                    f"(position={position:.9g}, rotation={rotation:.9g})."
-                )
-        terminal_position, terminal_rotation = _pose_residual(capability.result_terminal.target.matrix, expected_terminal)
-        if terminal_position > position_tolerance or terminal_rotation > rotation_tolerance:
-            raise ContactAuthoringError("Persistent Contact transition changed the evaluated terminal pose.")
 
         if trigger is not WriterTrigger.AUTO_TRANSFORM:
             _journal_contact_authoring_latch(
@@ -4196,12 +4454,43 @@ def execute_contact_intent_plan(
                 journal,
                 stage_write,
             )
-        journal.commit()
-        set_limb_fk_feedback_muted(
+        feedback_muted = intent.target_type is not ContactKeyType.FREE
+        _journal_limb_fk_feedback_muted(
             capability,
-            intent.target_type is not ContactKeyType.FREE,
+            feedback_muted,
+            contact_plan,
+            journal,
+            stage_write,
+            expected_result=expected_result,
+            expected_terminal=expected_terminal,
+            hinge_branch=(snap_result.hinge_branch if snap_result is not None else None),
         )
         bpy.context.view_layer.update()
+        feedback_constraints = (
+            *capability.fk_copy_constraints,
+            capability.terminal_fk_constraint,
+        )
+        if any(bool(constraint.mute) != feedback_muted for constraint in feedback_constraints):
+            raise ContactAuthoringError(
+                "Persistent Contact transition did not apply the requested FK-feedback authority."
+            )
+        for control, expected in zip(capability.result_controls, expected_result, strict=True):
+            position, rotation = _pose_residual(control.target.matrix, expected)
+            if position > position_tolerance or rotation > rotation_tolerance:
+                raise ContactAuthoringError(
+                    "Contact feedback-authority transition changed the evaluated result-chain pose "
+                    f"at {getattr(control.target, 'name', '<unknown>')} "
+                    f"(position={position:.9g}, rotation={rotation:.9g})."
+                )
+        terminal_position, terminal_rotation = _pose_residual(
+            capability.result_terminal.target.matrix,
+            expected_terminal,
+        )
+        if terminal_position > position_tolerance or terminal_rotation > rotation_tolerance:
+            raise ContactAuthoringError(
+                "Contact feedback-authority transition changed the evaluated terminal pose."
+            )
+        journal.commit()
         hook.enter(OperationStage.COMMIT, operation=contact_plan.operation_id)
         trace_event(
             "WRITER",
@@ -4713,11 +5002,20 @@ def execute_contact_batch_intent_plan(
                 _set_constant_at(fcurve, time)
                 rows_written += 1
 
+        reevaluate_feedback_constraints = tuple(
+            constraint
+            for item in prepared_tuple
+            for constraint in (
+                *item.capability.fk_copy_constraints,
+                item.capability.terminal_fk_constraint,
+            )
+        )
         hook.enter(OperationStage.REEVALUATE, operation=contact_plan.operation_id)
         _reevaluate_contact_frame_preserving_public_pose(
             scene,
             contact_plan.frame,
             contact_plan.subframe,
+            feedback_constraints=reevaluate_feedback_constraints,
         )
         hook.enter(OperationStage.VERIFY, operation=contact_plan.operation_id)
 
@@ -4796,25 +5094,6 @@ def execute_contact_batch_intent_plan(
                                 f"I20 persisted {label} anchor disagrees for {intent.mapping_id}."
                             )
 
-            for control, expected in zip(
-                capability.result_controls,
-                item.expected_result,
-                strict=True,
-            ):
-                position, rotation = _pose_residual(control.target.matrix, expected)
-                if position > position_tolerance or rotation > rotation_tolerance:
-                    raise ContactAuthoringError(
-                        f"I20 batch changed evaluated result-chain pose for {intent.mapping_id}."
-                    )
-            terminal_position, terminal_rotation = _pose_residual(
-                capability.result_terminal.target.matrix,
-                item.expected_terminal,
-            )
-            if terminal_position > position_tolerance or terminal_rotation > rotation_tolerance:
-                raise ContactAuthoringError(
-                    f"I20 batch changed evaluated terminal pose for {intent.mapping_id}."
-                )
-
         if trigger is not WriterTrigger.AUTO_TRANSFORM:
             for item in prepared_tuple:
                 _journal_contact_authoring_latch(
@@ -4824,13 +5103,52 @@ def execute_contact_batch_intent_plan(
                     journal,
                     stage_write,
                 )
-        journal.commit()
         for item in prepared_tuple:
-            set_limb_fk_feedback_muted(
+            _journal_limb_fk_feedback_muted(
                 item.capability,
                 item.intent.target_type is not ContactKeyType.FREE,
+                contact_plan,
+                journal,
+                stage_write,
+                expected_result=item.expected_result,
+                expected_terminal=item.expected_terminal,
+                hinge_branch=item.hinge_branch,
             )
         bpy.context.view_layer.update()
+        for item in prepared_tuple:
+            feedback_muted = item.intent.target_type is not ContactKeyType.FREE
+            feedback_constraints = (
+                *item.capability.fk_copy_constraints,
+                item.capability.terminal_fk_constraint,
+            )
+            if any(
+                bool(constraint.mute) != feedback_muted
+                for constraint in feedback_constraints
+            ):
+                raise ContactAuthoringError(
+                    f"I20 feedback authority disagrees for {item.intent.mapping_id}."
+                )
+            for control, expected in zip(
+                item.capability.result_controls,
+                item.expected_result,
+                strict=True,
+            ):
+                position, rotation = _pose_residual(control.target.matrix, expected)
+                if position > position_tolerance or rotation > rotation_tolerance:
+                    raise ContactAuthoringError(
+                        f"I20 feedback-authority transition changed result pose for "
+                        f"{item.intent.mapping_id}."
+                    )
+            terminal_position, terminal_rotation = _pose_residual(
+                item.capability.result_terminal.target.matrix,
+                item.expected_terminal,
+            )
+            if terminal_position > position_tolerance or terminal_rotation > rotation_tolerance:
+                raise ContactAuthoringError(
+                    f"I20 feedback-authority transition changed terminal pose for "
+                    f"{item.intent.mapping_id}."
+                )
+        journal.commit()
         hook.enter(OperationStage.COMMIT, operation=contact_plan.operation_id)
         mapping_types = tuple(
             (item.intent.mapping_id, item.intent.target_type)

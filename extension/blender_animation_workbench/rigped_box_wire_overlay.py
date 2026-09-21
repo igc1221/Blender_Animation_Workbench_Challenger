@@ -44,14 +44,6 @@ def _shader():
     return _SHADER
 
 
-def show_native_bone_overlays_for_fit() -> None:
-    for space in _iter_view3d_spaces():
-        overlay = getattr(space, "overlay", None)
-        if overlay is not None and hasattr(overlay, "show_bones"):
-            overlay.show_bones = True
-    _tag_all_view3d_redraw()
-
-
 def rigped_box_display_enabled(rig) -> bool:
     return bool(
         rig is not None

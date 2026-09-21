@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar
 
 import blf
@@ -38,8 +38,10 @@ from .rigped_fit_session import (
     FitSemanticSession,
     FitSemanticSessionError,
     begin_fit_semantic_session,
+    clear_fit_semantic_sessions,
     end_fit_semantic_session,
     fit_semantic_session,
+    prune_fit_semantic_sessions,
     validate_fit_semantic_session,
 )
 from .rigped_humanoid_builder import (
@@ -53,31 +55,12 @@ from .ui_language import language_for_context
 from .ui_language import text as ui_text
 
 
-@dataclass(frozen=True, slots=True)
-class _BoneRestSnapshot:
-    name: str
-    head: tuple[float, float, float]
-    tail: tuple[float, float, float]
-    roll: float
-    bbone_x: float
-    bbone_z: float
-    parent_name: str | None
-    use_connect: bool
-
-
-@dataclass(frozen=True, slots=True)
-class _FitHistoryEntry:
-    before: tuple[_BoneRestSnapshot, ...]
-    after: tuple[_BoneRestSnapshot, ...]
-
-
 @dataclass(slots=True)
 class _FitUiState:
     character_id: str
     session: Any
     semantic_session: FitSemanticSession
     rig_object: Any
-    rest_snapshot: tuple[_BoneRestSnapshot, ...]
     original_active: Any | None
     original_selected: tuple[Any, ...]
     original_mode: str
@@ -85,8 +68,10 @@ class _FitUiState:
     original_orientation: str
     transform_mode: str = "NONE"
     orientation_mode: str = "LOCAL"
-    history: list[_FitHistoryEntry] = field(default_factory=list)
-    history_cursor: int = 0
+    # Blender can recycle Window pointers after close/reopen. Screen identity
+    # gives the transient host a generation marker without serializing state.
+    window_screen_pointer: int | None = None
+    scene_pointer: int | None = None
 
 
 _FIT_STATES: dict[int, _FitUiState] = {}
@@ -122,17 +107,81 @@ def _window_key(context) -> int | None:
     return _safe_pointer(getattr(context, "window", None))
 
 
+def _window_screen_pointer(window) -> int | None:
+    return _safe_pointer(getattr(window, "screen", None))
+
+
+def _window_scene_pointer(window) -> int | None:
+    return _safe_pointer(getattr(window, "scene", None))
+
+
+def _live_window_generations() -> dict[int, tuple[int | None, int | None]] | None:
+    """Return live Window pointer -> (Screen, Scene) generation markers."""
+
+    window_manager = getattr(bpy.context, "window_manager", None)
+    windows = getattr(window_manager, "windows", None)
+    if windows is None:
+        return None
+    result: dict[int, tuple[int | None, int | None]] = {}
+    for window in windows:
+        key = _safe_pointer(window)
+        if key is not None:
+            result[key] = (
+                _window_screen_pointer(window),
+                _window_scene_pointer(window),
+            )
+    return result
+
+
+def prune_dead_fit_window_state() -> int:
+    """Prune dead/file-reloaded Figure state using cheap window generations."""
+
+    live_windows = _live_window_generations()
+    if live_windows is None:
+        return 0
+    removed = 0
+    for key, state in tuple(_FIT_STATES.items()):
+        generation = live_windows.get(key)
+        # Scene/file generation loss is safe to discard automatically. A Screen
+        # mismatch is intentionally different: semantic ownership is invalidated
+        # below, while the UI host remains stale-present so native Figure guards
+        # stay fail-closed until the user explicitly chooses Reset Fit.
+        if generation is None or (
+            state.scene_pointer is not None
+            and generation[1] != state.scene_pointer
+        ):
+            _FIT_STATES.pop(key, None)
+            removed += 1
+    removed += prune_fit_semantic_sessions(live_windows)
+    return removed
+
+
+def _fit_ui_state_raw(context) -> _FitUiState | None:
+    prune_dead_fit_window_state()
+    key = _window_key(context)
+    return _FIT_STATES.get(key) if key is not None else None
+
+
 def fit_ui_state_present(context) -> bool:
     """True while this window still owns a Figure/Fit UI host, even if stale."""
 
-    key = _window_key(context)
-    return bool(key is not None and _FIT_STATES.get(key) is not None)
+    return _fit_ui_state_raw(context) is not None
 
 
 def fit_ui_state(context) -> _FitUiState | None:
-    key = _window_key(context)
-    state = _FIT_STATES.get(key) if key is not None else None
+    state = _fit_ui_state_raw(context)
     if state is None:
+        return None
+    window = getattr(context, "window", None)
+    if (
+        state.window_screen_pointer is not None
+        and _window_screen_pointer(window) != state.window_screen_pointer
+    ):
+        return None
+    if (
+        state.scene_pointer is not None
+        and _safe_pointer(getattr(context, "scene", None)) != state.scene_pointer
+    ):
         return None
     semantic = fit_semantic_session(context)
     if semantic is None or semantic is not state.semantic_session:
@@ -343,122 +392,8 @@ def _select_only_object(context, obj) -> None:
     context.view_layer.objects.active = obj
 
 
-def _capture_edit_rest(rig) -> tuple[_BoneRestSnapshot, ...]:
-    return tuple(
-        _BoneRestSnapshot(
-            name=str(bone.name),
-            head=tuple(float(value) for value in bone.head),
-            tail=tuple(float(value) for value in bone.tail),
-            roll=float(bone.roll),
-            bbone_x=float(bone.bbone_x),
-            bbone_z=float(bone.bbone_z),
-            parent_name=str(bone.parent.name) if bone.parent is not None else None,
-            use_connect=bool(bone.use_connect),
-        )
-        for bone in rig.data.edit_bones
-    )
-
-
-def _restore_edit_rest(rig, snapshot: tuple[_BoneRestSnapshot, ...]) -> None:
-    edit_bones = rig.data.edit_bones
-    current_names = {str(bone.name) for bone in edit_bones}
-    expected_names = {entry.name for entry in snapshot}
-    if current_names != expected_names:
-        raise RigpedFitRuntimeError("FIT_CANCEL_TOPOLOGY_CHANGED_UNSUPPORTED")
-    for entry in snapshot:
-        bone = edit_bones.get(entry.name)
-        if bone is None:
-            raise RigpedFitRuntimeError("FIT_CANCEL_BONE_MISSING")
-        bone.use_connect = False
-        bone.head = entry.head
-        bone.tail = entry.tail
-        bone.roll = entry.roll
-        bone.bbone_x = entry.bbone_x
-        bone.bbone_z = entry.bbone_z
-    for entry in snapshot:
-        bone = edit_bones[entry.name]
-        bone.parent = edit_bones.get(entry.parent_name) if entry.parent_name else None
-        bone.use_connect = entry.use_connect
-
-
-def capture_fit_structural_state(context) -> tuple[_BoneRestSnapshot, ...] | None:
-    state = fit_ui_state(context)
-    if state is None or str(getattr(context, "mode", "")) != "EDIT_ARMATURE":
-        return None
-    if _safe_pointer(getattr(context, "active_object", None)) != _safe_pointer(state.rig_object):
-        return None
-    return _capture_edit_rest(state.rig_object)
-
-
-def restore_fit_structural_state(
-    context,
-    snapshot: tuple[_BoneRestSnapshot, ...],
-) -> bool:
-    state = fit_ui_state(context)
-    if state is None or str(getattr(context, "mode", "")) != "EDIT_ARMATURE":
-        return False
-    if _safe_pointer(getattr(context, "active_object", None)) != _safe_pointer(state.rig_object):
-        return False
-    try:
-        _restore_edit_rest(state.rig_object, snapshot)
-    except RigpedFitRuntimeError:
-        return False
-    if context.area is not None:
-        context.area.tag_redraw()
-    return True
-
-
-def record_fit_structural_change(
-    context,
-    before: tuple[_BoneRestSnapshot, ...],
-) -> bool:
-    state = fit_ui_state(context)
-    after = capture_fit_structural_state(context)
-    if state is None or after is None or after == before:
-        return False
-    if state.history_cursor < len(state.history):
-        del state.history[state.history_cursor :]
-    state.history.append(_FitHistoryEntry(before=before, after=after))
-    state.history_cursor = len(state.history)
-    return True
-
-
-def undo_fit_structural_change(context) -> bool:
-    state = fit_ui_state(context)
-    if state is None or state.history_cursor <= 0:
-        return False
-    entry = state.history[state.history_cursor - 1]
-    if not restore_fit_structural_state(context, entry.before):
-        return False
-    state.history_cursor -= 1
-    return True
-
-
-def redo_fit_structural_change(context) -> bool:
-    state = fit_ui_state(context)
-    if state is None or state.history_cursor >= len(state.history):
-        return False
-    entry = state.history[state.history_cursor]
-    if not restore_fit_structural_state(context, entry.after):
-        return False
-    state.history_cursor += 1
-    return True
-
-def _enter_fit_box_wire_display(rig, scene) -> None:
-    _apply_biped_box_wire_colors(rig, scene)
-    if not rigped_box_wire_enabled(rig):
-        return
-
-    # Fit rollback: make Blender's native Edit bones visible first. The custom
-    # Box Wire renderer is intentionally disabled in Edit mode until a stable
-    # Fit-specific display path is proven.
-    rig.data.display_type = "BBONE"
-    from .rigped_box_wire_overlay import show_native_bone_overlays_for_fit
-
-    show_native_bone_overlays_for_fit()
-
-
 def _begin_fit(context, character_id: str) -> _FitUiState:
+    prune_dead_fit_window_state()
     window_key = _window_key(context)
     if window_key is None:
         raise RigpedFitRuntimeError("FIT_UI_WINDOW_UNAVAILABLE")
@@ -498,12 +433,13 @@ def _begin_fit(context, character_id: str) -> _FitUiState:
         session=inspection.session,
         semantic_session=semantic_session,
         rig_object=rig,
-        rest_snapshot=(),
         original_active=original_active,
         original_selected=original_selected,
         original_mode=original_mode,
         original_pivot_point=original_pivot_point,
         original_orientation=original_orientation,
+        window_screen_pointer=_window_screen_pointer(getattr(context, "window", None)),
+        scene_pointer=_safe_pointer(getattr(context, "scene", None)),
     )
     _FIT_STATES[window_key] = state
     return state
@@ -574,6 +510,14 @@ def _hide_rigped_internal_helpers_after_load(*_args) -> None:
     _hide_rigped_internal_helpers_now()
 
 
+@persistent
+def _clear_fit_transient_state_after_load(*_args) -> None:
+    """Clear non-serialized Figure maps without touching native file state."""
+
+    _FIT_STATES.clear()
+    clear_fit_semantic_sessions()
+
+
 def _hide_rigped_internal_helpers_timer():
     try:
         _hide_rigped_internal_helpers_now()
@@ -584,6 +528,8 @@ def _hide_rigped_internal_helpers_timer():
 
 def register_rigped_internal_visibility_handlers() -> None:
     handlers = bpy.app.handlers.load_post
+    if _clear_fit_transient_state_after_load not in handlers:
+        handlers.append(_clear_fit_transient_state_after_load)
     if _hide_rigped_internal_helpers_after_load not in handlers:
         handlers.append(_hide_rigped_internal_helpers_after_load)
     if not bpy.app.timers.is_registered(_hide_rigped_internal_helpers_timer):
@@ -592,6 +538,8 @@ def register_rigped_internal_visibility_handlers() -> None:
 
 def unregister_rigped_internal_visibility_handlers() -> None:
     handlers = bpy.app.handlers.load_post
+    if _clear_fit_transient_state_after_load in handlers:
+        handlers.remove(_clear_fit_transient_state_after_load)
     if _hide_rigped_internal_helpers_after_load in handlers:
         handlers.remove(_hide_rigped_internal_helpers_after_load)
     if bpy.app.timers.is_registered(_hide_rigped_internal_helpers_timer):
@@ -1170,29 +1118,56 @@ class BAW_OT_rigped_fit_cancel(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return fit_ui_state(context) is not None
+        # A present-but-stale Figure host must still expose Reset Fit so the
+        # user can discard only transient state and recover the file.
+        return fit_ui_state_present(context)
 
     def execute(self, context):
         key = _window_key(context)
-        state = fit_ui_state(context)
+        state = _fit_ui_state_raw(context)
         if key is None or state is None:
             return {"CANCELLED"}
+
+        def discard_stale_state() -> None:
+            # Deliberately do not restore mode, selection, transforms, rest, or
+            # descriptors here. A stale session has no trustworthy native
+            # before-image; only its transient Figure maps may be discarded.
+            end_fit_semantic_session(context)
+            _FIT_STATES.pop(key, None)
+
+        semantic_session = fit_semantic_session(context)
+        if semantic_session is None or semantic_session is not state.semantic_session:
+            discard_stale_state()
+            self.report({"INFO"}, "Stale Fit state discarded; native file state unchanged")
+            return {"FINISHED"}
         try:
+            semantic_issues = validate_fit_semantic_session(context, semantic_session)
+            if semantic_issues:
+                discard_stale_state()
+                self.report(
+                    {"INFO"},
+                    "Stale Fit state discarded; native file state unchanged",
+                )
+                return {"FINISHED"}
             _ensure_object_mode()
-            semantic_session = fit_semantic_session(context)
-            if semantic_session is not None:
-                semantic_issues = validate_fit_semantic_session(context, semantic_session)
-                if semantic_issues:
-                    raise RigpedFitRuntimeError(
-                        "FIT_CANCEL_NATIVE_STATE_STALE:" + ",".join(semantic_issues)
-                    )
             view = resolve_character(context.scene, state.character_id)
             descriptor, issues = read_setup_descriptor(view)
             if descriptor is None or issues or descriptor.signature != state.session.setup_signature:
-                raise RigpedFitRuntimeError("FIT_CANCEL_RESTORE_SIGNATURE_MISMATCH")
-        except (RigpedFitRuntimeError, RuntimeError) as exc:
-            self.report({"ERROR"}, f"Fit cancel could not restore exactly: {exc}")
-            return {"CANCELLED"}
+                discard_stale_state()
+                self.report(
+                    {"INFO"},
+                    "Stale Fit state discarded; native file state unchanged",
+                )
+                return {"FINISHED"}
+        except (CharacterMetadataError, RigpedFitRuntimeError, RuntimeError, ReferenceError) as exc:
+            # Failure to inspect the old native/descriptor state is itself a
+            # stale-recovery case. Do not dereference the possibly-dead rig.
+            discard_stale_state()
+            self.report(
+                {"INFO"},
+                f"Stale Fit state discarded; native file state unchanged ({exc})",
+            )
+            return {"FINISHED"}
         end_fit_semantic_session(context)
         _FIT_STATES.pop(key, None)
         _restore_fit_transform_settings(context, state)
@@ -1286,7 +1261,18 @@ def draw_rigped_workflow(layout, context) -> None:
     header = box.row(align=True)
     header.label(text=ui_text("rigped.workflow", context), icon="ARMATURE_DATA")
 
+    fit_host_present = fit_ui_state_present(context)
     state = fit_ui_state(context)
+    if fit_host_present and state is None:
+        status = box.row(align=True)
+        status.label(text="Fit recovery required", icon="ERROR")
+        status.label(text="The transient Figure session is stale")
+        box.operator(
+            "baw.rigped_fit_cancel",
+            text=ui_text("rigped.reset_fit", context),
+            icon="LOOP_BACK",
+        )
+        return
     if state is not None:
         status = box.row(align=True)
         status.label(text=ui_text("rigped.fit_mode", context), icon="EDITMODE_HLT")

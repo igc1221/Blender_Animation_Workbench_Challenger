@@ -225,10 +225,7 @@ def test_e6_body_overlay_refresh_reseeds_only_stalled_reachable_straight_ik() ->
     assert "context.view_layer.update()" in refresh
     assert "if stable:" in refresh
     assert "set_limb_fk_feedback_muted(capability, True)" in refresh
-    assert "_sync_generated_sliding_hinge_branch_from_pole(" in refresh
-    assert refresh.index("_sync_generated_sliding_hinge_branch_from_pole(") < refresh.index(
-        "_seed_stalled_sliding_native_ik(context, capability)"
-    )
+    assert "_sync_generated_sliding_hinge_branch_from_pole(" not in refresh
 
 
 def test_e6_sliding_runtime_mutes_public_fk_feedback_without_changing_influence() -> None:
@@ -257,8 +254,8 @@ def test_e6_sliding_runtime_mutes_public_fk_feedback_without_changing_influence(
     assert "constraint.influence =" not in helper
     assert "intent.target_type is not ContactKeyType.FREE" in single
     assert "item.intent.target_type is not ContactKeyType.FREE" in batch
-    assert "contact_type is not ContactKeyType.FREE" in replay
-    assert "_sync_generated_sliding_hinge_branch_from_pole(state_bone)" in replay
+    assert "contact_type in {ContactKeyType.SLIDING, ContactKeyType.PLANTED}" in replay
+    assert "_sync_generated_sliding_hinge_branch_from_pole(state_bone)" not in replay
     branch_sync = _source(
         TRANSFORM_SOURCE,
         _function(TRANSFORM_TREE, "_sync_generated_sliding_hinge_branch_from_pole"),

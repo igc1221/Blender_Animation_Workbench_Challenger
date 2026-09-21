@@ -110,13 +110,6 @@ from .rigped_create_fit_ui import (
     unregister_rigped_internal_visibility_handlers,
     update_rigped_box_wire_options,
 )
-from .rigped_fit_transform import (
-    BAW_OT_rigped_fit_commit_transform,
-    BAW_OT_rigped_fit_history_redo,
-    BAW_OT_rigped_fit_history_undo,
-    BAW_OT_rigped_fit_scale_axis,
-    BAW_OT_rigped_fit_transform_axis,
-)
 from .rigped_ik_pivot_overlay import (
     register_rigped_ik_pivot_overlay,
     unregister_rigped_ik_pivot_overlay,
@@ -197,6 +190,7 @@ from .ui_language import text as ui_text
 from .viewport_keymap import (
     BAW_OT_awb_select_click,
     BAW_OT_block_native_select_click,
+    BAW_OT_guard_figure_native_edit,
     BAW_OT_set_transform_tool,
     BAW_OT_set_view_projection,
     BAW_OT_toggle_edged_faces,
@@ -389,13 +383,9 @@ _CLASSES = (
     BAW_OT_rigped_direct_rotate_axis,
     BAW_OT_rigped_fk_joint_move_axis,
     BAW_OT_rigped_semantic_move_axis,
-    BAW_OT_rigped_fit_commit_transform,
-    BAW_OT_rigped_fit_history_undo,
-    BAW_OT_rigped_fit_history_redo,
-    BAW_OT_rigped_fit_scale_axis,
-    BAW_OT_rigped_fit_transform_axis,
     BAW_OT_awb_select_click,
     BAW_OT_block_native_select_click,
+    BAW_OT_guard_figure_native_edit,
     BAW_OT_set_transform_tool,
     BAW_OT_set_view_projection,
     BAW_OT_toggle_wireframe,

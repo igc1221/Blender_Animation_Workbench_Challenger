@@ -764,6 +764,21 @@ class BAW_OT_contact(bpy.types.Operator):
             return {"CANCELLED"}
 
         replay_contact_type = result.contact_type.value if result.contact_type is not None else None
+        replay_action = {
+            "kind": "CONTACT",
+            "frame": int(context.scene.frame_current),
+            "subframe": float(getattr(context.scene, "frame_subframe", 0.0)),
+            "controls": tuple(
+                str(item.name)
+                for item in tuple(getattr(context, "selected_pose_bones", ()) or ())
+            ),
+            "contact_type": replay_contact_type,
+        }
+        if result.mapping_contact_types:
+            replay_action["mapping_contact_types"] = tuple(
+                (mapping_id, contact_type.value)
+                for mapping_id, contact_type in result.mapping_contact_types
+            )
         trace_event(
             "OPERATION",
             "CONTACT_COMMIT",
@@ -777,16 +792,7 @@ class BAW_OT_contact(bpy.types.Operator):
             ),
             rows_written=int(result.rows_written),
             created_fcurves=int(result.created_fcurves),
-            replay_action={
-                "kind": "CONTACT",
-                "frame": int(context.scene.frame_current),
-                "subframe": float(getattr(context.scene, "frame_subframe", 0.0)),
-                "controls": tuple(
-                    str(item.name)
-                    for item in tuple(getattr(context, "selected_pose_bones", ()) or ())
-                ),
-                "contact_type": replay_contact_type,
-            },
+            replay_action=replay_action,
         )
 
         if result.contact_type is None:

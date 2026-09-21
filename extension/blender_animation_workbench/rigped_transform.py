@@ -75,7 +75,6 @@ from .rigped_contract import (
     resolve_rigped_target,
     resolve_rigped_transform,
 )
-from .rigped_fit_transform import _axis_point, _plane_point, _rotation_vector
 from .rigped_humanoid_builder import configure_generated_rigped_ik_hinge_branch
 from .rigped_limb_math import preferred_two_bone_bend
 from .rigped_operation_domain import OperationDomainSnapshot, resolve_operation_domain
@@ -92,6 +91,9 @@ from .semantic_adapter import (
     runtime_control_key,
 )
 from .ui_language import text
+from .viewport_transform_math import axis_point as _axis_point
+from .viewport_transform_math import plane_point as _plane_point
+from .viewport_transform_math import rotation_vector as _rotation_vector
 
 
 class RigpedSemanticMoveError(RuntimeError):
@@ -166,7 +168,15 @@ class SlidingRotateSyncSession:
     start_pole_angle: float
     start_ik_influence: float
     start_terminal_ik_influence: float
+    start_feedback_mutes: tuple[bool, ...]
     start_hinge_settings: tuple[Any, ...]
+
+
+@dataclass(slots=True)
+class SlidingHiddenSeedSnapshot:
+    capability: LimbRepresentationCapability
+    result_states: tuple[SnapControlState, ...]
+    terminal_state: SnapControlState
 
 
 @dataclass(frozen=True, slots=True)
@@ -489,16 +499,11 @@ def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
                     pose,
                     public_names,
                     result_names,
-                    contact_type is not ContactKeyType.FREE,
+                    contact_type in {ContactKeyType.SLIDING, ContactKeyType.PLANTED},
                 )
                 touched = feedback_changed or touched
                 if contact_type is not ContactKeyType.SLIDING:
                     continue
-
-                if _sync_generated_sliding_hinge_branch_from_pole(state_bone):
-                    view_layer = getattr(bpy.context, "view_layer", None)
-                    if view_layer is not None and getattr(bpy.context, "scene", None) is scene:
-                        view_layer.update()
 
                 public = tuple(pose.get(name) for name in public_names)
                 result = tuple(pose.get(name) for name in result_names)
@@ -4603,13 +4608,20 @@ def _restore_direct_move_states(
     states: tuple[DirectMoveControlState, ...],
     *,
     sliding_capabilities: tuple[LimbRepresentationCapability, ...] | None = None,
+    seed_snapshots: tuple[SlidingHiddenSeedSnapshot, ...] = (),
 ) -> None:
     for state in states:
         state.control.target.location = state.start_location
+    _restore_sliding_hidden_seed_snapshots(
+        context,
+        seed_snapshots,
+        update=False,
+    )
     context.view_layer.update()
     _refresh_current_sliding_public_overlays(
         context,
         capabilities=sliding_capabilities,
+        allow_seed=False,
     )
 
 
@@ -4643,6 +4655,7 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
 
     _states: tuple[DirectMoveControlState, ...] = ()
     _sliding_guard_capabilities: tuple[LimbRepresentationCapability, ...] = ()
+    _sliding_seed_snapshots: tuple[SlidingHiddenSeedSnapshot, ...] = ()
     _auto_plan: RigpedAutoDirectMovePlan | None = None
     _pivot = Vector((0.0, 0.0, 0.0))
     _axis = Vector((1.0, 0.0, 0.0))
@@ -4688,6 +4701,9 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
             return {"CANCELLED"}
 
         self._sliding_guard_capabilities = _current_sliding_capabilities(context)
+        self._sliding_seed_snapshots = _capture_sliding_hidden_seed_snapshots(
+            self._sliding_guard_capabilities
+        )
         self._auto_plan = None
         if bool(getattr(context.scene, "baw_auto_key_enabled", False)):
             planned = plan_rigped_auto_direct_move(
@@ -4859,6 +4875,7 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                     context,
                     states,
                     sliding_capabilities=self._sliding_guard_capabilities,
+                    seed_snapshots=self._sliding_seed_snapshots,
                 )
                 _report_operator_error(
                     self,
@@ -4890,6 +4907,7 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                     context,
                     states,
                     sliding_capabilities=self._sliding_guard_capabilities,
+                    seed_snapshots=self._sliding_seed_snapshots,
                 )
                 self._states = ()
                 self._sliding_guard_capabilities = ()
@@ -4923,6 +4941,7 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                 context,
                 states,
                 sliding_capabilities=self._sliding_guard_capabilities,
+                seed_snapshots=self._sliding_seed_snapshots,
             )
             bpy.ops.ed.undo_push(message="AWB Rigped Direct Move Start")
             _apply_direct_move_delta(
@@ -4946,6 +4965,7 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                         context,
                         states,
                         sliding_capabilities=self._sliding_guard_capabilities,
+                        seed_snapshots=self._sliding_seed_snapshots,
                     )
                     _report_operator_error(self, context, exc, replay_action=replay_action)
                     self._states = ()
@@ -4958,6 +4978,7 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                         context,
                         states,
                         sliding_capabilities=self._sliding_guard_capabilities,
+                        seed_snapshots=self._sliding_seed_snapshots,
                     )
                     detail = "; ".join(item.detail for item in result.diagnostics)
                     self.report({"WARNING"}, detail or "Rigped direct Move Auto commit failed.")
@@ -5001,6 +5022,7 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                 context,
                 states,
                 sliding_capabilities=self._sliding_guard_capabilities,
+                seed_snapshots=self._sliding_seed_snapshots,
             )
             self._states = ()
             self._sliding_guard_capabilities = ()
@@ -6027,6 +6049,13 @@ def _direct_rotate_sliding_sync_sessions(
                 start_terminal_ik_influence=float(
                     capability.terminal_ik_constraint.influence
                 ),
+                start_feedback_mutes=tuple(
+                    bool(constraint.mute)
+                    for constraint in (
+                        *capability.fk_copy_constraints,
+                        capability.terminal_fk_constraint,
+                    )
+                ),
                 start_hinge_settings=_capture_hinge_settings(
                     capability.native_ik.solver_owner.target
                 ),
@@ -6061,6 +6090,43 @@ def _current_sliding_capabilities(
         if contact_type is ContactKeyType.SLIDING:
             capabilities.append(capability)
     return tuple(capabilities)
+
+
+def _capture_sliding_hidden_seed_snapshots(
+    capabilities: tuple[LimbRepresentationCapability, ...],
+) -> tuple[SlidingHiddenSeedSnapshot, ...]:
+    return tuple(
+        SlidingHiddenSeedSnapshot(
+            capability=capability,
+            result_states=tuple(
+                _capture_control_state(control)
+                for control in capability.result_controls
+            ),
+            terminal_state=_capture_control_state(capability.result_terminal),
+        )
+        for capability in capabilities
+    )
+
+
+def _restore_sliding_hidden_seed_snapshots(
+    context,
+    snapshots: tuple[SlidingHiddenSeedSnapshot, ...],
+    *,
+    update: bool = True,
+) -> None:
+    for snapshot in snapshots:
+        for control, state in zip(
+            snapshot.capability.result_controls,
+            snapshot.result_states,
+            strict=True,
+        ):
+            _apply_control_state(control, state)
+        _apply_control_state(
+            snapshot.capability.result_terminal,
+            snapshot.terminal_state,
+        )
+    if update:
+        context.view_layer.update()
 
 
 def _passive_sliding_capabilities(
@@ -6353,6 +6419,7 @@ def _refresh_current_sliding_public_overlays(
     *,
     capabilities: tuple[LimbRepresentationCapability, ...] | None = None,
     max_passes: int = 6,
+    allow_seed: bool = True,
 ) -> int:
     if capabilities is None:
         capabilities = _current_sliding_capabilities(context)
@@ -6360,19 +6427,12 @@ def _refresh_current_sliding_public_overlays(
         return 0
 
     feedback_changed = False
-    hinge_changed = False
     for capability in capabilities:
         feedback_changed = (
             bool(set_limb_fk_feedback_muted(capability, True))
             or feedback_changed
         )
-        hinge_changed = (
-            _sync_generated_sliding_hinge_branch_from_pole(
-                capability.native_ik.solver_owner.target
-            )
-            or hinge_changed
-        )
-    if feedback_changed or hinge_changed:
+    if feedback_changed:
         context.view_layer.update()
 
     # Public FK is a derived cache while Sliding. Rebuild all Sliding limbs as
@@ -6385,9 +6445,12 @@ def _refresh_current_sliding_public_overlays(
     # SolverSeed is singularity initialization only. It must not be
     # re-injected on every public/result convergence pass or it becomes a
     # competing iterative solver and can repeatedly perturb near-straight
-    # chains under non-identity ancestor transforms.
-    for capability in capabilities:
-        _seed_stalled_sliding_native_ik(context, capability)
+    # chains under non-identity ancestor transforms. Cancel/restore paths pass
+    # allow_seed=False so operation-local hidden seed inputs return exactly to
+    # the gesture-start snapshot instead of being immediately re-authored.
+    if allow_seed:
+        for capability in capabilities:
+            _seed_stalled_sliding_native_ik(context, capability)
 
     last_position = 0.0
     last_rotation = 0.0
@@ -6480,6 +6543,16 @@ def _restore_direct_rotate_sliding_sync_session(
         capability.authored_terminal,
         session.start_terminal_state,
     )
+    feedback_constraints = (
+        *capability.fk_copy_constraints,
+        capability.terminal_fk_constraint,
+    )
+    for constraint, start_mute in zip(
+        feedback_constraints,
+        session.start_feedback_mutes,
+        strict=True,
+    ):
+        constraint.mute = bool(start_mute)
     native_ik.influence = session.start_ik_influence
     terminal_ik.influence = session.start_terminal_ik_influence
     if update:
@@ -6497,6 +6570,13 @@ def _apply_direct_rotate_sliding_sync(context, session: SlidingRotateSyncSession
 
     previous_ik_influence = float(native_ik.influence)
     previous_terminal_influence = float(terminal_ik.influence)
+    feedback_constraints = (
+        *capability.fk_copy_constraints,
+        capability.terminal_fk_constraint,
+    )
+    previous_feedback_mutes = tuple(
+        bool(constraint.mute) for constraint in feedback_constraints
+    )
 
     try:
         # Preview is intentionally lighter than the persistent C gate. Direct
@@ -6504,8 +6584,16 @@ def _apply_direct_rotate_sliding_sync(context, session: SlidingRotateSyncSession
         # equivalent generated IK target/pole bundle without running the exact
         # residual acceptance check on every mouse move. C remains the strict
         # persistent validation boundary.
+        #
+        # Sliding normally mutes public->MCH FK feedback. Active Rotate is the
+        # one bounded exception: while native IK is disabled, expose the user's
+        # temporary public FK pose to the hidden result chain, derive the new
+        # target/pole intent, then restore the frozen feedback-mute authority
+        # before native IK is re-enabled. Passive limbs never enter this phase.
         native_ik.influence = 0.0
         terminal_ik.influence = 0.0
+        for constraint in feedback_constraints:
+            constraint.mute = False
         context.view_layer.update()
 
         desired_terminal = capability.result_terminal.target.matrix.copy()
@@ -6523,26 +6611,26 @@ def _apply_direct_rotate_sliding_sync(context, session: SlidingRotateSyncSession
             branch_sign,
         )
 
-        derived_ik_state = _state_for_pose_matrix(
+        # Active Sliding Rotate is an authored target-transport gesture: the
+        # current public FK preview defines the new terminal target while Sliding
+        # remains IK-authoritative.  Body/ancestor dependency in E7 is the
+        # separate pinned-target case; do not import that semantics here.
+        ik_state = _state_for_pose_matrix(
             capability.native_ik.ik_target,
             desired_terminal,
-        )
-        # Sliding is a pinned IK authority. Rotating an upstream limb control
-        # must never drag the Hand/Foot goal like FK. Upstream controls use the
-        # FK preview only to derive the new bend plane/pole (swivel) while the
-        # IK target remains exactly where Sliding was anchored. Rotating the
-        # terminal itself may change target orientation, but its position stays
-        # pinned as well.
-        ik_state = (
-            replace(derived_ik_state, location=session.start_ik_state.location)
-            if session.terminal_selected
-            else session.start_ik_state
         )
         pole_matrix = pole_target.target.matrix.copy()
         pole_matrix.translation = (
             pole_target.owner_object.matrix_world.inverted_safe() @ Vector(pole_position)
         )
         pole_state = _state_for_pose_matrix(pole_target, pole_matrix)
+        for constraint, previous_mute in zip(
+            feedback_constraints,
+            previous_feedback_mutes,
+            strict=True,
+        ):
+            constraint.mute = bool(previous_mute)
+        context.view_layer.update()
         _apply_control_state(
             capability.native_ik.ik_target,
             ik_state,
@@ -6675,6 +6763,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
     _sliding_syncs: tuple[SlidingRotateSyncSession, ...] = ()
     _sliding_guard_capabilities: tuple[LimbRepresentationCapability, ...] = ()
     _sliding_affected_capabilities: tuple[LimbRepresentationCapability, ...] = ()
+    _sliding_seed_snapshots: tuple[SlidingHiddenSeedSnapshot, ...] = ()
     _axis_world = Vector((0.0, 0.0, 1.0))
     _pivot = Vector((0.0, 0.0, 0.0))
     _start_rotation_vector = Vector((1.0, 0.0, 0.0))
@@ -6845,6 +6934,9 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             self._sliding_syncs,
         )
         self._sliding_affected_capabilities = frozen_current_sliding
+        self._sliding_seed_snapshots = _capture_sliding_hidden_seed_snapshots(
+            self._sliding_guard_capabilities
+        )
         active_ids = set(_sliding_capability_mapping_ids(active_capabilities))
         passive_ids = set(
             _sliding_capability_mapping_ids(self._sliding_guard_capabilities)
@@ -7072,9 +7164,15 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             _restore_direct_rotate_sliding_syncs(context, self._sliding_syncs)
         else:
             context.view_layer.update()
+        _restore_sliding_hidden_seed_snapshots(
+            context,
+            self._sliding_seed_snapshots,
+            update=False,
+        )
         _refresh_current_sliding_public_overlays(
             context,
             capabilities=self._sliding_guard_capabilities,
+            allow_seed=False,
         )
 
     def _apply_preview(self, context) -> None:
