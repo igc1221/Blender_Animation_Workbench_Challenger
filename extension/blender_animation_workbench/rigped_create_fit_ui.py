@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar
 
 import blf
@@ -806,11 +806,13 @@ class BAW_OT_create_rigped_drag(bpy.types.Operator):
             return {"CANCELLED"}
         try:
             origin = _viewport_placement_location(context, event, self._window_region)
+            box_size = float(getattr(context.scene, "baw_rigped_initial_box_size", 1.0))
             spec = fitted_humanoid_spec(
                 self._initial_height,
                 origin,
                 base=rigify_reference_humanoid_spec(),
             )
+            spec = replace(spec, display_scale=spec.display_scale * box_size)
             result = build_generated_rigped_humanoid(context.scene, spec)
             set_rigped_box_wire_display(
                 result.armature_object,
@@ -862,6 +864,11 @@ class BAW_OT_create_rigped_drag(bpy.types.Operator):
                 self._preview_height,
                 origin,
                 base=rigify_reference_humanoid_spec(),
+            )
+            final_spec = replace(
+                final_spec,
+                display_scale=final_spec.display_scale
+                * float(getattr(context.scene, "baw_rigped_initial_box_size", 1.0)),
             )
             result = build_generated_rigped_humanoid(context.scene, final_spec)
             set_rigped_box_wire_display(
@@ -1336,6 +1343,12 @@ def draw_rigped_workflow(layout, context) -> None:
         status.label(text=ui_text("rigped.current", context), icon="OUTLINER_OB_ARMATURE")
 
     if mode == "OBJECT":
+        tune = box.row(align=True)
+        tune.prop(
+            context.scene,
+            "baw_rigped_initial_box_size",
+            text="Initial Box Size (Temp)",
+        )
         box.operator(
             "baw.create_rigped_drag",
             text=ui_text("rigped.new", context),
