@@ -28,10 +28,12 @@ from .rigped_create_fit_ui import fit_orientation_mode, fit_transform_mode, fit_
 from .rigped_fit_session import (
     FitSemanticSessionError,
     apply_fit_move_preview,
+    begin_fit_move_gesture,
+    cancel_fit_move_gesture,
+    commit_fit_move_gesture,
     fit_active_part_world_pivot_axes,
     fit_figure_move_available,
     fit_semantic_session,
-    restore_fit_draft_preview,
 )
 from .rigped_fit_transform import (
     BAW_OT_rigped_fit_scale_axis,
@@ -777,8 +779,6 @@ class BAW_OT_figure_fit_move_axis(bpy.types.Operator):
             return {"CANCELLED"}
 
         self._part_id = str(session.active_part_id)
-        self._baseline_draft = session.draft
-        self._baseline_revision = int(session.revision)
         self._pivot = Vector(pivot)
         self._axes = {
             name: Vector(vector).normalized()
@@ -819,20 +819,40 @@ class BAW_OT_figure_fit_move_axis(bpy.types.Operator):
                 return {"CANCELLED"}
             self._start_plane_point = Vector(point)
 
+        try:
+            self._gesture = begin_fit_move_gesture(
+                context,
+                part_id=self._part_id,
+            )
+        except FitSemanticSessionError as exc:
+            trace_event(
+                "INPUT",
+                "FIT_F3_MOVE_REFUSED",
+                context=context,
+                part_id=self._part_id,
+                axis=self.axis,
+                reason=str(exc),
+            )
+            return {"CANCELLED"}
+
         trace_event(
             "INPUT",
             "FIT_F3_MOVE_BEGIN",
             context=context,
             part_id=self._part_id,
             axis=self.axis,
-            fit_revision=self._baseline_revision,
+            fit_revision=self._gesture.revision,
+            preview_serial=self._gesture.preview_serial,
         )
         context.window_manager.modal_handler_add(self)
         return {"RUNNING_MODAL"}
 
-    def _restore_baseline(self, context) -> None:
+    def _cancel_gesture(self, context) -> None:
+        gesture = getattr(self, "_gesture", None)
+        if gesture is None:
+            return
         try:
-            restore_fit_draft_preview(context, self._baseline_draft)
+            cancel_fit_move_gesture(context, gesture)
         except FitSemanticSessionError:
             pass
 
@@ -862,12 +882,11 @@ class BAW_OT_figure_fit_move_axis(bpy.types.Operator):
             try:
                 receipt = apply_fit_move_preview(
                     context,
-                    baseline_draft=self._baseline_draft,
-                    part_id=self._part_id,
+                    gesture=self._gesture,
                     world_delta=desired,
                 )
             except FitSemanticSessionError as exc:
-                self._restore_baseline(context)
+                self._cancel_gesture(context)
                 trace_event(
                     "ERROR",
                     "FIT_F3_MOVE_FAIL",
@@ -889,6 +908,7 @@ class BAW_OT_figure_fit_move_axis(bpy.types.Operator):
                 world_delta=receipt.world_delta,
                 rig_delta=receipt.rig_delta,
                 fit_revision=receipt.revision_after,
+                preview_serial=receipt.preview_serial,
                 changed=receipt.changed,
             )
             if context.area is not None:
@@ -896,6 +916,20 @@ class BAW_OT_figure_fit_move_axis(bpy.types.Operator):
             return {"RUNNING_MODAL"}
 
         if event.type == "LEFTMOUSE" and event.value == "RELEASE":
+            try:
+                changed = commit_fit_move_gesture(context, self._gesture)
+            except FitSemanticSessionError as exc:
+                self._cancel_gesture(context)
+                trace_event(
+                    "ERROR",
+                    "FIT_F3_MOVE_FAIL",
+                    context=context,
+                    part_id=self._part_id,
+                    axis=self.axis,
+                    reason=str(exc),
+                )
+                self.report({"WARNING"}, str(exc))
+                return {"CANCELLED"}
             session = fit_semantic_session(context)
             trace_event(
                 "INPUT",
@@ -905,14 +939,13 @@ class BAW_OT_figure_fit_move_axis(bpy.types.Operator):
                 axis=self.axis,
                 world_delta=tuple(float(value) for value in self._applied_move),
                 fit_revision=(None if session is None else int(session.revision)),
-                changed=bool(
-                    session is not None and session.draft != self._baseline_draft
-                ),
+                preview_serial=(None if session is None else int(session.preview_serial)),
+                changed=changed,
             )
             return {"FINISHED"}
 
         if event.type in {"RIGHTMOUSE", "ESC"}:
-            self._restore_baseline(context)
+            self._cancel_gesture(context)
             session = fit_semantic_session(context)
             trace_event(
                 "INPUT",
@@ -921,6 +954,7 @@ class BAW_OT_figure_fit_move_axis(bpy.types.Operator):
                 part_id=self._part_id,
                 axis=self.axis,
                 fit_revision=(None if session is None else int(session.revision)),
+                preview_serial=(None if session is None else int(session.preview_serial)),
             )
             if context.area is not None:
                 context.area.tag_redraw()
@@ -1002,6 +1036,11 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
 
     @classmethod
     def poll(cls, context):
+        if fit_ui_state(context) is not None and getattr(context, "mode", "") == "OBJECT":
+            # Keep the persistent shell alive throughout Figure so draw_prepare
+            # can suppress Blender's native workspace-tool gizmo even while an
+            # unsupported Figure transform mode is selected.
+            return True
         route, mode = _route_and_mode(context)
         return bool(route and mode in {"MOVE", "ROTATE", "SCALE"})
 
@@ -1199,6 +1238,12 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
 
     def draw_prepare(self, context):
         self._hide_all()
+        if (
+            fit_ui_state(context) is not None
+            and getattr(context, "mode", "") == "OBJECT"
+            and hasattr(context.space_data, "show_gizmo_tool")
+        ):
+            context.space_data.show_gizmo_tool = False
         route, mode = _route_and_mode(context)
         if not route or not mode:
             return

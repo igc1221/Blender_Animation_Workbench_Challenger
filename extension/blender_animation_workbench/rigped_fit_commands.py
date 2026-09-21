@@ -37,7 +37,6 @@ def fit_move_supported(draft: FitDraft, part_id: str) -> bool:
     )
     return bool(
         definition is not None
-        and definition.semantic_key == "awb.com"
         and FitOperation.MOVE in definition.allowed_operations
     )
 

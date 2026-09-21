@@ -34,6 +34,7 @@ class FitGeometryPart:
 class FitBodyGeometrySnapshot:
     character_id: str
     revision: int
+    preview_serial: int
     rig_pointer: int
     parts: tuple[FitGeometryPart, ...]
 
@@ -51,6 +52,8 @@ class FitSemanticSession:
     selected_part_ids: set[str] = field(default_factory=set)
     active_part_id: str | None = None
     revision: int = 0
+    preview_serial: int = 0
+    active_move_gesture: FitMoveGestureBaseline | None = None
 
 
 _SESSIONS: dict[int, FitSemanticSession] = {}
@@ -61,10 +64,23 @@ class FitSemanticSessionError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class FitMoveGestureBaseline:
+    part_id: str
+    draft: FitDraft
+    geometry: FitBodyGeometrySnapshot
+    revision: int
+    preview_serial: int
+    matrix_signature: tuple[float, ...]
+    selected_part_ids: tuple[str, ...]
+    active_part_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class FitSemanticMoveReceipt:
     part_id: str
     revision_before: int
     revision_after: int
+    preview_serial: int
     world_delta: tuple[float, float, float]
     rig_delta: tuple[float, float, float]
     changed: bool
@@ -157,13 +173,14 @@ def _primary_rest_snapshots(scene, character_id: str):
 def _build_geometry(
     character_id: str,
     revision: int,
-    rig,
+    preview_serial: int,
+    rig_pointer: int,
+    world,
     document: FitDocument,
     draft: FitDraft,
 ) -> FitBodyGeometrySnapshot:
     definition_by_id = {part.part_id: part for part in document.parts}
     derived = derive_rest_parts(draft)
-    world = rig.matrix_world
     parts: list[FitGeometryPart] = []
     for rest in derived:
         definition = definition_by_id[rest.part_id]
@@ -197,8 +214,9 @@ def _build_geometry(
         )
     return FitBodyGeometrySnapshot(
         character_id=character_id,
-        revision=revision,
-        rig_pointer=int(rig.as_pointer()),
+        revision=int(revision),
+        preview_serial=int(preview_serial),
+        rig_pointer=int(rig_pointer),
         parts=tuple(parts),
     )
 
@@ -235,15 +253,25 @@ def begin_fit_semantic_session(
         animation_footprint_digest=_animation_digest(token),
         snapshots=snapshots,
     )
-    geometry = _build_geometry(character_id, 0, rig, document, draft)
+    matrix_signature = _matrix_signature(rig.matrix_world)
+    matrix_world_frozen = _matrix_snapshot(rig.matrix_world)
+    geometry = _build_geometry(
+        character_id,
+        0,
+        0,
+        int(rig.as_pointer()),
+        Matrix(matrix_world_frozen),
+        document,
+        draft,
+    )
     session = FitSemanticSession(
         character_id=character_id,
         token=token,
         rig_object=rig,
         document=document,
         draft=draft,
-        matrix_signature=_matrix_signature(rig.matrix_world),
-        matrix_world_frozen=_matrix_snapshot(rig.matrix_world),
+        matrix_signature=matrix_signature,
+        matrix_world_frozen=matrix_world_frozen,
         geometry=geometry,
     )
     _SESSIONS[key] = session
@@ -389,11 +417,12 @@ def fit_active_part_world_pivot_axes(
     if rest is None:
         return None, None
 
-    if definition.name_hint.upper() in {"COM", "PELVIS"}:
+    if definition.semantic_key == "awb.com":
         pivot_local = (Vector(rest.head) + Vector(rest.tail)) * 0.5
     else:
         pivot_local = Vector(rest.head)
-    pivot_world = Vector(session.rig_object.matrix_world @ pivot_local)
+    frozen_world = Matrix(session.matrix_world_frozen)
+    pivot_world = Vector(frozen_world @ pivot_local)
 
     mode = str(orientation_mode).upper()
     if mode == "WORLD":
@@ -403,7 +432,7 @@ def fit_active_part_world_pivot_axes(
             "Z": Vector((0.0, 0.0, 1.0)),
         }
     elif mode == "LOCAL":
-        world3 = session.rig_object.matrix_world.to_3x3()
+        world3 = frozen_world.to_3x3()
         axes = {}
         for name, basis in (
             ("X", (1.0, 0.0, 0.0)),
@@ -419,71 +448,173 @@ def fit_active_part_world_pivot_axes(
     return pivot_world, axes
 
 
-def _publish_fit_draft(context, session: FitSemanticSession, draft: FitDraft) -> bool:
+def _frozen_world3(session: FitSemanticSession):
+    world3 = Matrix(session.matrix_world_frozen).to_3x3()
+    determinant = float(world3.determinant())
+    if determinant <= 1e-12:
+        raise FitSemanticSessionError("FIT_F3_OBJECT_MATRIX_UNSUPPORTED")
+    scales = tuple(Vector(world3.col[index]).length for index in range(3))
+    maximum = max(scales)
+    minimum = min(scales)
+    if minimum <= 1e-12 or (maximum - minimum) > max(1e-6, maximum * 1e-6):
+        raise FitSemanticSessionError("FIT_F3_OBJECT_MATRIX_UNSUPPORTED")
+    return world3
+
+
+def _ordered_selected_part_ids(session: FitSemanticSession) -> tuple[str, ...]:
+    return tuple(
+        part.part_id
+        for part in session.geometry.parts
+        if part.part_id in session.selected_part_ids
+    )
+
+
+def _rebuild_preview_geometry(context, session: FitSemanticSession, draft: FitDraft) -> bool:
     if draft.document is not session.document:
         raise FitSemanticSessionError("FIT_F3_DRAFT_DOCUMENT_MISMATCH")
     if draft == session.draft:
         return False
     session.draft = draft
-    session.revision += 1
+    session.preview_serial += 1
     session.geometry = _build_geometry(
         session.character_id,
         session.revision,
-        session.rig_object,
+        session.preview_serial,
+        session.geometry.rig_pointer,
+        Matrix(session.matrix_world_frozen),
         session.document,
-        session.draft,
+        draft,
     )
     if context.area is not None:
         context.area.tag_redraw()
     return True
 
 
-def apply_fit_move_preview(
-    context,
-    *,
-    baseline_draft: FitDraft,
-    part_id: str,
-    world_delta,
-) -> FitSemanticMoveReceipt:
+def begin_fit_move_gesture(context, *, part_id: str) -> FitMoveGestureBaseline:
     session = fit_semantic_session(context)
     if session is None:
         raise FitSemanticSessionError("FIT_F3_SESSION_MISSING")
     issues = validate_fit_semantic_session(context, session)
     if issues:
         raise FitSemanticSessionError(issues[0])
-    if baseline_draft.document is not session.document:
-        raise FitSemanticSessionError("FIT_F3_DRAFT_DOCUMENT_MISMATCH")
+    if session.active_move_gesture is not None:
+        raise FitSemanticSessionError("FIT_F3_GESTURE_ALREADY_ACTIVE")
+    part_id = str(part_id)
+    selected_part_ids = _ordered_selected_part_ids(session)
+    if selected_part_ids != (part_id,) or session.active_part_id != part_id:
+        raise FitSemanticSessionError("FIT_F3_MOVE_SELECTION_INVALID")
+    if not fit_move_supported(session.draft, part_id):
+        raise FitSemanticSessionError("FIT_F3_MOVE_UNSUPPORTED_PART")
+    _frozen_world3(session)
+    gesture = FitMoveGestureBaseline(
+        part_id=part_id,
+        draft=session.draft,
+        geometry=session.geometry,
+        revision=int(session.revision),
+        preview_serial=int(session.preview_serial),
+        matrix_signature=session.matrix_signature,
+        selected_part_ids=selected_part_ids,
+        active_part_id=part_id,
+    )
+    session.active_move_gesture = gesture
+    return gesture
 
+
+def _require_move_gesture(
+    context,
+    gesture: FitMoveGestureBaseline,
+) -> FitSemanticSession:
+    session = fit_semantic_session(context)
+    if session is None:
+        raise FitSemanticSessionError("FIT_F3_SESSION_MISSING")
+    if session.active_move_gesture is not gesture:
+        raise FitSemanticSessionError("FIT_F3_GESTURE_STALE")
+    issues = validate_fit_semantic_session(context, session)
+    if issues:
+        raise FitSemanticSessionError(issues[0])
+    if session.matrix_signature != gesture.matrix_signature:
+        raise FitSemanticSessionError("FIT_F3_OBJECT_MATRIX_CHANGED")
+    if _ordered_selected_part_ids(session) != gesture.selected_part_ids:
+        raise FitSemanticSessionError("FIT_F3_MOVE_SELECTION_CHANGED")
+    if session.active_part_id != gesture.active_part_id:
+        raise FitSemanticSessionError("FIT_F3_MOVE_SELECTION_CHANGED")
+    return session
+
+
+def apply_fit_move_preview(
+    context,
+    *,
+    gesture: FitMoveGestureBaseline,
+    world_delta,
+) -> FitSemanticMoveReceipt:
+    session = _require_move_gesture(context, gesture)
     world_vector = Vector(world_delta)
-    world3 = session.rig_object.matrix_world.to_3x3()
-    if abs(float(world3.determinant())) <= 1e-12:
-        raise FitSemanticSessionError("FIT_F3_OBJECT_MATRIX_SINGULAR")
+    if len(world_vector) != 3:
+        raise FitSemanticSessionError("FIT_F3_MOVE_DELTA_INVALID")
+    world3 = _frozen_world3(session)
     rig_vector = Vector(world3.inverted() @ world_vector)
     try:
         candidate = move_fit_part_rig_local(
-            baseline_draft,
-            str(part_id),
+            gesture.draft,
+            gesture.part_id,
             tuple(float(value) for value in rig_vector),
         )
     except FitCommandError as exc:
         raise FitSemanticSessionError(str(exc)) from exc
 
-    revision_before = int(session.revision)
-    changed = _publish_fit_draft(context, session, candidate)
+    changed = _rebuild_preview_geometry(context, session, candidate)
     return FitSemanticMoveReceipt(
-        part_id=str(part_id),
-        revision_before=revision_before,
+        part_id=gesture.part_id,
+        revision_before=gesture.revision,
         revision_after=int(session.revision),
+        preview_serial=int(session.preview_serial),
         world_delta=tuple(float(value) for value in world_vector),
         rig_delta=tuple(float(value) for value in rig_vector),
         changed=changed,
     )
 
 
-def restore_fit_draft_preview(context, baseline_draft: FitDraft) -> bool:
+def commit_fit_move_gesture(
+    context,
+    gesture: FitMoveGestureBaseline,
+) -> bool:
+    session = _require_move_gesture(context, gesture)
+    changed = session.draft != gesture.draft
+    if changed:
+        session.revision = gesture.revision + 1
+        session.preview_serial += 1
+        session.geometry = _build_geometry(
+            session.character_id,
+            session.revision,
+            session.preview_serial,
+            session.geometry.rig_pointer,
+            Matrix(session.matrix_world_frozen),
+            session.document,
+            session.draft,
+        )
+    else:
+        session.draft = gesture.draft
+        session.geometry = gesture.geometry
+        session.revision = gesture.revision
+        session.preview_serial = gesture.preview_serial
+    session.active_move_gesture = None
+    if context.area is not None:
+        context.area.tag_redraw()
+    return changed
+
+
+def cancel_fit_move_gesture(
+    context,
+    gesture: FitMoveGestureBaseline,
+) -> bool:
     session = fit_semantic_session(context)
-    if session is None:
+    if session is None or session.active_move_gesture is not gesture:
         return False
-    if baseline_draft.document is not session.document:
-        raise FitSemanticSessionError("FIT_F3_DRAFT_DOCUMENT_MISMATCH")
-    return _publish_fit_draft(context, session, baseline_draft)
+    session.draft = gesture.draft
+    session.geometry = gesture.geometry
+    session.revision = gesture.revision
+    session.preview_serial = gesture.preview_serial
+    session.active_move_gesture = None
+    if context.area is not None:
+        context.area.tag_redraw()
+    return True
