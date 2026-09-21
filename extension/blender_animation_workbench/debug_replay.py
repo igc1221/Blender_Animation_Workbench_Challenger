@@ -46,6 +46,7 @@ from .rigped_transform import (
     _apply_direct_rotate_sliding_sync,
     _begin_direct_move_states,
     _begin_semantic_move_domains,
+    _capture_sliding_dependency_guards,
     _control_pivot_world,
     _current_sliding_capabilities,
     _direct_rotate_auto_contexts,
@@ -53,7 +54,9 @@ from .rigped_transform import (
     _fk_move_auto_contexts,
     _passive_sliding_capabilities,
     _refresh_current_sliding_public_overlays,
+    _resolved_control_role_name,
     _selected_direct_rotate_controls,
+    _sliding_capabilities_for_character,
     _state_for_pose_matrix,
     _uses_center_pivot,
     apply_fk_joint_moves_delta,
@@ -576,12 +579,36 @@ def _execute_direct_move_action(context, action: dict[str, Any]) -> dict[str, An
     if controls:
         _select_pose_controls(context, controls)
 
-    states = _begin_direct_move_states(context)
+    control_context = control_context_for_context(context)
+    domain_resolution = resolve_operation_domain(scene, control_context)
+    if not domain_resolution.ok or domain_resolution.snapshot is None:
+        detail = (
+            domain_resolution.issues[0].detail
+            if domain_resolution.issues
+            else "Direct Move replay could not freeze the operation domain."
+        )
+        raise RuntimeError(detail)
+    operation_domain = domain_resolution.snapshot
+    states = _begin_direct_move_states(control_context, operation_domain)
+    frozen_sliding = _sliding_capabilities_for_character(
+        scene,
+        operation_domain.character_id,
+    )
+    e7_body_move = all(
+        _resolved_control_role_name(state.control) == "COM"
+        for state in states
+    )
+    dependency_guards = (
+        _capture_sliding_dependency_guards(frozen_sliding)
+        if e7_body_move
+        else ()
+    )
+
     auto_plan = None
     if bool(getattr(scene, "baw_auto_key_enabled", False)):
         planned = plan_rigped_auto_direct_move(
             scene,
-            control_context_for_context(context),
+            control_context,
             operation_id=f"replay-auto-direct-move:{uuid4().hex}",
             active_only=len(states) == 1,
         )
@@ -593,18 +620,28 @@ def _execute_direct_move_action(context, action: dict[str, Any]) -> dict[str, An
     delta_values = tuple(float(value) for value in tuple(action.get("delta_world") or ()))
     if len(delta_values) != 3:
         raise RuntimeError("AWB semantic replay Direct Move is missing its world delta.")
-    _apply_direct_move_delta(context, states, Vector(delta_values))
+    _apply_direct_move_delta(
+        context,
+        states,
+        Vector(delta_values),
+        sliding_capabilities=frozen_sliding,
+        dependency_guards=dependency_guards,
+        operation_id="semantic-replay-direct-move",
+    )
 
     if auto_plan is not None:
         committed = commit_rigped_auto_direct_move(
             scene,
-            control_context_for_context(context),
+            control_context,
             auto_plan,
         )
         if not committed.applied:
             detail = "; ".join(item.detail for item in committed.diagnostics)
             raise RuntimeError(detail or "AWB semantic replay Direct Move Auto commit failed.")
-        _refresh_current_sliding_public_overlays(context)
+        _refresh_current_sliding_public_overlays(
+            context,
+            capabilities=frozen_sliding,
+        )
 
     return {
         "kind": "MOVE",

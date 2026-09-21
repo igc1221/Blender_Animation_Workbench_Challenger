@@ -72,7 +72,7 @@ Current routing priority:
 2. Luna High pool: implementation/coding only by default; 2 lanes normally, optional third High burst lane only for real low-overlap implementation work.
 3. External Web review pool: **DeepSeek / Qwen / Gemini are co-equal first-tier reviewers**; rotate pairs across PRE/POST gates for diversity. Use at least 2 independent providers per round. GLM is fallback because of latency.
 4. Luna Max: one exclusive deep-reasoning/implementation lane for genuinely difficult work. Drain High first; High and Max never overlap. Do not use it for routine PRE/POST review.
-5. Standalone Gemini API: MANUAL OPTIONAL ONLY. This does not limit **Gemini Web Bridge**, which is the third-priority normal review provider.
+5. Standalone Gemini API: MANUAL OPTIONAL ONLY. This does not limit **Gemini Web Bridge**, which is a first-tier normal review provider in the rotated DeepSeek / Qwen / Gemini pool.
 6. Antigravity: dormant capacity only; preserve integration, do not assign normal work.
 7. Astra: manual high-value architecture escalation.
 ```

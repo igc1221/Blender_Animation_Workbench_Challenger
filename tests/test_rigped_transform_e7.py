@@ -11,6 +11,13 @@ SOURCE_PATH = (
 )
 SOURCE = SOURCE_PATH.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
+DEBUG_REPLAY_SOURCE = (
+    Path(__file__).resolve().parents[1]
+    / "extension"
+    / "blender_animation_workbench"
+    / "debug_replay.py"
+).read_text(encoding="utf-8")
+DEBUG_REPLAY_TREE = ast.parse(DEBUG_REPLAY_SOURCE)
 
 
 def _function(name: str) -> ast.FunctionDef:
@@ -138,3 +145,23 @@ def test_e7_restore_owns_authority_and_seed_without_reseeding() -> None:
     assert "_restore_sliding_hidden_seed_snapshots(" in rotate_restore
     assert "allow_seed=False" in rotate_restore
     assert "_assert_sliding_dependency_authority(" in rotate_restore
+
+
+
+def test_e7_semantic_replay_direct_move_uses_frozen_domain_and_guard() -> None:
+    replay = next(
+        node
+        for node in ast.walk(DEBUG_REPLAY_TREE)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_execute_direct_move_action"
+    )
+    source = ast.get_source_segment(DEBUG_REPLAY_SOURCE, replay)
+    assert source is not None
+    assert "resolve_operation_domain(scene, control_context)" in source
+    assert "_begin_direct_move_states(control_context, operation_domain)" in source
+    assert "_sliding_capabilities_for_character(" in source
+    assert "operation_domain.character_id" in source
+    assert "_capture_sliding_dependency_guards(frozen_sliding)" in source
+    assert "dependency_guards=dependency_guards" in source
+    assert "capabilities=frozen_sliding" in source
+    assert "_begin_direct_move_states(context)" not in source

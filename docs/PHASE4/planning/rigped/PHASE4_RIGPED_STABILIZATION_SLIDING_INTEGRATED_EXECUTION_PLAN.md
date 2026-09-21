@@ -1,7 +1,7 @@
 ﻿# Phase 4 Rigped — Stabilization + Sliding Integrated Execution Plan
 
 > Updated: **2026-09-22 KST**
-> Status: **ACTIVE EXECUTION PLAN / E1-E6 COMPREHENSIVE-REVIEW STABILIZATION CLOSED / E7 NEXT**
+> Status: **ACTIVE EXECUTION PLAN / E1-E7 CLOSED / E8 NEXT**
 > Runtime target: **Blender 5.2.1 LTS**
 > Main authority: **Sol Main**
 > Mandatory challenger policy: **every implementation/stabilization item receives a narrow pre-implementation challenger review and a narrow post-implementation challenger review; challenger output is advisory evidence and Main decides whether a finding blocks, improves, defers, or is rejected**
@@ -36,7 +36,54 @@ Closure evidence on current source:
 - Main accepted DeepSeek's packet-construction lesson into the `review-evidence` skill and independently verified the exact current-source callsites, including no fallible product-state mutation or required verification after `journal.commit()`.
 - Mandatory post-review rerun: **389 pytest + Ruff PASS, I12 FULL PASS, I13 FULL PASS**.
 
-The stabilization gate is therefore **CLOSED**. E7 is now unblocked and becomes the next implementation item.
+The stabilization gate is therefore **CLOSED**. E7 later passed USER FIRST and frozen replay; E8 is now the active next item.
+
+## 2026-09-22 E8 entry pre-audit
+
+Before handoff to the next session, Main performed a narrow source audit only; **no E8 PRE request has been sent yet**.
+
+Current-source facts:
+- `rigped_ik_pivot_overlay.py` explicitly documents and implements the red point from the solved generated terminal pair `MCH_Hand/MCH_Foot`, so the current cue follows solved result rather than the true hidden IK target/reference.
+- Generated `IK_Hand.*`, `IK_Foot.*`, `IK_Elbow.*`, and `IK_Knee.*` authored IK target/pole bones use `ROOT` as parent.
+- E8 Root behavior must therefore preserve the current hierarchy: Root motion carries hidden target/pole exactly once. E8 must not add world locking, compensation, or a second delta.
+- E8 red-cue work should change only the displayed source of the Sliding cue to the actual hidden IK target/reference, so reachable cases overlap and unreachable cases visibly distinguish target from solved terminal.
+- Continue by finishing the E8 source audit, then send exactly one PRE round using two rotated first-tier providers. Do not implement E8 before all sent PRE responses are consumed.
+
+## 2026-09-22 E7 — USER PASS / CLOSED
+
+E7 first-batch scope is now implemented for AUTO OFF body/ancestor dependency:
+- Direct Move consumes one frozen E1 `OperationDomainSnapshot`; no mid-gesture semantic ownership rescan.
+- COM Move freezes one character-wide Sliding affected set for the gesture and treats those limbs as passive pinned-target dependencies.
+- Body Rotate freezes the same character-wide Sliding set, preserves the existing active/passive partition, and enables E7 hard guards only when there are no active Sliding edit sessions and all selected roles are COM/Pelvis/Spine/Head/Clavicle.L/Clavicle.R.
+- Root is explicitly outside the E7 hard-guard scope and remains E8.
+- Hidden IK target/pole/pole-angle/runtime identity/native IK raw state are hard immutable for E7 body dependency; drift cancels/fails closed.
+- Native result-target reach residual and public-result residual are diagnostic measurements only; unreachable native saturation is allowed. No body clamp, stretch, world pinning, or target transport was added.
+- Cancel/failure restores body state, frozen authority raw state, and hidden seed state; restore disables reseeding.
+
+Closure proof:
+- `awb-check`: **396 pytest PASS + Ruff PASS** after the semantic-replay compatibility regression test was added.
+- Blender 5.2.1 I12: **FULL PASS**.
+- Blender 5.2.1 I13: **FULL PASS**.
+- Blender 5.2.1 E7 dedicated runtime probe: **FULL PASS**:
+  - COM Move pinned authority + reachable/unreachable saturation;
+  - COM/Pelvis/Spine/Head/Clavicle.L/Clavicle.R Rotate dependency;
+  - target/pole drift injection fails closed;
+  - AUTO OFF / no new keys / exact restore.
+- E7 POST round: **Gemini CLEAR / blocker 0; Qwen CLEAR / blocker 0**.
+- Post-review rerun: **396 pytest + Ruff PASS, I12 FULL PASS, I13 FULL PASS, E7 runtime FULL PASS**.
+- Frozen E5 replay: **PASS**.
+- Frozen E6 replay: **PASS** after fixing the Direct Move semantic-replay path to consume the frozen `OperationDomainSnapshot` and E7 dependency guard.
+- E7 USER FIRST session `98f3561750404c95910c95e7a0d99941`: **USER PASS**:
+  - Foot.L Sliding + COM Move from max-extension/near-straight start;
+  - bent Foot.L continuation + COM Move;
+  - Hand.L Sliding + Spine/Head Rotate while Foot.L remained Sliding;
+  - Pelvis / Clavicle.L Rotate;
+  - ESC cancel at trace seq 1871 and 1959.
+- User-session trace: **1957 events / 58 committed semantic actions / 0 authority drift / 0 transform fail / 0 operator error**.
+- Frozen `debug/user_final_tests/E7/user_final_replay.json`: clean-baseline `awb-replay-user-final` **PASS / 58 actions**.
+- Current user-final pointer: `debug/user_final_tests/current.json -> E7`.
+
+E7 is therefore **USER PASS / CLOSED**. E8 is now the next implementation item.
 
 This override does not alter the normal narrow PRE/POST challenger policy for later implementation items.
 
@@ -137,8 +184,9 @@ Every implementation/stabilization item E0-E12 receives **two narrow CHALLENGER 
 
 For an evidence-only item with no product-code mutation, one pre-decision challenger is sufficient unless the evidence changes the architecture boundary.
 
-Default challenger:
-- DeepSeek Web through the provider-agnostic External Web Bridge.
+Default challenger pool:
+- DeepSeek / Qwen / Gemini Web Bridge are co-equal first-tier reviewers; rotate pairs across PRE/POST rounds for diversity.
+- GLM is fallback when a fourth perspective or provider replacement is needed.
 - Each request is narrow and decision-boundary specific.
 - PRE packet contains current frozen contract, current relevant source, known evidence, and the proposed implementation boundary.
 - POST packet contains the same frozen contract plus the exact Main diff/source and asks whether the implementation actually preserves the intended boundary.
@@ -1050,18 +1098,15 @@ Do not start or redesign:
 
 ## 7. Immediate next action
 
-**E1 through E6 are USER PASS / CLOSED, and the comprehensive-review stabilization gate is CLOSED.**
+**E1 through E7 are USER PASS / CLOSED.**
 
-Proceed to **E7 — Live COM / Spine / Head dependency behavior**.
+Proceed to **E8 — Root semantics + red target cue**.
 
-E7 entry requirements:
-1. run exactly one PRE challenger round with two independent Web Bridge providers;
-2. consume the frozen E1 operation-domain snapshot instead of rescanning gesture ownership;
-3. treat body/ancestor dependency as pinned-target maintenance, never as direct Sliding target transport;
-4. include the GLM authority-preservation harness: per-preview target/pole/result measurements and reachable-vs-unreachable distinction;
-5. converge the remaining Move ownership/dynamic-refresh seam (GLM N2/N3) inside the E7 gesture-lifecycle boundary;
-6. keep AUTO OFF for the first E7 proof; do not pull E11 Auto work forward.
+E8 entry requirements:
+1. run exactly one PRE challenger round with two independent rotated first-tier Web Bridge providers;
+2. preserve Root-relative hierarchy semantics: Root moves hidden target/pole exactly once and does not become world-locked Sliding;
+3. source the red Sliding cue from the actual hidden IK target/reference rather than only the solved result;
+4. prove reachable overlap and unreachable target/result divergence without stretch or full-body compensation;
+5. keep AUTO work in E11 and Planted in A6.
 
-After E7 implementation, run exactly one POST round with two independent reviewers, then focused runtime/frozen verification before any new user-final request.
-
-Do not reopen the closed E1-E6 stabilization batch without new concrete regression evidence.
+Do not reopen E1-E7 without new concrete regression evidence.
