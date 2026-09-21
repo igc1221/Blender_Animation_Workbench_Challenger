@@ -1,3 +1,4 @@
+import inspect
 import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -377,3 +378,10 @@ def test_snap_preflight_rejects_unsupported_stretch_and_chain_count():
     )
     assert issue is not None
     assert issue[0] == "I12_UNSUPPORTED_CHAIN_COUNT"
+
+
+
+def test_generated_rigped_transient_hinge_branch_uses_builder_authority() -> None:
+    source = inspect.getsource(representation_snap._configure_generated_rigped_hinge_branch)
+    assert "configure_generated_rigped_ik_hinge_branch" in source
+    assert "math.radians(179.0)" not in source

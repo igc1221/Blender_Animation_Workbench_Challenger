@@ -676,55 +676,12 @@ def _generated_rigped_hinge_branch(capability: LimbRepresentationCapability) -> 
 
 
 def _configure_generated_rigped_hinge_branch(owner, branch_sign: int) -> bool:
-    solver_name = str(getattr(owner, "name", ""))
-    if solver_name not in {
-        "MCH_ForeArm.L",
-        "MCH_ForeArm.R",
-        "MCH_Calf.L",
-        "MCH_Calf.R",
-    }:
-        return False
-    sign = 1 if int(branch_sign) >= 0 else -1
-    before = (
-        bool(owner.lock_ik_x),
-        bool(owner.lock_ik_y),
-        bool(owner.lock_ik_z),
-        bool(owner.use_ik_limit_x),
-        bool(owner.use_ik_limit_y),
-        bool(owner.use_ik_limit_z),
-        float(owner.ik_min_x),
-        float(owner.ik_max_x),
-        float(owner.ik_min_z),
-        float(owner.ik_max_z),
-    )
-    owner.lock_ik_x = False
-    owner.lock_ik_y = False
-    owner.lock_ik_z = False
-    owner.use_ik_limit_x = False
-    owner.use_ik_limit_y = False
-    owner.use_ik_limit_z = False
-    limit = math.radians(179.0)
-    if solver_name.startswith("MCH_ForeArm"):
-        owner.use_ik_limit_z = True
-        owner.ik_min_z = 0.0 if sign > 0 else -limit
-        owner.ik_max_z = limit if sign > 0 else 0.0
-    else:
-        owner.use_ik_limit_x = True
-        owner.ik_min_x = 0.0 if sign > 0 else -limit
-        owner.ik_max_x = limit if sign > 0 else 0.0
-    after = (
-        bool(owner.lock_ik_x),
-        bool(owner.lock_ik_y),
-        bool(owner.lock_ik_z),
-        bool(owner.use_ik_limit_x),
-        bool(owner.use_ik_limit_y),
-        bool(owner.use_ik_limit_z),
-        float(owner.ik_min_x),
-        float(owner.ik_max_x),
-        float(owner.ik_min_z),
-        float(owner.ik_max_z),
-    )
-    return before != after
+    # Keep transient FK->IK branch selection on the same hidden-solver envelope
+    # authored by the generated Rigped. A looser duplicate here can make native
+    # IK choose a different chain solution even when the terminal target is exact.
+    from .rigped_humanoid_builder import configure_generated_rigped_ik_hinge_branch
+
+    return configure_generated_rigped_ik_hinge_branch(owner, branch_sign)
 
 
 def _capture_generated_rigped_hinge_settings(owner) -> tuple[Any, ...]:
