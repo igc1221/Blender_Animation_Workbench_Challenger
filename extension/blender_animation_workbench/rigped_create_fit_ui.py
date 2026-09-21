@@ -789,6 +789,11 @@ class BAW_OT_create_rigped_drag(bpy.types.Operator):
         if self._created_result is not None:
             try:
                 _ensure_object_mode()
+                set_rigped_box_wire_display(
+                    self._created_result.armature_object,
+                    False,
+                    scene=context.scene,
+                )
                 discard_generated_rigped_humanoid(context.scene, self._created_result)
             except RuntimeError as exc:
                 self.report({"ERROR"}, f"Create Rigped cancel cleanup failed: {exc}")
@@ -807,7 +812,11 @@ class BAW_OT_create_rigped_drag(bpy.types.Operator):
                 base=rigify_reference_humanoid_spec(),
             )
             result = build_generated_rigped_humanoid(context.scene, spec)
-            _apply_biped_box_wire_colors(result.armature_object, context.scene)
+            set_rigped_box_wire_display(
+                result.armature_object,
+                True,
+                scene=context.scene,
+            )
             self._created_result = result
             _select_only_object(context, result.armature_object)
         except (RuntimeError, ValueError) as exc:
@@ -843,6 +852,11 @@ class BAW_OT_create_rigped_drag(bpy.types.Operator):
         origin = tuple(float(value) for value in preview.armature_object.location)
         try:
             _ensure_object_mode()
+            set_rigped_box_wire_display(
+                preview.armature_object,
+                False,
+                scene=context.scene,
+            )
             discard_generated_rigped_humanoid(context.scene, preview)
             final_spec = fitted_humanoid_spec(
                 self._preview_height,
@@ -850,7 +864,11 @@ class BAW_OT_create_rigped_drag(bpy.types.Operator):
                 base=rigify_reference_humanoid_spec(),
             )
             result = build_generated_rigped_humanoid(context.scene, final_spec)
-            _apply_biped_box_wire_colors(result.armature_object, context.scene)
+            set_rigped_box_wire_display(
+                result.armature_object,
+                True,
+                scene=context.scene,
+            )
             self._created_result = result
             _select_only_object(context, result.armature_object)
         except (RuntimeError, ValueError) as exc:
@@ -858,6 +876,11 @@ class BAW_OT_create_rigped_drag(bpy.types.Operator):
                 current = self._created_result
                 if current is not None:
                     _ensure_object_mode()
+                    set_rigped_box_wire_display(
+                        current.armature_object,
+                        False,
+                        scene=context.scene,
+                    )
                     discard_generated_rigped_humanoid(context.scene, current)
                 self._restore_original_selection(context)
             except RuntimeError:

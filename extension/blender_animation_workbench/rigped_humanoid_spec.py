@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from math import isfinite
 
 from .character_model import semantic_key_error
 from .rigped_contract import RIGPED_PROFILE_HUMANOID_V1
@@ -90,6 +91,7 @@ class RigpedHumanoidSpec:
     armature_object_name: str = "AWB_Rigped"
     armature_data_name: str = "AWB_Rigped_Data"
     world_location: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    display_scale: float = 1.0
     bones: tuple[HumanoidBoneSpec, ...] = ()
     constraints: tuple[HumanoidConstraintSpec, ...] = ()
     groups: tuple[HumanoidGroupSpec, ...] = ()
@@ -118,6 +120,8 @@ class RigpedHumanoidSpec:
     def validate(self) -> None:
         if not self.profile_id:
             raise ValueError("Humanoid profile_id must not be empty.")
+        if not isfinite(float(self.display_scale)) or float(self.display_scale) <= 0.0:
+            raise ValueError("Humanoid display_scale must be finite and positive.")
         bones = self.resolved_bones()
         if not bones:
             raise ValueError("Humanoid topology is empty.")

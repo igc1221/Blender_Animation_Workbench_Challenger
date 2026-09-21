@@ -52,12 +52,20 @@ def test_fitted_spec_uniformly_scales_generated_topology_before_build():
     fitted = create_policy.fitted_humanoid_spec(target_height, (1.0, 2.0, 3.0), base=base)
     assert fitted.world_location == (1.0, 2.0, 3.0)
     assert create_policy.humanoid_spec_height(fitted) == pytest.approx(target_height)
+    assert fitted.display_scale == pytest.approx(1.5)
 
     original = {bone.role: bone for bone in base.resolved_bones()}
     scaled = {bone.role: bone for bone in fitted.resolved_bones()}
     for role in ("HEAD", "UPPER_ARM.L", "IK_FOOT.R", "MCH_TOE.L", "DEF_HAND.R"):
         assert scaled[role].head == pytest.approx(tuple(value * 1.5 for value in original[role].head))
         assert scaled[role].tail == pytest.approx(tuple(value * 1.5 for value in original[role].tail))
+
+
+def test_fitted_spec_accumulates_display_scale_when_refitting_an_already_scaled_source():
+    base = humanoid.RigpedHumanoidSpec(display_scale=0.75)
+    source_height = create_policy.humanoid_spec_height(base)
+    fitted = create_policy.fitted_humanoid_spec(source_height * 2.0, (0.0, 0.0, 0.0), base=base)
+    assert fitted.display_scale == pytest.approx(1.5)
 
 
 def test_fitted_spec_keeps_semantic_graph_contract_and_responsibility_layers():

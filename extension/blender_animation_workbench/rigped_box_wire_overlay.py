@@ -12,7 +12,7 @@ _DRAW_HANDLE_PIXEL = None
 _SHADER = None
 _PIXEL_SHADER = None
 _NATIVE_BONE_OVERLAY_STATES: dict[int, bool] = {}
-_EDGE_DEPTH_SLICES = 4
+_EDGE_DEPTH_SLICES = 2
 
 _EDGES = (
     (0, 1),
@@ -89,15 +89,16 @@ def _suppress_native_bones_in_space(space) -> None:
     overlay.show_bones = False
 
 
-def _restore_native_bone_overlays() -> None:
-    if not _NATIVE_BONE_OVERLAY_STATES:
-        return
+def _restore_native_bone_overlays(*, ensure_visible: bool = False) -> None:
     for space in _iter_view3d_spaces():
         pointer = _space_pointer(space)
         overlay = getattr(space, "overlay", None)
-        if pointer is None or overlay is None or pointer not in _NATIVE_BONE_OVERLAY_STATES:
+        if pointer is None or overlay is None or not hasattr(overlay, "show_bones"):
             continue
-        overlay.show_bones = _NATIVE_BONE_OVERLAY_STATES[pointer]
+        if ensure_visible:
+            overlay.show_bones = True
+        elif pointer in _NATIVE_BONE_OVERLAY_STATES:
+            overlay.show_bones = _NATIVE_BONE_OVERLAY_STATES[pointer]
     _NATIVE_BONE_OVERLAY_STATES.clear()
 
 
@@ -113,7 +114,11 @@ def sync_native_bone_overlay_visibility() -> None:
         for space in _iter_view3d_spaces():
             _suppress_native_bones_in_space(space)
     else:
-        _restore_native_bone_overlays()
+        # Box Display OFF means the native armature is the visible Rigped
+        # representation. A saved .blend may already have show_bones disabled
+        # from an earlier Box session, so restoring that stale False value would
+        # make the Rigped disappear entirely.
+        _restore_native_bone_overlays(ensure_visible=True)
     _tag_all_view3d_redraw()
 
 

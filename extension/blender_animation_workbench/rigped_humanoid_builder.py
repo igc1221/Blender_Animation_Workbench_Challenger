@@ -204,7 +204,12 @@ def _align_generated_bone_roll(bone) -> None:
     bone.align_roll(reference)
 
 
-def _create_bones(armature_object, bones: tuple[HumanoidBoneSpec, ...]) -> None:
+def _create_bones(
+    armature_object,
+    bones: tuple[HumanoidBoneSpec, ...],
+    *,
+    display_scale: float = 1.0,
+) -> None:
     for obj in bpy.context.selected_objects:
         obj.select_set(False)
     armature_object.select_set(True)
@@ -227,6 +232,14 @@ def _create_bones(armature_object, bones: tuple[HumanoidBoneSpec, ...]) -> None:
             bone.use_connect = bool(entry.connected)
     finally:
         bpy.ops.object.mode_set(mode="OBJECT")
+
+    # Blender initializes B-Bone display width/depth to fixed absolute values.
+    # Scale those defaults with the same factor used for generated rest geometry
+    # so creation height changes overall size without changing apparent body build.
+    display_scale = max(1e-6, float(display_scale))
+    for data_bone in armature_object.data.bones:
+        data_bone.bbone_x = max(1e-6, float(data_bone.bbone_x) * display_scale)
+        data_bone.bbone_z = max(1e-6, float(data_bone.bbone_z) * display_scale)
 
     # Biped-style default display sizing. Pelvis ends at each Thigh center, so
     # each thigh is visually overlapped by about half its width without moving
@@ -830,7 +843,11 @@ def build_generated_rigped_humanoid(
             detail="create humanoid Armature container",
         )
 
-        _create_bones(armature_object, spec.resolved_bones())
+        _create_bones(
+            armature_object,
+            spec.resolved_bones(),
+            display_scale=spec.display_scale,
+        )
         _setup_bone_collections(armature_object, spec.resolved_bones())
         hook.enter(
             OperationStage.APPLY_WRITE,

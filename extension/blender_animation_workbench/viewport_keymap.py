@@ -336,6 +336,7 @@ def _native_pick_name(
     mode: str,
     *,
     excluded: tuple[str, ...] = (),
+    diagnostics: dict[str, object] | None = None,
 ) -> str | None:
     excluded_names = frozenset(str(name) for name in excluded)
 
@@ -383,9 +384,22 @@ def _native_pick_name(
         return picked
 
     if mode == "OBJECT":
-        box_pick = _box_object_pick_name(context, location)
+        box_diagnostics: dict[str, object] = {}
+        box_pick = _box_object_pick_name(
+            context,
+            location,
+            diagnostics=box_diagnostics if diagnostics is not None else None,
+        )
+        if diagnostics is not None:
+            diagnostics["box"] = box_diagnostics
+            diagnostics["excluded_names"] = tuple(sorted(excluded_names))
         if box_pick is not None and box_pick not in excluded_names:
+            if diagnostics is not None:
+                diagnostics["route"] = "BOX"
+                diagnostics["picked"] = box_pick
             return box_pick
+        if diagnostics is not None and box_pick is not None:
+            diagnostics["box_pick_excluded"] = True
         selected_before = tuple(
             str(obj.name) for obj in (getattr(context, "selected_objects", ()) or ())
         )
@@ -435,6 +449,10 @@ def _native_pick_name(
                 if active_before_name is not None
                 else None
             )
+        if diagnostics is not None:
+            diagnostics["native_pick"] = picked
+            diagnostics["route"] = "NATIVE" if picked is not None else "MISS"
+            diagnostics["picked"] = picked
         return picked
 
     if mode == "EDIT_ARMATURE":
@@ -517,12 +535,19 @@ def _native_max_style_pick(
     location: tuple[int, int],
     cycle_location: tuple[int, int],
     mode: str,
+    *,
+    diagnostics: dict[str, object] | None = None,
 ) -> str | None:
     del cycle_location
     # Visible/front-most only: repeated clicks at the same screen position must
     # never cycle through geometry hidden behind the first native hit.
     _reset_max_pick_cycle()
-    return _native_pick_name(context, location, mode)
+    return _native_pick_name(
+        context,
+        location,
+        mode,
+        diagnostics=diagnostics,
+    )
 
 
 def _selection_rect(
@@ -733,26 +758,111 @@ def _box_display_rigs(context):
     )
 
 
-def _box_object_pick_name(context, location: tuple[int, int]) -> str | None:
+def _box_object_pick_name(
+    context,
+    location: tuple[int, int],
+    *,
+    diagnostics: dict[str, object] | None = None,
+) -> str | None:
     rv3d = getattr(context, "region_data", None) or getattr(
         getattr(context, "space_data", None), "region_3d", None
     )
+    scene = getattr(context, "scene", None)
+    if diagnostics is not None:
+        region = getattr(context, "region", None)
+        diagnostics.update(
+            {
+                "location": location,
+                "region_size": (
+                    (int(region.width), int(region.height))
+                    if region is not None
+                    else None
+                ),
+                "has_region_3d": rv3d is not None,
+                "display_rigs": (
+                    [
+                        str(obj.name)
+                        for obj in scene.objects
+                        if rigped_box_display_enabled(obj)
+                        and not obj.hide_get()
+                        and str(getattr(obj, "mode", "")) != "EDIT"
+                    ]
+                    if scene is not None
+                    else []
+                ),
+            }
+        )
     if rv3d is None:
+        if diagnostics is not None:
+            diagnostics["rejection"] = "NO_REGION_3D"
         return None
 
+    rigs = _box_display_rigs(context)
     hits = []
-    for rig in _box_display_rigs(context):
-        for name in box_display_names(rig):
+    nearest_distance: float | None = None
+    nearest_part: dict[str, object] | None = None
+    projected_parts = 0
+    valid_parts = 0
+    hit_parts: list[dict[str, object]] = []
+    total_parts = 0
+    for rig in rigs:
+        names = tuple(box_display_names(rig))
+        total_parts += len(names)
+        for name in names:
             vertices = box_world_vertices(rig, name)
             if len(vertices) != 8:
                 continue
+            valid_parts += 1
             polygon = _project_box_polygon(context, rv3d, vertices)
+            if polygon:
+                projected_parts += 1
+            if diagnostics is not None and polygon:
+                previous = polygon[-1]
+                edge_distance = float("inf")
+                for current in polygon:
+                    edge_distance = min(
+                        edge_distance,
+                        _point_segment_distance_2d(location, previous, current),
+                    )
+                    previous = current
+                xs = [float(point[0]) for point in polygon]
+                ys = [float(point[1]) for point in polygon]
+                if nearest_distance is None or edge_distance < nearest_distance:
+                    nearest_distance = edge_distance
+                    nearest_part = {
+                        "rig": str(rig.name),
+                        "part": str(name),
+                        "edge_distance": edge_distance,
+                        "inside": bool(_point_in_polygon_2d(location, polygon)),
+                        "bounds": [min(xs), max(xs), min(ys), max(ys)],
+                    }
             if polygon and _point_hits_polygon_2d(location, polygon):
-                hits.append((_box_view_depth(rv3d, vertices), str(rig.name)))
-    if not hits:
-        return None
-    return max(hits, key=lambda item: item[0])[1]
+                depth = _box_view_depth(rv3d, vertices)
+                hits.append((depth, str(rig.name)))
+                if len(hit_parts) < 32:
+                    hit_parts.append(
+                        {
+                            "rig": str(rig.name),
+                            "part": str(name),
+                            "depth": depth,
+                        }
+                    )
 
+    picked = max(hits, key=lambda item: item[0])[1] if hits else None
+    if diagnostics is not None:
+        diagnostics.update(
+            {
+                "pick_rigs": [str(rig.name) for rig in rigs],
+                "total_parts": total_parts,
+                "valid_box_parts": valid_parts,
+                "projected_parts": projected_parts,
+                "hit_parts": hit_parts,
+                "nearest_part": nearest_part,
+                "picked_rig": picked,
+                "rejection": None if picked is not None else "NO_BOX_HIT",
+            }
+        )
+    return picked
 
 def _mesh_object_intersects_rect(context, rv3d, obj, rect, depsgraph) -> bool:
     evaluated = obj.evaluated_get(depsgraph)
@@ -1159,19 +1269,38 @@ def apply_awb_click_selection(
     location: tuple[int, int],
     cycle_location: tuple[int, int],
     action: str = "SET",
+    *,
+    source: str = "AWB_SELECTION",
 ):
     """Run the same global AWB click-selection path from non-selection modals."""
 
     mode = str(getattr(context, "mode", ""))
+    active_tool_before = _active_native_transform_tool_id(context)
     if mode in {"POSE", "OBJECT", "EDIT_ARMATURE"}:
+        pick_diagnostics: dict[str, object] = {}
         picked = _native_max_style_pick(
             context,
             location,
             cycle_location,
             mode,
+            diagnostics=pick_diagnostics if mode == "OBJECT" else None,
         )
         if picked is None:
             _clear_click_selection_on_miss(context, mode, action)
+            if mode == "OBJECT":
+                trace_event(
+                    "INPUT",
+                    "SELECTION_CLICK_RESULT",
+                    context=context,
+                    source=source,
+                    action=action,
+                    location=location,
+                    cycle_location=cycle_location,
+                    active_tool_before=active_tool_before,
+                    result="MISS",
+                    picked=None,
+                    pick_diagnostics=pick_diagnostics,
+                )
             return {"FINISHED"}
         if mode == "POSE":
             _apply_pose_pick(context, picked, action)
@@ -1179,6 +1308,20 @@ def apply_awb_click_selection(
             _apply_object_pick(context, picked, action)
         else:
             _apply_edit_bone_pick(context, picked, action)
+        if mode == "OBJECT":
+            trace_event(
+                "INPUT",
+                "SELECTION_CLICK_RESULT",
+                context=context,
+                source=source,
+                action=action,
+                location=location,
+                cycle_location=cycle_location,
+                active_tool_before=active_tool_before,
+                result="PICK",
+                picked=picked,
+                pick_diagnostics=pick_diagnostics,
+            )
         return {"FINISHED"}
 
     return {"CANCELLED"}
@@ -1760,7 +1903,25 @@ class BAW_OT_awb_select_click(bpy.types.Operator):
         )
 
     def invoke(self, context, event):
-        if _active_native_transform_tool_id(context) in {
+        active_tool_before = _active_native_transform_tool_id(context)
+        if str(getattr(context, "mode", "")) == "OBJECT" and event.value in {
+            "CLICK",
+            "CLICK_DRAG",
+        }:
+            trace_event(
+                "INPUT",
+                "SELECTION_CLICK_BEGIN",
+                context=context,
+                operator=self.bl_idname,
+                action=self.action,
+                event_type=str(event.type),
+                event_value=str(event.value),
+                location=(int(event.mouse_region_x), int(event.mouse_region_y)),
+                window_location=(int(event.mouse_x), int(event.mouse_y)),
+                active_tool_before=active_tool_before,
+            )
+
+        if active_tool_before in {
             "baw.select_object",
             "baw.select_pose",
             "baw.select_edit_armature",
@@ -1782,6 +1943,7 @@ class BAW_OT_awb_select_click(bpy.types.Operator):
                 location,
                 cycle_location,
                 self.action,
+                source="AWB_SELECT_CLICK",
             )
 
         if event.value != "CLICK_DRAG":
@@ -1869,6 +2031,7 @@ class BAW_OT_awb_select_click(bpy.types.Operator):
                         location,
                         cycle_location,
                         self.action,
+                        source="AWB_SELECT_MODAL_RELEASE",
                     )
             finally:
                 _clear_viewport_box_overlay(context)

@@ -87,4 +87,5 @@ def fitted_humanoid_spec(
         source,
         bones=tuple(scaled),
         world_location=tuple(float(value) for value in origin),
+        display_scale=float(source.display_scale) * scale,
     )

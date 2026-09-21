@@ -91,6 +91,12 @@ def test_humanoid_physically_separates_authored_mechanism_deform_and_export():
     ) == 3
 
 
+def test_humanoid_display_scale_must_be_finite_and_positive():
+    for value in (0.0, -1.0, float("inf"), float("-inf"), float("nan")):
+        with pytest.raises(ValueError, match="display_scale"):
+            humanoid.RigpedHumanoidSpec(display_scale=value).validate()
+
+
 def test_humanoid_all_awb_semantic_keys_are_canonical():
     spec = humanoid.RigpedHumanoidSpec()
     semantic_keys = [bone.semantic_key for bone in spec.resolved_bones()]
