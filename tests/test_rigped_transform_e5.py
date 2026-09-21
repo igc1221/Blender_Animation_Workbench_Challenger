@@ -66,7 +66,8 @@ def test_e5_active_passive_ownership_is_frozen_disjoint_and_traceable() -> None:
         if isinstance(node, ast.FunctionDef) and node.name == "invoke"
     )
     source = _source(invoke)
-    assert "frozen_current_sliding = _current_sliding_capabilities(context)" in source
+    assert "frozen_current_sliding = _sliding_capabilities_for_character(" in source
+    assert "operation_domain.character_id" in source
     assert "active_ids & passive_ids" in source
     assert "active_ids | passive_ids != affected_ids" in source
     for field in (

@@ -79,8 +79,10 @@ from .rigped_humanoid_builder import configure_generated_rigped_ik_hinge_branch
 from .rigped_limb_math import preferred_two_bone_bend
 from .rigped_operation_domain import OperationDomainSnapshot, resolve_operation_domain
 from .rigped_sliding_evaluation import (
+    SlidingAuthoredReference,
     build_transient_solver_seed,
     capture_native_solved_result,
+    capture_sliding_authored_reference,
     derive_public_display,
     native_pose_basis_from_matrix,
 )
@@ -177,6 +179,23 @@ class SlidingHiddenSeedSnapshot:
     capability: LimbRepresentationCapability
     result_states: tuple[SnapControlState, ...]
     terminal_state: SnapControlState
+
+
+@dataclass(slots=True)
+class SlidingDependencyGuard:
+    capability: LimbRepresentationCapability
+    reference: SlidingAuthoredReference
+    start_ik_state: SnapControlState
+    start_pole_state: SnapControlState | None
+    start_ik_influence: float
+    start_ik_mute: bool
+    start_terminal_ik_influence: float
+    start_terminal_ik_mute: bool
+    start_hinge_settings: tuple[Any, ...]
+    start_result_terminal: Matrix
+    start_public_terminal: Matrix
+    ik_runtime_key: tuple[int, int]
+    pole_runtime_key: tuple[int, int] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +369,13 @@ def _world_to_control_location_delta_matrix(resolved: ResolvedControl) -> Matrix
     if abs(float(local_to_world.determinant())) <= 1e-10:
         return None
     return local_to_world.inverted_safe()
+
+
+def _resolved_control_role_name(resolved: ResolvedControl) -> str:
+    role = getattr(resolved.control, "role", None)
+    if role is not None:
+        return str(getattr(role, "value", role))
+    return str(getattr(resolved.target, "name", ""))
 
 
 def _capture_control_state(resolved: ResolvedControl) -> SnapControlState:
@@ -4571,9 +4597,53 @@ def _selected_direct_move_controls(context) -> tuple[ResolvedControl, ...]:
     )
 
 
-def _begin_direct_move_states(context) -> tuple[DirectMoveControlState, ...]:
+def _begin_direct_move_states(
+    control_context,
+    operation_domain: OperationDomainSnapshot,
+) -> tuple[DirectMoveControlState, ...]:
+    if operation_domain.selector_was_stale:
+        raise RigpedSemanticMoveError(
+            "Direct Move cannot start from a stale Character selector."
+        )
+    if operation_domain.contact_mapping_ids:
+        raise RigpedSemanticMoveError(
+            "Direct Move cannot mix body translation with a Contact-limb operation domain."
+        )
+    if operation_domain.rejected_control_runtime_keys:
+        raise RigpedSemanticMoveError(
+            "Direct Move operation domain contains rejected controls."
+        )
+    if set(operation_domain.selected_binding_ids) != set(
+        operation_domain.supported_direct_binding_ids
+    ):
+        raise RigpedSemanticMoveError(
+            "Direct Move requires one fully supported frozen direct-control domain."
+        )
+
+    controls_by_key = {
+        runtime_control_key(control): control
+        for control in control_context.controls
+        if isinstance(control.target, bpy.types.PoseBone)
+    }
+    selected_keys = tuple(operation_domain.selected_control_runtime_keys)
+    if set(controls_by_key) != set(selected_keys):
+        raise RigpedSemanticMoveError(
+            "Direct Move native selection changed while freezing the operation domain."
+        )
+    active_key = operation_domain.active_control_runtime_key
+    if active_key is None or active_key not in controls_by_key:
+        raise RigpedSemanticMoveError(
+            "Direct Move lost its frozen active control."
+        )
+    controls = tuple(
+        sorted(
+            (controls_by_key[key] for key in selected_keys),
+            key=lambda control: 0 if runtime_control_key(control) == active_key else 1,
+        )
+    )
+
     states: list[DirectMoveControlState] = []
-    for control in _selected_direct_move_controls(context):
+    for control in controls:
         matrix = _world_to_control_location_delta_matrix(control)
         if matrix is None:
             raise RigpedSemanticMoveError(
@@ -4597,6 +4667,8 @@ def _apply_direct_move_delta(
     world_delta: Vector,
     *,
     sliding_capabilities: tuple[LimbRepresentationCapability, ...] | None = None,
+    dependency_guards: tuple[SlidingDependencyGuard, ...] = (),
+    operation_id: str | None = None,
 ) -> None:
     for state in states:
         local_delta = state.world_to_local_delta @ Vector(world_delta)
@@ -4606,10 +4678,18 @@ def _apply_direct_move_delta(
     # ancestor Move may change the evaluated FK hierarchy while the hidden IK
     # hierarchy follows a different parent space. Keep every Sliding public
     # control as a derived overlay of the current solved result during preview.
-    _refresh_current_sliding_public_overlays(
-        context,
-        capabilities=sliding_capabilities,
-    )
+    if dependency_guards:
+        _refresh_frozen_sliding_dependency_overlays(
+            context,
+            dependency_guards,
+            operation_id=operation_id,
+            phase="MOVE_PREVIEW",
+        )
+    else:
+        _refresh_current_sliding_public_overlays(
+            context,
+            capabilities=sliding_capabilities,
+        )
 
 
 def _restore_direct_move_states(
@@ -4618,9 +4698,16 @@ def _restore_direct_move_states(
     *,
     sliding_capabilities: tuple[LimbRepresentationCapability, ...] | None = None,
     seed_snapshots: tuple[SlidingHiddenSeedSnapshot, ...] = (),
+    dependency_guards: tuple[SlidingDependencyGuard, ...] = (),
+    operation_id: str | None = None,
 ) -> None:
     for state in states:
         state.control.target.location = state.start_location
+    _restore_sliding_dependency_guards(
+        context,
+        dependency_guards,
+        update=False,
+    )
     _restore_sliding_hidden_seed_snapshots(
         context,
         seed_snapshots,
@@ -4631,6 +4718,12 @@ def _restore_direct_move_states(
         context,
         capabilities=sliding_capabilities,
         allow_seed=False,
+    )
+    _assert_sliding_dependency_authority(
+        context,
+        dependency_guards,
+        operation_id=operation_id,
+        phase="MOVE_RESTORE",
     )
 
 
@@ -4663,8 +4756,11 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
     )
 
     _states: tuple[DirectMoveControlState, ...] = ()
+    _frozen_control_context: Any = None
+    _operation_domain: OperationDomainSnapshot | None = None
     _sliding_guard_capabilities: tuple[LimbRepresentationCapability, ...] = ()
     _sliding_seed_snapshots: tuple[SlidingHiddenSeedSnapshot, ...] = ()
+    _sliding_dependency_guards: tuple[SlidingDependencyGuard, ...] = ()
     _auto_plan: RigpedAutoDirectMovePlan | None = None
     _pivot = Vector((0.0, 0.0, 0.0))
     _axis = Vector((1.0, 0.0, 0.0))
@@ -4699,25 +4795,58 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
         )
 
     def invoke(self, context, event):
-        axes = direct_transform_axes(context)
-        pivot = direct_transform_pivot(context)
-        if axes is None or pivot is None:
+        control_context = control_context_for_context(context)
+        domain_resolution = resolve_operation_domain(
+            context.scene,
+            control_context,
+        )
+        if not domain_resolution.ok or domain_resolution.snapshot is None:
+            detail = (
+                domain_resolution.issues[0].detail
+                if domain_resolution.issues
+                else "Rigped Move could not freeze the operation domain."
+            )
+            self.report({"WARNING"}, detail)
             return {"CANCELLED"}
+        operation_domain = domain_resolution.snapshot
+
         try:
-            states = _begin_direct_move_states(context)
+            states = _begin_direct_move_states(
+                control_context,
+                operation_domain,
+            )
         except RigpedSemanticMoveError as exc:
             self.report({"WARNING"}, str(exc))
             return {"CANCELLED"}
+        active = states[0].control
+        axes = _orientation_axes_for_control(context, active)
+        pivot = _control_pivot_world(active)
+        if axes is None or pivot is None:
+            return {"CANCELLED"}
 
-        self._sliding_guard_capabilities = _current_sliding_capabilities(context)
+        self._frozen_control_context = control_context
+        self._operation_domain = operation_domain
+        self._sliding_guard_capabilities = _sliding_capabilities_for_character(
+            context.scene,
+            operation_domain.character_id,
+        )
         self._sliding_seed_snapshots = _capture_sliding_hidden_seed_snapshots(
             self._sliding_guard_capabilities
+        )
+        e7_body_move = all(
+            _resolved_control_role_name(state.control) == "COM"
+            for state in states
+        )
+        self._sliding_dependency_guards = (
+            _capture_sliding_dependency_guards(self._sliding_guard_capabilities)
+            if e7_body_move
+            else ()
         )
         self._auto_plan = None
         if bool(getattr(context.scene, "baw_auto_key_enabled", False)):
             planned = plan_rigped_auto_direct_move(
                 context.scene,
-                control_context_for_context(context),
+                control_context,
                 operation_id=f"rigped-auto-move:{uuid4().hex}",
                 active_only=len(states) == 1,
             )
@@ -4878,6 +5007,8 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                     states,
                     stable_delta,
                     sliding_capabilities=self._sliding_guard_capabilities,
+                    dependency_guards=self._sliding_dependency_guards,
+                    operation_id=self._trace_operation_id,
                 )
             except (RigpedSemanticMoveError, RuntimeError, ValueError, ReferenceError) as exc:
                 _restore_direct_move_states(
@@ -4885,6 +5016,8 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                     states,
                     sliding_capabilities=self._sliding_guard_capabilities,
                     seed_snapshots=self._sliding_seed_snapshots,
+                    dependency_guards=self._sliding_dependency_guards,
+                    operation_id=self._trace_operation_id,
                 )
                 _report_operator_error(
                     self,
@@ -4917,6 +5050,8 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                     states,
                     sliding_capabilities=self._sliding_guard_capabilities,
                     seed_snapshots=self._sliding_seed_snapshots,
+                    dependency_guards=self._sliding_dependency_guards,
+                    operation_id=self._trace_operation_id,
                 )
                 self._states = ()
                 self._sliding_guard_capabilities = ()
@@ -4951,6 +5086,8 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                 states,
                 sliding_capabilities=self._sliding_guard_capabilities,
                 seed_snapshots=self._sliding_seed_snapshots,
+                dependency_guards=self._sliding_dependency_guards,
+                operation_id=self._trace_operation_id,
             )
             bpy.ops.ed.undo_push(message="AWB Rigped Direct Move Start")
             _apply_direct_move_delta(
@@ -4958,6 +5095,8 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                 states,
                 final_delta,
                 sliding_capabilities=self._sliding_guard_capabilities,
+                dependency_guards=self._sliding_dependency_guards,
+                operation_id=self._trace_operation_id,
             )
 
             auto_plan = self._auto_plan
@@ -4966,7 +5105,7 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                 try:
                     result = commit_rigped_auto_direct_move(
                         context.scene,
-                        control_context_for_context(context),
+                        self._frozen_control_context,
                         auto_plan,
                     )
                 except (RuntimeError, ValueError, ReferenceError) as exc:
@@ -4975,6 +5114,8 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                         states,
                         sliding_capabilities=self._sliding_guard_capabilities,
                         seed_snapshots=self._sliding_seed_snapshots,
+                        dependency_guards=self._sliding_dependency_guards,
+                        operation_id=self._trace_operation_id,
                     )
                     _report_operator_error(self, context, exc, replay_action=replay_action)
                     self._states = ()
@@ -4988,6 +5129,8 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                         states,
                         sliding_capabilities=self._sliding_guard_capabilities,
                         seed_snapshots=self._sliding_seed_snapshots,
+                        dependency_guards=self._sliding_dependency_guards,
+                        operation_id=self._trace_operation_id,
                     )
                     detail = "; ".join(item.detail for item in result.diagnostics)
                     self.report({"WARNING"}, detail or "Rigped direct Move Auto commit failed.")
@@ -5032,6 +5175,8 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                 states,
                 sliding_capabilities=self._sliding_guard_capabilities,
                 seed_snapshots=self._sliding_seed_snapshots,
+                dependency_guards=self._sliding_dependency_guards,
+                operation_id=self._trace_operation_id,
             )
             self._states = ()
             self._sliding_guard_capabilities = ()
@@ -6073,15 +6218,13 @@ def _direct_rotate_sliding_sync_sessions(
     return tuple(sessions)
 
 
-def _current_sliding_capabilities(
-    context,
+def _sliding_capabilities_for_character(
+    scene,
+    character_id: str,
 ) -> tuple[LimbRepresentationCapability, ...]:
-    control_context = control_context_for_context(context)
-    resolution = resolve_rigped_target(context.scene, control_context)
-    target = resolution.target
-    if target is None:
-        return ()
-    view = resolve_character(context.scene, target.character_id)
+    """Freeze current Sliding membership from one already-resolved Character identity."""
+
+    view = resolve_character(scene, character_id)
     capabilities: list[LimbRepresentationCapability] = []
     for mapping in view.definition.kinematics:
         capability = resolve_limb_representation_capability(
@@ -6099,6 +6242,17 @@ def _current_sliding_capabilities(
         if contact_type is ContactKeyType.SLIDING:
             capabilities.append(capability)
     return tuple(capabilities)
+
+
+def _current_sliding_capabilities(
+    context,
+) -> tuple[LimbRepresentationCapability, ...]:
+    control_context = control_context_for_context(context)
+    resolution = resolve_rigped_target(context.scene, control_context)
+    target = resolution.target
+    if target is None:
+        return ()
+    return _sliding_capabilities_for_character(context.scene, target.character_id)
 
 
 def _capture_sliding_hidden_seed_snapshots(
@@ -6136,6 +6290,287 @@ def _restore_sliding_hidden_seed_snapshots(
         )
     if update:
         context.view_layer.update()
+
+
+def _trace_matrix(matrix: Matrix | None):
+    if matrix is None:
+        return None
+    return tuple(
+        tuple(float(matrix[row][column]) for column in range(4))
+        for row in range(4)
+    )
+
+
+def _angle_distance(left: float, right: float) -> float:
+    return abs(((float(left) - float(right) + pi) % (2.0 * pi)) - pi)
+
+
+def _capture_sliding_dependency_guards(
+    capabilities: tuple[LimbRepresentationCapability, ...],
+) -> tuple[SlidingDependencyGuard, ...]:
+    guards: list[SlidingDependencyGuard] = []
+    for capability in capabilities:
+        pole_target = capability.native_ik.pole_target
+        if pole_target is None:
+            raise RigpedSemanticMoveError(
+                "Sliding body dependency requires the generated IK pole target."
+            )
+        native_ik = capability.native_ik.constraint
+        terminal_ik = capability.terminal_ik_constraint
+        guards.append(
+            SlidingDependencyGuard(
+                capability=capability,
+                reference=capture_sliding_authored_reference(capability),
+                start_ik_state=_capture_control_state(capability.native_ik.ik_target),
+                start_pole_state=_capture_control_state(pole_target),
+                start_ik_influence=float(native_ik.influence),
+                start_ik_mute=bool(native_ik.mute),
+                start_terminal_ik_influence=float(terminal_ik.influence),
+                start_terminal_ik_mute=bool(terminal_ik.mute),
+                start_hinge_settings=_capture_hinge_settings(
+                    capability.native_ik.solver_owner.target
+                ),
+                start_result_terminal=capability.result_terminal.target.matrix.copy(),
+                start_public_terminal=capability.authored_terminal.target.matrix.copy(),
+                ik_runtime_key=runtime_control_key(capability.native_ik.ik_target),
+                pole_runtime_key=runtime_control_key(pole_target),
+            )
+        )
+    return tuple(guards)
+
+
+def _restore_sliding_dependency_guards(
+    context,
+    guards: tuple[SlidingDependencyGuard, ...],
+    *,
+    update: bool = True,
+) -> None:
+    for guard in guards:
+        capability = guard.capability
+        _apply_control_state(capability.native_ik.ik_target, guard.start_ik_state)
+        pole_target = capability.native_ik.pole_target
+        if guard.start_pole_state is not None:
+            if pole_target is None:
+                raise RigpedSemanticMoveError(
+                    "Sliding body dependency lost its pole target during restore."
+                )
+            _apply_control_state(pole_target, guard.start_pole_state)
+        native_ik = capability.native_ik.constraint
+        terminal_ik = capability.terminal_ik_constraint
+        native_ik.influence = float(guard.start_ik_influence)
+        native_ik.mute = bool(guard.start_ik_mute)
+        terminal_ik.influence = float(guard.start_terminal_ik_influence)
+        terminal_ik.mute = bool(guard.start_terminal_ik_mute)
+        _restore_hinge_settings(
+            capability.native_ik.solver_owner.target,
+            guard.start_hinge_settings,
+        )
+    if update:
+        context.view_layer.update()
+
+
+def _sliding_dependency_guard_diagnostics(
+    guards: tuple[SlidingDependencyGuard, ...],
+) -> tuple[tuple[dict[str, Any], ...], bool]:
+    diagnostics: list[dict[str, Any]] = []
+    violated = False
+    matrix_position_tolerance = 1e-7
+    matrix_rotation_tolerance = 1e-7
+    scalar_tolerance = 1e-9
+
+    for guard in guards:
+        capability = guard.capability
+        try:
+            mapping_id = str(capability.native_ik.mapping_id)
+            pole_target = capability.native_ik.pole_target
+            live_ik_key = runtime_control_key(capability.native_ik.ik_target)
+            live_pole_key = runtime_control_key(pole_target) if pole_target is not None else None
+            live_reference = capture_sliding_authored_reference(capability)
+            native_ik = capability.native_ik.constraint
+            terminal_ik = capability.terminal_ik_constraint
+            hinge_settings = _capture_hinge_settings(
+                capability.native_ik.solver_owner.target
+            )
+        except (ReferenceError, RuntimeError, ValueError, TypeError):
+            diagnostics.append(
+                {
+                    "mapping_id": guard.reference.mapping_id,
+                    "stale": True,
+                }
+            )
+            violated = True
+            continue
+
+        target_position, target_rotation = _pose_residual(
+            live_reference.target_matrix,
+            guard.reference.target_matrix,
+        )
+        if guard.reference.pole_matrix is None or live_reference.pole_matrix is None:
+            pole_position = 0.0
+            pole_rotation = 0.0
+            pole_presence_changed = (
+                guard.reference.pole_matrix is None
+            ) != (
+                live_reference.pole_matrix is None
+            )
+        else:
+            pole_position, pole_rotation = _pose_residual(
+                live_reference.pole_matrix,
+                guard.reference.pole_matrix,
+            )
+            pole_presence_changed = False
+        pole_angle_delta = _angle_distance(
+            live_reference.pole_angle,
+            guard.reference.pole_angle,
+        )
+        runtime_identity_changed = (
+            mapping_id != guard.reference.mapping_id
+            or live_ik_key != guard.ik_runtime_key
+            or live_pole_key != guard.pole_runtime_key
+        )
+        ik_raw_changed = (
+            abs(float(native_ik.influence) - guard.start_ik_influence) > scalar_tolerance
+            or bool(native_ik.mute) != guard.start_ik_mute
+            or abs(float(terminal_ik.influence) - guard.start_terminal_ik_influence)
+            > scalar_tolerance
+            or bool(terminal_ik.mute) != guard.start_terminal_ik_mute
+            or hinge_settings != guard.start_hinge_settings
+        )
+        authority_changed = (
+            runtime_identity_changed
+            or pole_presence_changed
+            or target_position > matrix_position_tolerance
+            or target_rotation > matrix_rotation_tolerance
+            or pole_position > matrix_position_tolerance
+            or pole_rotation > matrix_rotation_tolerance
+            or pole_angle_delta > scalar_tolerance
+            or ik_raw_changed
+        )
+        violated = authority_changed or violated
+        diagnostics.append(
+            {
+                "mapping_id": mapping_id,
+                "stale": False,
+                "runtime_identity_changed": runtime_identity_changed,
+                "target_position_delta": float(target_position),
+                "target_rotation_delta": float(target_rotation),
+                "pole_position_delta": float(pole_position),
+                "pole_rotation_delta": float(pole_rotation),
+                "pole_angle_delta": float(pole_angle_delta),
+                "ik_raw_changed": bool(ik_raw_changed),
+                "target_before": _trace_matrix(guard.reference.target_matrix),
+                "target_after": _trace_matrix(live_reference.target_matrix),
+                "pole_before": _trace_matrix(guard.reference.pole_matrix),
+                "pole_after": _trace_matrix(live_reference.pole_matrix),
+            }
+        )
+    return tuple(diagnostics), violated
+
+
+def _assert_sliding_dependency_authority(
+    context,
+    guards: tuple[SlidingDependencyGuard, ...],
+    *,
+    operation_id: str | None,
+    phase: str,
+) -> tuple[dict[str, Any], ...]:
+    diagnostics, violated = _sliding_dependency_guard_diagnostics(guards)
+    if violated:
+        trace_event(
+            "ERROR",
+            "SLIDING_BODY_AUTHORITY_DRIFT",
+            operation_id=operation_id,
+            context=context,
+            phase=phase,
+            diagnostics=diagnostics,
+        )
+        raise RigpedSemanticMoveError(
+            "Sliding body dependency changed frozen target/pole authority."
+        )
+    return diagnostics
+
+
+def _refresh_frozen_sliding_dependency_overlays(
+    context,
+    guards: tuple[SlidingDependencyGuard, ...],
+    *,
+    operation_id: str | None,
+    phase: str,
+) -> int:
+    if not guards:
+        return 0
+
+    _assert_sliding_dependency_authority(
+        context,
+        guards,
+        operation_id=operation_id,
+        phase=f"{phase}:PRE",
+    )
+    result_before = tuple(
+        capture_native_solved_result(guard.capability)
+        for guard in guards
+    )
+    seed_fired = tuple(
+        bool(_seed_stalled_sliding_native_ik(context, guard.capability))
+        for guard in guards
+    )
+    capabilities = tuple(guard.capability for guard in guards)
+    refreshed = _refresh_current_sliding_public_overlays(
+        context,
+        capabilities=capabilities,
+        allow_seed=False,
+    )
+    authority_diagnostics = _assert_sliding_dependency_authority(
+        context,
+        guards,
+        operation_id=operation_id,
+        phase=f"{phase}:POST",
+    )
+    result_after = tuple(
+        capture_native_solved_result(guard.capability)
+        for guard in guards
+    )
+
+    per_limb = []
+    for guard, before, after, did_seed, authority in zip(
+        guards,
+        result_before,
+        result_after,
+        seed_fired,
+        authority_diagnostics,
+        strict=True,
+    ):
+        reference = capture_sliding_authored_reference(guard.capability)
+        target_position, target_rotation = _pose_residual(
+            after.terminal_pose,
+            reference.target_matrix,
+        )
+        public_position, public_rotation = _sliding_public_pose_residual(
+            guard.capability
+        )
+        per_limb.append(
+            {
+                "mapping_id": guard.reference.mapping_id,
+                "seed_fired": bool(did_seed),
+                "authority": authority,
+                "result_before": _trace_matrix(before.terminal_pose),
+                "result_after_projection": _trace_matrix(after.terminal_pose),
+                "result_target_position": float(target_position),
+                "result_target_rotation": float(target_rotation),
+                "public_result_position": float(public_position),
+                "public_result_rotation": float(public_rotation),
+            }
+        )
+    trace_event(
+        "DIAGNOSTIC",
+        "SLIDING_BODY_DEPENDENCY_PREVIEW",
+        operation_id=operation_id,
+        context=context,
+        phase=phase,
+        mapping_ids=tuple(guard.reference.mapping_id for guard in guards),
+        limbs=tuple(per_limb),
+    )
+    return refreshed
 
 
 def _passive_sliding_capabilities(
@@ -6773,6 +7208,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
     _sliding_guard_capabilities: tuple[LimbRepresentationCapability, ...] = ()
     _sliding_affected_capabilities: tuple[LimbRepresentationCapability, ...] = ()
     _sliding_seed_snapshots: tuple[SlidingHiddenSeedSnapshot, ...] = ()
+    _sliding_dependency_guards: tuple[SlidingDependencyGuard, ...] = ()
     _axis_world = Vector((0.0, 0.0, 1.0))
     _pivot = Vector((0.0, 0.0, 0.0))
     _start_rotation_vector = Vector((1.0, 0.0, 0.0))
@@ -6836,7 +7272,10 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             self.report({"WARNING"}, detail)
             return {"CANCELLED"}
         operation_domain = domain_resolution.snapshot
-        frozen_current_sliding = _current_sliding_capabilities(context)
+        frozen_current_sliding = _sliding_capabilities_for_character(
+            context.scene,
+            operation_domain.character_id,
+        )
 
         # Historical/baked keys may predate the current joint-limit policy.
         # Repair them before capturing the modal start state so Rotate can move
@@ -6945,6 +7384,27 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         self._sliding_affected_capabilities = frozen_current_sliding
         self._sliding_seed_snapshots = _capture_sliding_hidden_seed_snapshots(
             self._sliding_guard_capabilities
+        )
+        e7_body_rotate_roles = {
+            "COM",
+            "Pelvis",
+            "Spine",
+            "Head",
+            "Clavicle.L",
+            "Clavicle.R",
+        }
+        e7_body_rotate = (
+            not self._sliding_syncs
+            and bool(controls)
+            and all(
+                _resolved_control_role_name(control) in e7_body_rotate_roles
+                for control in controls
+            )
+        )
+        self._sliding_dependency_guards = (
+            _capture_sliding_dependency_guards(self._sliding_guard_capabilities)
+            if e7_body_rotate
+            else ()
         )
         active_ids = set(_sliding_capability_mapping_ids(active_capabilities))
         passive_ids = set(
@@ -7173,15 +7633,27 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             _restore_direct_rotate_sliding_syncs(context, self._sliding_syncs)
         else:
             context.view_layer.update()
+        _restore_sliding_dependency_guards(
+            context,
+            self._sliding_dependency_guards,
+            update=False,
+        )
         _restore_sliding_hidden_seed_snapshots(
             context,
             self._sliding_seed_snapshots,
             update=False,
         )
+        context.view_layer.update()
         _refresh_current_sliding_public_overlays(
             context,
             capabilities=self._sliding_guard_capabilities,
             allow_seed=False,
+        )
+        _assert_sliding_dependency_authority(
+            context,
+            self._sliding_dependency_guards,
+            operation_id=self._trace_operation_id,
+            phase="ROTATE_RESTORE",
         )
 
     def _apply_preview(self, context) -> None:
@@ -7200,10 +7672,18 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 )
             for session in self._sliding_syncs:
                 _apply_direct_rotate_sliding_sync(context, session)
-            _refresh_current_sliding_public_overlays(
-                context,
-                capabilities=self._sliding_guard_capabilities,
-            )
+            if self._sliding_dependency_guards:
+                _refresh_frozen_sliding_dependency_overlays(
+                    context,
+                    self._sliding_dependency_guards,
+                    operation_id=self._trace_operation_id,
+                    phase="ROTATE_PREVIEW",
+                )
+            else:
+                _refresh_current_sliding_public_overlays(
+                    context,
+                    capabilities=self._sliding_guard_capabilities,
+                )
             return
 
         hinge_states = tuple(state for state in self._states if state.hinge_state is not None)
@@ -7295,10 +7775,18 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         context.view_layer.update()
         for session in self._sliding_syncs:
             _apply_direct_rotate_sliding_sync(context, session)
-        _refresh_current_sliding_public_overlays(
-            context,
-            capabilities=self._sliding_guard_capabilities,
-        )
+        if self._sliding_dependency_guards:
+            _refresh_frozen_sliding_dependency_overlays(
+                context,
+                self._sliding_dependency_guards,
+                operation_id=self._trace_operation_id,
+                phase="ROTATE_PREVIEW",
+            )
+        else:
+            _refresh_current_sliding_public_overlays(
+                context,
+                capabilities=self._sliding_guard_capabilities,
+            )
 
     def modal(self, context, event):
         if self._active is None:
