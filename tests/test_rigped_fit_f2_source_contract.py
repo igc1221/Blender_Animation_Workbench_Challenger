@@ -76,8 +76,10 @@ def test_figure_object_route_never_falls_through_to_native_transform_tools():
 
     assert "FIT_F3_TRANSFORM_TOOL_ACTIVE" in keymap
     assert "FIT_F3_TRANSFORM_NOT_IMPLEMENTED" in keymap
-    assert 'fit_state is not None and context.mode == "OBJECT"' in keymap
-    assert 'fit_ui_state(context) is not None and getattr(context, "mode", "") == "OBJECT"' in gizmo
+    assert "fit_host_present = fit_ui_state_present(context)" in keymap
+    assert 'if fit_host_present and context.mode == "OBJECT"' in keymap
+    assert 'fit_ui_state_present(context) and getattr(context, "mode", "") == "OBJECT"' in gizmo
+    assert 'if state is None:\n            return "", ""' in gizmo
     assert 'return "FIGURE", "MOVE"' in gizmo
     assert "BAW_OT_figure_fit_move_axis" in gizmo
     assert "apply_fit_move_preview" in gizmo

@@ -136,3 +136,10 @@ def test_zero_delta_is_exact_noop():
     draft = _draft()
 
     assert move_fit_part_rig_local(draft, "com", (0.0, 0.0, 0.0)) is draft
+
+
+def test_zero_delta_still_rejects_unsupported_part():
+    draft = _draft()
+
+    with pytest.raises(FitCommandError, match="FIT_F3_MOVE_UNSUPPORTED_PART"):
+        move_fit_part_rig_local(draft, "pelvis", (0.0, 0.0, 0.0))

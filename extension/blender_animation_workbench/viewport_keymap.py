@@ -28,6 +28,7 @@ from .rigped_create_fit_ui import (
     fit_orientation_mode,
     fit_transform_mode,
     fit_ui_state,
+    fit_ui_state_present,
     set_fit_orientation_mode,
     set_fit_transform_mode,
 )
@@ -35,6 +36,7 @@ from .rigped_fit_session import (
     apply_fit_part_selection,
     fit_geometry_snapshot,
     fit_semantic_session,
+    validate_fit_semantic_session,
 )
 from .rigped_transform import (
     activate_rigped_fk_joint_move_tool,
@@ -1168,7 +1170,30 @@ def _apply_box_pick(
     # rectangle is enough. Blender's native box selection is origin/containment
     # biased in these modes, which made Animate behave differently.
     if mode == "OBJECT":
-        if fit_semantic_session(context) is not None:
+        fit_state = fit_ui_state(context)
+        session = fit_semantic_session(context)
+        if fit_ui_state_present(context) and (fit_state is None or session is None):
+            trace_event(
+                "INPUT",
+                "FIT_SELECTION_BOX_REFUSED",
+                context=context,
+                action=action,
+                rect=rect,
+                issues=("FIT_F3_SESSION_MISSING",),
+            )
+            return {"CANCELLED"}
+        if session is not None:
+            issues = validate_fit_semantic_session(context, session)
+            if issues:
+                trace_event(
+                    "INPUT",
+                    "FIT_SELECTION_BOX_REFUSED",
+                    context=context,
+                    action=action,
+                    rect=rect,
+                    issues=issues,
+                )
+                return {"CANCELLED"}
             hit_part_ids = _fit_part_box_crossing_ids(context, rect)
             apply_fit_part_selection(
                 context,
@@ -1370,7 +1395,36 @@ def apply_awb_click_selection(
     """Run the same global AWB click-selection path from non-selection modals."""
 
     mode = str(getattr(context, "mode", ""))
-    if mode == "OBJECT" and fit_semantic_session(context) is not None:
+    fit_state = fit_ui_state(context)
+    session = fit_semantic_session(context)
+    if (
+        mode == "OBJECT"
+        and fit_ui_state_present(context)
+        and (fit_state is None or session is None)
+    ):
+        trace_event(
+            "INPUT",
+            "FIT_SELECTION_CLICK_REFUSED",
+            context=context,
+            source=source,
+            action=action,
+            location=location,
+            issues=("FIT_F3_SESSION_MISSING",),
+        )
+        return {"CANCELLED"}
+    if mode == "OBJECT" and session is not None:
+        issues = validate_fit_semantic_session(context, session)
+        if issues:
+            trace_event(
+                "INPUT",
+                "FIT_SELECTION_CLICK_REFUSED",
+                context=context,
+                source=source,
+                action=action,
+                location=location,
+                issues=issues,
+            )
+            return {"CANCELLED"}
         fit_diagnostics: dict[str, object] = {}
         picked_part_id = _fit_part_pick_id(
             context,
@@ -1596,13 +1650,45 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
             context.area.tag_redraw()
             return {"FINISHED"}
 
+        fit_host_present = fit_ui_state_present(context)
         fit_state = fit_ui_state(context)
-        if fit_state is not None and context.mode == "OBJECT":
+        if fit_host_present and context.mode == "OBJECT":
+            session = fit_semantic_session(context)
+            if fit_state is None or session is None:
+                deactivate_rigped_semantic_tool(context)
+                context.space_data.show_gizmo = True
+                _hide_native_tool_gizmo(context)
+                try:
+                    bpy.ops.wm.tool_set_by_id(name="baw.select_object")
+                except RuntimeError:
+                    pass
+                trace_event(
+                    "INPUT",
+                    "FIT_F3_TRANSFORM_REFUSED",
+                    context=context,
+                    requested_mode=self.mode,
+                    issues=("FIT_F3_SESSION_MISSING",),
+                )
+                return {"CANCELLED"}
+            issues = validate_fit_semantic_session(context, session)
+            if issues:
+                set_fit_transform_mode(context, "NONE")
+                trace_event(
+                    "INPUT",
+                    "FIT_F3_TRANSFORM_REFUSED",
+                    context=context,
+                    requested_mode=self.mode,
+                    issues=issues,
+                )
+                return {"CANCELLED"}
             fit_mode_before = fit_transform_mode(context)
             deactivate_rigped_semantic_tool(context)
             context.space_data.show_gizmo = True
             _hide_native_tool_gizmo(context)
             if self.mode == "MOVE":
+                if not _activate_awb_transform_workspace_tool(context, "MOVE"):
+                    set_fit_transform_mode(context, "NONE")
+                    return {"CANCELLED"}
                 set_fit_transform_mode(context, "MOVE")
                 if fit_mode_before == "MOVE":
                     current = fit_orientation_mode(context)
@@ -1619,6 +1705,10 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                 )
             else:
                 set_fit_transform_mode(context, "NONE")
+                try:
+                    bpy.ops.wm.tool_set_by_id(name="baw.select_object")
+                except RuntimeError:
+                    pass
                 trace_event(
                     "INPUT",
                     "FIT_F3_TRANSFORM_NOT_IMPLEMENTED",

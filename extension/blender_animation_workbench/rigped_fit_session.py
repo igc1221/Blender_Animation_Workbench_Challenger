@@ -9,12 +9,14 @@ from mathutils import Matrix, Vector
 from .character_metadata import resolve_character
 from .rigped_fit_commands import FitCommandError, fit_move_supported, move_fit_part_rig_local
 from .rigped_fit_policy import FitSessionToken
+from .rigped_fit_runtime import validate_fit_runtime_session
 from .rigped_fit_state import (
     FitDocument,
     FitDraft,
     FitOperation,
     FitPartKind,
     FitRestPartSnapshot,
+    FitStateError,
     derive_rest_parts,
     extract_fit_document,
     rotate_vector,
@@ -296,18 +298,117 @@ def end_fit_semantic_session(context) -> FitSemanticSession | None:
     return _SESSIONS.pop(key, None) if key is not None else None
 
 
-def validate_fit_semantic_session(context, session: FitSemanticSession) -> tuple[str, ...]:
+def _document_topology_signature(document: FitDocument) -> tuple:
+    return tuple(
+        sorted(
+            (
+                part.binding_id,
+                part.semantic_key,
+                part.side,
+                part.parent_part_id,
+                bool(part.connected),
+                str(part.kind),
+                tuple(str(operation) for operation in part.allowed_operations),
+            )
+            for part in document.parts
+        )
+    )
+
+
+def _snapshot_topology_signature(snapshots: tuple[FitRestPartSnapshot, ...]) -> tuple:
+    return tuple(
+        sorted(
+            (
+                snapshot.binding_id,
+                snapshot.semantic_key,
+                snapshot.side,
+                snapshot.parent_binding_id,
+                bool(snapshot.connected),
+                str(snapshot.kind),
+                tuple(str(operation) for operation in snapshot.allowed_operations),
+            )
+            for snapshot in snapshots
+        )
+    )
+
+
+def validate_fit_semantic_snapshot_access(
+    context,
+    session: FitSemanticSession,
+) -> tuple[str, ...]:
+    """Cheap per-frame/session-identity guard for immutable Figure snapshots."""
+
     issues: list[str] = []
+    rig = session.rig_object
     if str(getattr(context, "mode", "")) != "OBJECT":
         issues.append("FIT_F2_MODE_CHANGED")
-    if _matrix_signature(session.rig_object.matrix_world) != session.matrix_signature:
+    if getattr(context.view_layer.objects, "active", None) is not rig:
+        issues.append("FIT_F3_ACTIVE_OBJECT_CHANGED")
+    selected_objects = tuple(getattr(context, "selected_objects", ()) or ())
+    if selected_objects != (rig,):
+        issues.append("FIT_F3_NATIVE_SELECTION_CHANGED")
+    expected_identity = session.document.baseline.owner_data_identity
+    current_identity = (
+        str(_safe_pointer(rig) or ""),
+        str(_safe_pointer(getattr(rig, "data", None)) or ""),
+    )
+    if current_identity != expected_identity:
+        issues.append("FIT_F3_OWNER_DATA_CHANGED")
+    if _matrix_signature(rig.matrix_world) != session.matrix_signature:
         issues.append("FIT_F2_OBJECT_MATRIX_CHANGED")
-    return tuple(issues)
+    if session.geometry.rig_pointer != int(_safe_pointer(rig) or 0):
+        issues.append("FIT_F3_GEOMETRY_HOST_CHANGED")
+    return tuple(dict.fromkeys(issues))
+
+
+def validate_fit_semantic_session(context, session: FitSemanticSession) -> tuple[str, ...]:
+    issues = list(validate_fit_semantic_snapshot_access(context, session))
+
+    issues.extend(validate_fit_runtime_session(context.scene, session.token))
+    try:
+        _view, primary, snapshots = _primary_rest_snapshots(
+            context.scene,
+            session.character_id,
+        )
+    except FitSemanticSessionError as exc:
+        issues.append(str(exc))
+    else:
+        if _snapshot_topology_signature(snapshots) != _document_topology_signature(session.document):
+            issues.append("FIT_F3_TOPOLOGY_CHANGED")
+        owner = primary[0][1].owner_object
+        try:
+            current_document, _current_draft = extract_fit_document(
+                character_id=session.character_id,
+                profile_id=session.token.profile_id,
+                schema_version=session.document.baseline.schema_version,
+                setup_revision=session.token.setup_revision,
+                setup_signature=session.token.setup_signature,
+                owner_data_identity=(
+                    str(int(owner.as_pointer())),
+                    str(int(owner.data.as_pointer())),
+                ),
+                animation_footprint_digest=_animation_digest(session.token),
+                snapshots=snapshots,
+            )
+        except FitStateError as exc:
+            issues.append(str(exc))
+        else:
+            baseline = session.document.baseline
+            current = current_document.baseline
+            if current.topology_fingerprint != baseline.topology_fingerprint:
+                issues.append("FIT_F3_TOPOLOGY_CHANGED")
+            if current.native_rest_digest != baseline.native_rest_digest:
+                issues.append("FIT_F3_NATIVE_REST_CHANGED")
+            if current.appearance_digest != baseline.appearance_digest:
+                issues.append("FIT_F3_APPEARANCE_CHANGED")
+            if current.owner_data_identity != baseline.owner_data_identity:
+                issues.append("FIT_F3_OWNER_DATA_CHANGED")
+    return tuple(dict.fromkeys(issues))
 
 
 def fit_geometry_snapshot(context) -> FitBodyGeometrySnapshot | None:
     session = fit_semantic_session(context)
-    if session is None or validate_fit_semantic_session(context, session):
+    if session is None or validate_fit_semantic_snapshot_access(context, session):
         return None
     return session.geometry
 
@@ -316,7 +417,7 @@ def fit_geometry_snapshot_for_rig(context, rig) -> FitBodyGeometrySnapshot | Non
     session = fit_semantic_session(context)
     if session is None or session.rig_object is not rig:
         return None
-    if validate_fit_semantic_session(context, session):
+    if validate_fit_semantic_snapshot_access(context, session):
         return None
     return session.geometry
 
@@ -387,7 +488,11 @@ def _active_part_definition(session: FitSemanticSession):
 
 def fit_figure_move_available(context) -> bool:
     session = fit_semantic_session(context)
-    if session is None or validate_fit_semantic_session(context, session):
+    if session is None or validate_fit_semantic_snapshot_access(context, session):
+        return False
+    try:
+        _frozen_world3(session)
+    except FitSemanticSessionError:
         return False
     if len(session.selected_part_ids) != 1:
         return False
@@ -404,7 +509,7 @@ def fit_active_part_world_pivot_axes(
     orientation_mode: str = "LOCAL",
 ):
     session = fit_semantic_session(context)
-    if session is None or validate_fit_semantic_session(context, session):
+    if session is None or validate_fit_semantic_snapshot_access(context, session):
         return None, None
     definition = _active_part_definition(session)
     if definition is None:
@@ -453,11 +558,16 @@ def _frozen_world3(session: FitSemanticSession):
     determinant = float(world3.determinant())
     if determinant <= 1e-12:
         raise FitSemanticSessionError("FIT_F3_OBJECT_MATRIX_UNSUPPORTED")
-    scales = tuple(Vector(world3.col[index]).length for index in range(3))
+    columns = tuple(Vector(world3.col[index]) for index in range(3))
+    scales = tuple(column.length for column in columns)
     maximum = max(scales)
     minimum = min(scales)
     if minimum <= 1e-12 or (maximum - minimum) > max(1e-6, maximum * 1e-6):
         raise FitSemanticSessionError("FIT_F3_OBJECT_MATRIX_UNSUPPORTED")
+    normalized = tuple(column / scale for column, scale in zip(columns, scales, strict=True))
+    for left, right in ((0, 1), (0, 2), (1, 2)):
+        if abs(float(normalized[left].dot(normalized[right]))) > 1e-6:
+            raise FitSemanticSessionError("FIT_F3_OBJECT_MATRIX_UNSUPPORTED")
     return world3
 
 
@@ -614,6 +724,8 @@ def cancel_fit_move_gesture(
     session.geometry = gesture.geometry
     session.revision = gesture.revision
     session.preview_serial = gesture.preview_serial
+    session.selected_part_ids = set(gesture.selected_part_ids)
+    session.active_part_id = gesture.active_part_id
     session.active_move_gesture = None
     if context.area is not None:
         context.area.tag_redraw()

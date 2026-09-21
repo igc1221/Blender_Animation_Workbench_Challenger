@@ -36,6 +36,7 @@ from .rigped_fit_session import (
     begin_fit_semantic_session,
     end_fit_semantic_session,
     fit_semantic_session,
+    validate_fit_semantic_session,
 )
 from .rigped_humanoid_builder import (
     build_generated_rigped_humanoid,
@@ -115,6 +116,13 @@ def _safe_pointer(value) -> int | None:
 
 def _window_key(context) -> int | None:
     return _safe_pointer(getattr(context, "window", None))
+
+
+def fit_ui_state_present(context) -> bool:
+    """True while this window still owns a Figure/Fit UI host, even if stale."""
+
+    key = _window_key(context)
+    return bool(key is not None and _FIT_STATES.get(key) is not None)
 
 
 def fit_ui_state(context) -> _FitUiState | None:
@@ -1115,6 +1123,21 @@ class BAW_OT_rigped_fit_off(bpy.types.Operator):
         key = _window_key(context)
         state = fit_ui_state(context)
         if key is None or state is None:
+            return {"CANCELLED"}
+        semantic_session = fit_semantic_session(context)
+        if semantic_session is not None:
+            semantic_issues = validate_fit_semantic_session(context, semantic_session)
+            if semantic_issues:
+                self.report({"ERROR"}, f"Fit session stale: {','.join(semantic_issues)}")
+                return {"CANCELLED"}
+        if (
+            semantic_session is not None
+            and semantic_session.draft.values != semantic_session.document.baseline_values
+        ):
+            self.report(
+                {"ERROR"},
+                "Fit Apply blocked until semantic draft commit is implemented (F4)",
+            )
             return {"CANCELLED"}
         try:
             _ensure_object_mode()

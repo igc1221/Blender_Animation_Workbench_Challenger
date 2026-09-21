@@ -1,10 +1,14 @@
 # Blender Animation Workbench — Worker Orchestration
 
-> Updated: **2026-09-21 15:55 KST**
+> Updated: **2026-09-21 17:04 KST**
 > Authority: **Main / Sol**
 > Purpose: turn model-specific strengths/weaknesses into better task packets and lower Main repair cost.
 
 > **MANDATORY TWO-SIDED REVIEW GATE:** every non-trivial implementation/stabilization slice has two blocking review stages. **PRE:** send the proposed design/contract to at least **2 independent reviewers/workers**, wait for and consume both responses, then Main synthesizes them with its own judgment before implementation. **POST:** after implementation, send the actual current source/diff to at least **2 independent reviewers/workers**, wait for and consume both responses, disposition every material finding, fix as needed, and rerun regression gates. USER FIRST / user-final testing starts only after the POST gate is closed. A sent-but-unread review is still open work and blocks progression.
+>
+> **STRICT REVIEW COUNT:** each non-trivial slice has exactly **1 PRE round** and exactly **1 POST round**. Never repeat reviewer rounds until they report zero findings, and never add a same-slice closure/re-review round. Main owns all finding disposition and closes fixes with regression/runtime evidence after the single POST round.
+
+> **MANDATORY PROGRESSIVE-SKILL GATE:** every substantive Luna dispatch must carry the relevant AWB progressive skills explicitly. Main first inspects the skill catalog metadata, selects the smallest relevant skill set, and passes it through `awb_skills`. Empty skill injection requires an explicit no-relevant-skill rationale. Worker-learning APPLY decisions are not archival notes: an APPLYed lesson must be exercised by including its target skill on the next relevant worker task. External Web challengers use their bridge-selected skills, but Main must verify the resulting skill/evidence packet is appropriate before the review can satisfy a PRE/POST gate.
 
 ## 1. Core rule
 
@@ -25,6 +29,26 @@ Profiles are evidence-driven operating notes, not personality stereotypes. Updat
 ## 2. Mandatory dispatch pipeline
 
 For every non-trivial worker task, Main performs these gates in order.
+
+### A0. Progressive-skill gate
+
+Before every substantive Luna launch:
+1. inspect `list_awb_skills` metadata;
+2. choose the smallest relevant skill set;
+3. pass those ids explicitly through `awb_skills`;
+4. after the response, process every worker-learning candidate as APPLY / DEFER / REJECT;
+5. if APPLY targets a skill, the next relevant Luna request must include that skill;
+6. only after response consumption + learning review may the lane be finalized/cleaned and reused.
+
+Default mapping:
+- implementation / semantic architecture / bounded source changes → `worker-implementation`;
+- Blender runtime, GUI, state, Undo, replay, acceptance → add `blender-runtime-verification`;
+- PRE/POST reviewer evidence, challenger packets, source-backed verdicts → add `review-evidence`;
+- worker-owned branch/worktree mutation or Git integration → add `git-worktree-safety`.
+
+Do not attach every skill mechanically. Use the minimum set that materially applies. `awb_skills=[]` on a substantive Luna task requires an explicit reason in the dispatch record.
+
+For External Web challenger requests, the bridge selects skills automatically for the packet. Main still verifies that the selected skill/evidence packet fits the task; a malformed or skill/evidence-deficient request does not count toward the mandatory reviewer minimum until corrected.
 
 ### A. Task-fit gate
 

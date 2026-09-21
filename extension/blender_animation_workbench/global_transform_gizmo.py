@@ -24,7 +24,12 @@ from .gizmo_preferences import (
     show_rotation_angle,
     snapped_rotation_angle,
 )
-from .rigped_create_fit_ui import fit_orientation_mode, fit_transform_mode, fit_ui_state
+from .rigped_create_fit_ui import (
+    fit_orientation_mode,
+    fit_transform_mode,
+    fit_ui_state,
+    fit_ui_state_present,
+)
 from .rigped_fit_session import (
     FitSemanticSessionError,
     apply_fit_move_preview,
@@ -75,6 +80,21 @@ def _active_tool_id(context) -> str:
     return str(getattr(tool, "idname", "") or "")
 
 
+def _force_figure_safe_workspace_tool(context) -> None:
+    if not fit_ui_state_present(context) or getattr(context, "mode", "") != "OBJECT":
+        return
+    active_tool = _active_tool_id(context)
+    if active_tool not in {"builtin.move", "builtin.rotate", "builtin.scale"}:
+        return
+    safe_tool = "baw.move_object" if fit_transform_mode(context) == "MOVE" else "baw.select_object"
+    try:
+        bpy.ops.wm.tool_set_by_id(name=safe_tool)
+    except RuntimeError:
+        return
+    if hasattr(context.space_data, "show_gizmo_tool"):
+        context.space_data.show_gizmo_tool = False
+
+
 def _native_mode(context) -> str:
     return {
         "builtin.move": "MOVE",
@@ -93,10 +113,13 @@ def _route_and_mode(context) -> tuple[str, str]:
     if bool(getattr(getattr(context, "scene", None), "baw_trajectory_edit_mode", False)):
         return "", ""
 
-    if fit_ui_state(context) is not None and getattr(context, "mode", "") == "OBJECT":
-        # F3 Figure remains Object-hosted. Only explicitly migrated semantic
-        # commands get a gizmo route; every other W/E/R path still fails closed
-        # instead of falling through to Blender Object transforms.
+    if fit_ui_state_present(context) and getattr(context, "mode", "") == "OBJECT":
+        # A raw Figure/Fit host suppresses native Object transforms even if the
+        # semantic session became stale/missing. Only a fully valid Figure
+        # state may expose the migrated semantic Move route.
+        state = fit_ui_state(context)
+        if state is None:
+            return "", ""
         mode = str(fit_transform_mode(context) or "")
         if mode == "MOVE" and fit_figure_move_available(context):
             return "FIGURE", "MOVE"
@@ -1036,10 +1059,10 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
 
     @classmethod
     def poll(cls, context):
-        if fit_ui_state(context) is not None and getattr(context, "mode", "") == "OBJECT":
-            # Keep the persistent shell alive throughout Figure so draw_prepare
-            # can suppress Blender's native workspace-tool gizmo even while an
-            # unsupported Figure transform mode is selected.
+        if fit_ui_state_present(context) and getattr(context, "mode", "") == "OBJECT":
+            # Keep the persistent shell alive throughout the raw Figure/Fit host
+            # lifetime, including stale semantic-session states, so native Object
+            # transform routes remain suppressed fail-closed.
             return True
         route, mode = _route_and_mode(context)
         return bool(route and mode in {"MOVE", "ROTATE", "SCALE"})
@@ -1238,8 +1261,9 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
 
     def draw_prepare(self, context):
         self._hide_all()
+        _force_figure_safe_workspace_tool(context)
         if (
-            fit_ui_state(context) is not None
+            fit_ui_state_present(context)
             and getattr(context, "mode", "") == "OBJECT"
             and hasattr(context.space_data, "show_gizmo_tool")
         ):

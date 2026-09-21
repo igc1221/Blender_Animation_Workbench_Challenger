@@ -59,8 +59,6 @@ def move_fit_part_rig_local(
     delta = tuple(float(value) for value in delta_rig)
     if len(delta) != 3 or not all(math.isfinite(value) for value in delta):
         raise FitCommandError("FIT_F3_MOVE_DELTA_INVALID")
-    if _vec_length(delta) <= 1e-12:
-        return draft
 
     definition = next(
         (part for part in draft.document.parts if part.part_id == part_id),
@@ -74,6 +72,8 @@ def move_fit_part_rig_local(
     record = next((item for item in draft.values if item.part_id == part_id), None)
     if record is None:
         raise FitCommandError("FIT_F3_VALUE_MISSING")
+    if _vec_length(delta) <= 1e-12:
+        return draft
 
     local_delta: Vec3 = delta
     if definition.parent_part_id is not None:

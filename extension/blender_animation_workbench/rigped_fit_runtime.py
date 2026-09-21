@@ -203,6 +203,52 @@ def inspect_fit_entry(scene, character_id: str) -> FitRuntimeInspection:
     return FitRuntimeInspection(decision, session, rigped_issues, combined_runtime)
 
 
+def validate_fit_runtime_session(scene, session: FitSessionToken) -> tuple[str, ...]:
+    """Fail-closed freshness checks shared by semantic preview and final commit."""
+
+    view = resolve_character(scene, session.character_id)
+    issues: list[str] = []
+    if view.issues:
+        issues.append("FIT_SESSION_CHARACTER_INCOHERENT")
+        return tuple(issues)
+
+    try:
+        _carrier, raw = _raw_descriptor(view)
+    except RigpedFitRuntimeError as exc:
+        return (str(exc),)
+
+    if raw["schema_version"] != RIGPED_SETUP_SCHEMA_VERSION:
+        issues.append("FIT_SESSION_SCHEMA_CHANGED")
+    if raw["profile_id"] != session.profile_id:
+        issues.append("FIT_SESSION_PROFILE_CHANGED")
+    if raw["lifecycle"] != RigpedLifecycle.FITTED_UNBOUND.value:
+        issues.append("FIT_SESSION_LIFECYCLE_CHANGED")
+
+    descriptor, descriptor_issues = read_setup_descriptor(view)
+    issues.extend(issue.code for issue in descriptor_issues)
+    if descriptor is None:
+        issues.append("FIT_SESSION_SETUP_SIGNATURE_INVALID")
+    elif descriptor.signature != session.setup_signature:
+        issues.append("FIT_SESSION_DESCRIPTOR_CHANGED")
+
+    issues.extend(
+        validate_fit_session_fresh(
+            session,
+            character_id=raw["character_id"],
+            setup_revision=raw["revision"],
+            stored_signature=raw["signature"],
+            source_stamp=view.source_stamp,
+            owner_binding_tokens=_owner_tokens(view),
+        )
+    )
+
+    _has_animation, animation_issues = _animation_state(view)
+    issues.extend(animation_issues)
+    if _animation_signature(view) != session.animation_signature:
+        issues.append("FIT_ANIMATION_CHANGED_DURING_SESSION")
+    return tuple(dict.fromkeys(issues))
+
+
 def _raw_descriptor(view) -> tuple[Any, dict[str, Any]]:
     carrier = _descriptor_carrier(view)
     getter = getattr(carrier, "get", None)
@@ -240,6 +286,19 @@ def commit_fit_session(
     view = resolve_character(scene, session.character_id)
     if view.issues:
         raise RigpedFitRuntimeError("FIT_SESSION_CHARACTER_INCOHERENT")
+    descriptor, descriptor_issues = read_setup_descriptor(view)
+    if descriptor is None or descriptor_issues:
+        codes = tuple(issue.code for issue in descriptor_issues)
+        raise RigpedFitRuntimeError(
+            "FIT_SESSION_SETUP_SIGNATURE_INVALID"
+            if not codes
+            else ",".join(codes)
+        )
+    if (
+        descriptor.revision != session.setup_revision
+        or descriptor.signature != session.setup_signature
+    ):
+        raise RigpedFitRuntimeError("FIT_SESSION_DESCRIPTOR_CHANGED")
     carrier, raw = _raw_descriptor(view)
     if raw["schema_version"] != RIGPED_SETUP_SCHEMA_VERSION:
         raise RigpedFitRuntimeError("FIT_SESSION_SCHEMA_CHANGED")
