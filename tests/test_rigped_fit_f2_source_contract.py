@@ -70,11 +70,14 @@ def test_f2_selection_tool_owns_press_to_release_modal_gesture():
     assert 'if event.type == "LEFTMOUSE" and event.value == "RELEASE":' in keymap
 
 
-def test_f2_session_first_routing_blocks_native_object_transform_tools():
+def test_figure_object_route_never_falls_through_to_native_transform_tools():
     keymap = _source("viewport_keymap.py")
     gizmo = _source("global_transform_gizmo.py")
 
-    assert "FIT_F2_TRANSFORM_BLOCKED" in keymap
+    assert "FIT_F3_TRANSFORM_TOOL_ACTIVE" in keymap
+    assert "FIT_F3_TRANSFORM_NOT_IMPLEMENTED" in keymap
     assert 'fit_state is not None and context.mode == "OBJECT"' in keymap
     assert 'fit_ui_state(context) is not None and getattr(context, "mode", "") == "OBJECT"' in gizmo
-    assert '# F2 Figure is Object-hosted but semantic-only.' in gizmo
+    assert 'return "FIGURE", "MOVE"' in gizmo
+    assert "BAW_OT_figure_fit_move_axis" in gizmo
+    assert "apply_fit_move_preview" in gizmo

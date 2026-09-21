@@ -7,6 +7,7 @@ from typing import Any
 from mathutils import Vector
 
 from .character_metadata import resolve_character
+from .rigped_fit_commands import FitCommandError, fit_move_supported, move_fit_part_rig_local
 from .rigped_fit_policy import FitSessionToken
 from .rigped_fit_state import (
     FitDocument,
@@ -55,6 +56,16 @@ _SESSIONS: dict[int, FitSemanticSession] = {}
 
 class FitSemanticSessionError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class FitSemanticMoveReceipt:
+    part_id: str
+    revision_before: int
+    revision_after: int
+    world_delta: tuple[float, float, float]
+    rig_delta: tuple[float, float, float]
+    changed: bool
 
 
 def _safe_pointer(value) -> int | None:
@@ -322,3 +333,142 @@ def apply_fit_part_selection(context, part_ids, action: str) -> bool:
     if context.area is not None:
         context.area.tag_redraw()
     return True
+
+
+def _active_part_definition(session: FitSemanticSession):
+    part_id = session.active_part_id
+    if part_id is None or part_id not in session.selected_part_ids:
+        return None
+    return next((part for part in session.document.parts if part.part_id == part_id), None)
+
+
+def fit_figure_move_available(context) -> bool:
+    session = fit_semantic_session(context)
+    if session is None or validate_fit_semantic_session(context, session):
+        return False
+    if len(session.selected_part_ids) != 1:
+        return False
+    definition = _active_part_definition(session)
+    return bool(
+        definition is not None
+        and fit_move_supported(session.draft, definition.part_id)
+    )
+
+
+def fit_active_part_world_pivot_axes(
+    context,
+    *,
+    orientation_mode: str = "LOCAL",
+):
+    session = fit_semantic_session(context)
+    if session is None or validate_fit_semantic_session(context, session):
+        return None, None
+    definition = _active_part_definition(session)
+    if definition is None:
+        return None, None
+
+    rest = next(
+        (part for part in derive_rest_parts(session.draft) if part.part_id == definition.part_id),
+        None,
+    )
+    if rest is None:
+        return None, None
+
+    if definition.name_hint.upper() in {"COM", "PELVIS"}:
+        pivot_local = (Vector(rest.head) + Vector(rest.tail)) * 0.5
+    else:
+        pivot_local = Vector(rest.head)
+    pivot_world = Vector(session.rig_object.matrix_world @ pivot_local)
+
+    mode = str(orientation_mode).upper()
+    if mode == "WORLD":
+        axes = {
+            "X": Vector((1.0, 0.0, 0.0)),
+            "Y": Vector((0.0, 1.0, 0.0)),
+            "Z": Vector((0.0, 0.0, 1.0)),
+        }
+    elif mode == "LOCAL":
+        world3 = session.rig_object.matrix_world.to_3x3()
+        axes = {}
+        for name, basis in (
+            ("X", (1.0, 0.0, 0.0)),
+            ("Y", (0.0, 1.0, 0.0)),
+            ("Z", (0.0, 0.0, 1.0)),
+        ):
+            axis = Vector(world3 @ Vector(rotate_vector(rest.orientation, basis)))
+            if axis.length <= 1e-12:
+                return None, None
+            axes[name] = axis.normalized()
+    else:
+        return None, None
+    return pivot_world, axes
+
+
+def _publish_fit_draft(context, session: FitSemanticSession, draft: FitDraft) -> bool:
+    if draft.document is not session.document:
+        raise FitSemanticSessionError("FIT_F3_DRAFT_DOCUMENT_MISMATCH")
+    if draft == session.draft:
+        return False
+    session.draft = draft
+    session.revision += 1
+    session.geometry = _build_geometry(
+        session.character_id,
+        session.revision,
+        session.rig_object,
+        session.document,
+        session.draft,
+    )
+    if context.area is not None:
+        context.area.tag_redraw()
+    return True
+
+
+def apply_fit_move_preview(
+    context,
+    *,
+    baseline_draft: FitDraft,
+    part_id: str,
+    world_delta,
+) -> FitSemanticMoveReceipt:
+    session = fit_semantic_session(context)
+    if session is None:
+        raise FitSemanticSessionError("FIT_F3_SESSION_MISSING")
+    issues = validate_fit_semantic_session(context, session)
+    if issues:
+        raise FitSemanticSessionError(issues[0])
+    if baseline_draft.document is not session.document:
+        raise FitSemanticSessionError("FIT_F3_DRAFT_DOCUMENT_MISMATCH")
+
+    world_vector = Vector(world_delta)
+    world3 = session.rig_object.matrix_world.to_3x3()
+    if abs(float(world3.determinant())) <= 1e-12:
+        raise FitSemanticSessionError("FIT_F3_OBJECT_MATRIX_SINGULAR")
+    rig_vector = Vector(world3.inverted() @ world_vector)
+    try:
+        candidate = move_fit_part_rig_local(
+            baseline_draft,
+            str(part_id),
+            tuple(float(value) for value in rig_vector),
+        )
+    except FitCommandError as exc:
+        raise FitSemanticSessionError(str(exc)) from exc
+
+    revision_before = int(session.revision)
+    changed = _publish_fit_draft(context, session, candidate)
+    return FitSemanticMoveReceipt(
+        part_id=str(part_id),
+        revision_before=revision_before,
+        revision_after=int(session.revision),
+        world_delta=tuple(float(value) for value in world_vector),
+        rig_delta=tuple(float(value) for value in rig_vector),
+        changed=changed,
+    )
+
+
+def restore_fit_draft_preview(context, baseline_draft: FitDraft) -> bool:
+    session = fit_semantic_session(context)
+    if session is None:
+        return False
+    if baseline_draft.document is not session.document:
+        raise FitSemanticSessionError("FIT_F3_DRAFT_DOCUMENT_MISMATCH")
+    return _publish_fit_draft(context, session, baseline_draft)

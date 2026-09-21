@@ -66,6 +66,7 @@ from .global_transform_gizmo import (
     BAW_GGT_global_transform,
     BAW_GT_free_rotate_disk,
     BAW_GT_uniform_scale_box,
+    BAW_OT_figure_fit_move_axis,
     BAW_OT_global_native_transform_axis,
 )
 from .phase4_contact_authoring import (
@@ -427,6 +428,7 @@ _CLASSES = (
     BAW_OT_scale_trajectory_uniform,
     BAW_GT_trajectory_slide,
     BAW_GGT_trajectory_move,
+    BAW_OT_figure_fit_move_axis,
     BAW_OT_global_native_transform_axis,
     BAW_GT_free_rotate_disk,
     BAW_GT_uniform_scale_box,

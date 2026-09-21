@@ -1598,15 +1598,33 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
 
         fit_state = fit_ui_state(context)
         if fit_state is not None and context.mode == "OBJECT":
-            set_fit_transform_mode(context, "NONE")
+            fit_mode_before = fit_transform_mode(context)
             deactivate_rigped_semantic_tool(context)
+            context.space_data.show_gizmo = True
             _hide_native_tool_gizmo(context)
-            trace_event(
-                "INPUT",
-                "FIT_F2_TRANSFORM_BLOCKED",
-                context=context,
-                requested_mode=self.mode,
-            )
+            if self.mode == "MOVE":
+                set_fit_transform_mode(context, "MOVE")
+                if fit_mode_before == "MOVE":
+                    current = fit_orientation_mode(context)
+                    set_fit_orientation_mode(
+                        context,
+                        "WORLD" if current == "LOCAL" else "LOCAL",
+                    )
+                trace_event(
+                    "INPUT",
+                    "FIT_F3_TRANSFORM_TOOL_ACTIVE",
+                    context=context,
+                    requested_mode=self.mode,
+                    orientation=fit_orientation_mode(context),
+                )
+            else:
+                set_fit_transform_mode(context, "NONE")
+                trace_event(
+                    "INPUT",
+                    "FIT_F3_TRANSFORM_NOT_IMPLEMENTED",
+                    context=context,
+                    requested_mode=self.mode,
+                )
             return {"FINISHED"}
 
         if fit_state is not None and context.mode == "EDIT_ARMATURE":

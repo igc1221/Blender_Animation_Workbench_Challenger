@@ -9,6 +9,7 @@ from bpy.props import EnumProperty, FloatProperty
 from bpy_extras.view3d_utils import location_3d_to_region_2d
 from mathutils import Matrix, Quaternion, Vector
 
+from .debug_trace import trace_event
 from .gizmo_preferences import (
     GIZMO_AXIS_COLORS,
     GIZMO_HIGHLIGHT_COLOR,
@@ -23,7 +24,15 @@ from .gizmo_preferences import (
     show_rotation_angle,
     snapped_rotation_angle,
 )
-from .rigped_create_fit_ui import fit_transform_mode, fit_ui_state
+from .rigped_create_fit_ui import fit_orientation_mode, fit_transform_mode, fit_ui_state
+from .rigped_fit_session import (
+    FitSemanticSessionError,
+    apply_fit_move_preview,
+    fit_active_part_world_pivot_axes,
+    fit_figure_move_available,
+    fit_semantic_session,
+    restore_fit_draft_preview,
+)
 from .rigped_fit_transform import (
     BAW_OT_rigped_fit_scale_axis,
     BAW_OT_rigped_fit_transform_axis,
@@ -83,8 +92,12 @@ def _route_and_mode(context) -> tuple[str, str]:
         return "", ""
 
     if fit_ui_state(context) is not None and getattr(context, "mode", "") == "OBJECT":
-        # F2 Figure is Object-hosted but semantic-only. Never fall through
-        # to Blender Object transforms or the native transform gizmo.
+        # F3 Figure remains Object-hosted. Only explicitly migrated semantic
+        # commands get a gizmo route; every other W/E/R path still fails closed
+        # instead of falling through to Blender Object transforms.
+        mode = str(fit_transform_mode(context) or "")
+        if mode == "MOVE" and fit_figure_move_available(context):
+            return "FIGURE", "MOVE"
         return "", ""
 
     # Fit deliberately keeps the AWB Select workspace tool active and owns its
@@ -274,6 +287,11 @@ def _native_pivot_axes(context) -> tuple[Vector | None, dict[str, Vector] | None
 
 
 def _pivot_axes(context, route: str) -> tuple[Vector | None, dict[str, Vector] | None]:
+    if route == "FIGURE":
+        return fit_active_part_world_pivot_axes(
+            context,
+            orientation_mode=fit_orientation_mode(context),
+        )
     if route == "FIT":
         rig = getattr(context, "active_object", None)
         bone = _active_edit_bone(context)
@@ -721,6 +739,196 @@ class BAW_OT_global_native_transform_axis(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
 
+
+class BAW_OT_figure_fit_move_axis(bpy.types.Operator):
+    """Object-hosted Figure Move preview that mutates FitDraft only."""
+
+    bl_idname = "baw.figure_fit_move_axis"
+    bl_label = "Figure Move"
+    bl_options: ClassVar[set[str]] = {"REGISTER"}
+
+    axis: EnumProperty(
+        items=(
+            ("X", "X", "Move on X"),
+            ("Y", "Y", "Move on Y"),
+            ("Z", "Z", "Move on Z"),
+            ("XY", "XY", "Move on XY"),
+            ("XZ", "XZ", "Move on XZ"),
+            ("YZ", "YZ", "Move on YZ"),
+        ),
+        default="X",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        route, mode = _route_and_mode(context)
+        return route == "FIGURE" and mode == "MOVE"
+
+    def _axis_world(self) -> Vector | None:
+        axis = self._axes.get(self.axis)
+        return Vector(axis) if axis is not None else None
+
+    def invoke(self, context, event):
+        session = fit_semantic_session(context)
+        if session is None or session.active_part_id is None:
+            return {"CANCELLED"}
+        pivot, axes = _pivot_axes(context, "FIGURE")
+        if pivot is None or axes is None:
+            return {"CANCELLED"}
+
+        self._part_id = str(session.active_part_id)
+        self._baseline_draft = session.draft
+        self._baseline_revision = int(session.revision)
+        self._pivot = Vector(pivot)
+        self._axes = {
+            name: Vector(vector).normalized()
+            for name, vector in axes.items()
+        }
+        self._applied_move = Vector((0.0, 0.0, 0.0))
+        mouse = Vector((float(event.mouse_region_x), float(event.mouse_region_y)))
+
+        if self.axis in {"X", "Y", "Z"}:
+            axis = self._axis_world()
+            if axis is None:
+                return {"CANCELLED"}
+            screen_axis = projected_axis_screen_direction(context, self._pivot, axis)
+            world_per_pixel = projection_world_per_pixel(context, self._pivot)
+            if screen_axis is None or world_per_pixel is None:
+                return {"CANCELLED"}
+            self._screen_axis = Vector(screen_axis)
+            self._world_per_pixel = float(world_per_pixel)
+            self._start_projection = float(mouse.dot(self._screen_axis))
+        else:
+            first, second = {
+                "XY": ("X", "Y"),
+                "XZ": ("X", "Z"),
+                "YZ": ("Y", "Z"),
+            }[self.axis]
+            normal = self._axes[first].cross(self._axes[second])
+            if normal.length <= 1e-9:
+                return {"CANCELLED"}
+            self._plane_normal = normal.normalized()
+            point = _plane_point(
+                context,
+                self._pivot,
+                self._plane_normal,
+                event.mouse_region_x,
+                event.mouse_region_y,
+            )
+            if point is None:
+                return {"CANCELLED"}
+            self._start_plane_point = Vector(point)
+
+        trace_event(
+            "INPUT",
+            "FIT_F3_MOVE_BEGIN",
+            context=context,
+            part_id=self._part_id,
+            axis=self.axis,
+            fit_revision=self._baseline_revision,
+        )
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def _restore_baseline(self, context) -> None:
+        try:
+            restore_fit_draft_preview(context, self._baseline_draft)
+        except FitSemanticSessionError:
+            pass
+
+    def modal(self, context, event):
+        if event.type == "MOUSEMOVE":
+            mouse = Vector((float(event.mouse_region_x), float(event.mouse_region_y)))
+            if self.axis in {"X", "Y", "Z"}:
+                axis = self._axis_world()
+                if axis is None:
+                    return {"CANCELLED"}
+                desired_scalar = (
+                    float(mouse.dot(self._screen_axis)) - self._start_projection
+                ) * self._world_per_pixel
+                desired = axis * desired_scalar
+            else:
+                point = _plane_point(
+                    context,
+                    self._pivot,
+                    self._plane_normal,
+                    event.mouse_region_x,
+                    event.mouse_region_y,
+                )
+                if point is None:
+                    return {"RUNNING_MODAL"}
+                desired = Vector(point) - self._start_plane_point
+
+            try:
+                receipt = apply_fit_move_preview(
+                    context,
+                    baseline_draft=self._baseline_draft,
+                    part_id=self._part_id,
+                    world_delta=desired,
+                )
+            except FitSemanticSessionError as exc:
+                self._restore_baseline(context)
+                trace_event(
+                    "ERROR",
+                    "FIT_F3_MOVE_FAIL",
+                    context=context,
+                    part_id=self._part_id,
+                    axis=self.axis,
+                    reason=str(exc),
+                )
+                self.report({"WARNING"}, str(exc))
+                return {"CANCELLED"}
+
+            self._applied_move = Vector(desired)
+            trace_event(
+                "INPUT",
+                "FIT_F3_MOVE_PREVIEW",
+                context=context,
+                part_id=self._part_id,
+                axis=self.axis,
+                world_delta=receipt.world_delta,
+                rig_delta=receipt.rig_delta,
+                fit_revision=receipt.revision_after,
+                changed=receipt.changed,
+            )
+            if context.area is not None:
+                context.area.tag_redraw()
+            return {"RUNNING_MODAL"}
+
+        if event.type == "LEFTMOUSE" and event.value == "RELEASE":
+            session = fit_semantic_session(context)
+            trace_event(
+                "INPUT",
+                "FIT_F3_MOVE_COMMIT",
+                context=context,
+                part_id=self._part_id,
+                axis=self.axis,
+                world_delta=tuple(float(value) for value in self._applied_move),
+                fit_revision=(None if session is None else int(session.revision)),
+                changed=bool(
+                    session is not None and session.draft != self._baseline_draft
+                ),
+            )
+            return {"FINISHED"}
+
+        if event.type in {"RIGHTMOUSE", "ESC"}:
+            self._restore_baseline(context)
+            session = fit_semantic_session(context)
+            trace_event(
+                "INPUT",
+                "FIT_F3_MOVE_CANCEL",
+                context=context,
+                part_id=self._part_id,
+                axis=self.axis,
+                fit_revision=(None if session is None else int(session.revision)),
+            )
+            if context.area is not None:
+                context.area.tag_redraw()
+            return {"CANCELLED"}
+
+        return {"RUNNING_MODAL"}
+
+
 class BAW_GT_free_rotate_disk(bpy.types.Gizmo):
     """Invisible circular hit surface for Max-style free rotation."""
 
@@ -889,6 +1097,7 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
         for route, operator in (
             ("NATIVE", BAW_OT_global_native_transform_axis.bl_idname),
             ("FIT", BAW_OT_rigped_fit_transform_axis.bl_idname),
+            ("FIGURE", BAW_OT_figure_fit_move_axis.bl_idname),
             ("DIRECT_MOVE", BAW_OT_rigped_direct_move_axis.bl_idname),
             ("FK_MOVE", BAW_OT_rigped_fk_joint_move_axis.bl_idname),
             ("SEMANTIC_MOVE", BAW_OT_rigped_semantic_move_axis.bl_idname),
