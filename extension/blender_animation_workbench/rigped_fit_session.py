@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Quaternion, Vector
 
 from .character_metadata import resolve_character
-from .rigped_fit_commands import FitCommandError, fit_move_supported, move_fit_part_rig_local
+from .rigped_fit_commands import (
+    FitCommandError,
+    fit_move_supported,
+    fit_rotate_supported,
+    move_fit_part_rig_local,
+    rotate_fit_part_rig_local,
+)
 from .rigped_fit_policy import FitSessionToken
 from .rigped_fit_runtime import validate_fit_runtime_session
 from .rigped_fit_state import (
@@ -56,6 +63,7 @@ class FitSemanticSession:
     revision: int = 0
     preview_serial: int = 0
     active_move_gesture: FitMoveGestureBaseline | None = None
+    active_rotate_gesture: FitRotateGestureBaseline | None = None
 
 
 _SESSIONS: dict[int, FitSemanticSession] = {}
@@ -85,6 +93,32 @@ class FitSemanticMoveReceipt:
     preview_serial: int
     world_delta: tuple[float, float, float]
     rig_delta: tuple[float, float, float]
+    changed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FitRotateGestureBaseline:
+    part_id: str
+    draft: FitDraft
+    geometry: FitBodyGeometrySnapshot
+    revision: int
+    preview_serial: int
+    matrix_signature: tuple[float, ...]
+    selected_part_ids: tuple[str, ...]
+    active_part_id: str
+    world_axis: tuple[float, float, float]
+
+
+@dataclass(frozen=True, slots=True)
+class FitSemanticRotateReceipt:
+    part_id: str
+    revision_before: int
+    revision_after: int
+    preview_serial: int
+    angle_radians: float
+    world_axis: tuple[float, float, float]
+    rig_axis: tuple[float, float, float]
+    delta_quaternion_rig: tuple[float, float, float, float]
     changed: bool
 
 
@@ -162,7 +196,7 @@ def _primary_rest_snapshots(scene, character_id: str):
                     else FitPartKind.BONE
                 ),
                 allowed_operations=(
-                    (FitOperation.MOVE,)
+                    (FitOperation.MOVE, FitOperation.ROTATE)
                     if str(binding.semantic_key) == "awb.com"
                     else ()
                 ),
@@ -503,6 +537,23 @@ def fit_figure_move_available(context) -> bool:
     )
 
 
+def fit_figure_rotate_available(context) -> bool:
+    session = fit_semantic_session(context)
+    if session is None or validate_fit_semantic_snapshot_access(context, session):
+        return False
+    try:
+        _frozen_world3(session)
+    except FitSemanticSessionError:
+        return False
+    if len(session.selected_part_ids) != 1:
+        return False
+    definition = _active_part_definition(session)
+    return bool(
+        definition is not None
+        and fit_rotate_supported(session.draft, definition.part_id)
+    )
+
+
 def fit_active_part_world_pivot_axes(
     context,
     *,
@@ -607,7 +658,7 @@ def begin_fit_move_gesture(context, *, part_id: str) -> FitMoveGestureBaseline:
     issues = validate_fit_semantic_session(context, session)
     if issues:
         raise FitSemanticSessionError(issues[0])
-    if session.active_move_gesture is not None:
+    if session.active_move_gesture is not None or session.active_rotate_gesture is not None:
         raise FitSemanticSessionError("FIT_F3_GESTURE_ALREADY_ACTIVE")
     part_id = str(part_id)
     selected_part_ids = _ordered_selected_part_ids(session)
@@ -727,6 +778,160 @@ def cancel_fit_move_gesture(
     session.selected_part_ids = set(gesture.selected_part_ids)
     session.active_part_id = gesture.active_part_id
     session.active_move_gesture = None
+    if context.area is not None:
+        context.area.tag_redraw()
+    return True
+
+
+def begin_fit_rotate_gesture(
+    context,
+    *,
+    part_id: str,
+    world_axis,
+) -> FitRotateGestureBaseline:
+    session = fit_semantic_session(context)
+    if session is None:
+        raise FitSemanticSessionError("FIT_F3_SESSION_MISSING")
+    issues = validate_fit_semantic_session(context, session)
+    if issues:
+        raise FitSemanticSessionError(issues[0])
+    if session.active_move_gesture is not None or session.active_rotate_gesture is not None:
+        raise FitSemanticSessionError("FIT_F3_GESTURE_ALREADY_ACTIVE")
+    part_id = str(part_id)
+    selected_part_ids = _ordered_selected_part_ids(session)
+    if selected_part_ids != (part_id,) or session.active_part_id != part_id:
+        raise FitSemanticSessionError("FIT_F3_ROTATE_SELECTION_INVALID")
+    if not fit_rotate_supported(session.draft, part_id):
+        raise FitSemanticSessionError("FIT_F3_ROTATE_UNSUPPORTED_PART")
+    _frozen_world3(session)
+    frozen_axis = Vector(world_axis)
+    if (
+        len(frozen_axis) != 3
+        or not all(math.isfinite(float(value)) for value in frozen_axis)
+        or frozen_axis.length <= 1e-12
+    ):
+        raise FitSemanticSessionError("FIT_F3_ROTATE_AXIS_INVALID")
+    frozen_axis.normalize()
+    gesture = FitRotateGestureBaseline(
+        part_id=part_id,
+        draft=session.draft,
+        geometry=session.geometry,
+        revision=int(session.revision),
+        preview_serial=int(session.preview_serial),
+        matrix_signature=session.matrix_signature,
+        selected_part_ids=selected_part_ids,
+        active_part_id=part_id,
+        world_axis=tuple(float(value) for value in frozen_axis),
+    )
+    session.active_rotate_gesture = gesture
+    return gesture
+
+
+def _require_rotate_gesture(
+    context,
+    gesture: FitRotateGestureBaseline,
+) -> FitSemanticSession:
+    session = fit_semantic_session(context)
+    if session is None:
+        raise FitSemanticSessionError("FIT_F3_SESSION_MISSING")
+    if session.active_rotate_gesture is not gesture:
+        raise FitSemanticSessionError("FIT_F3_GESTURE_STALE")
+    issues = validate_fit_semantic_session(context, session)
+    if issues:
+        raise FitSemanticSessionError(issues[0])
+    if session.matrix_signature != gesture.matrix_signature:
+        raise FitSemanticSessionError("FIT_F3_OBJECT_MATRIX_CHANGED")
+    if _ordered_selected_part_ids(session) != gesture.selected_part_ids:
+        raise FitSemanticSessionError("FIT_F3_ROTATE_SELECTION_CHANGED")
+    if session.active_part_id != gesture.active_part_id:
+        raise FitSemanticSessionError("FIT_F3_ROTATE_SELECTION_CHANGED")
+    return session
+
+
+def apply_fit_rotate_preview(
+    context,
+    *,
+    gesture: FitRotateGestureBaseline,
+    angle_radians: float,
+) -> FitSemanticRotateReceipt:
+    session = _require_rotate_gesture(context, gesture)
+    angle = float(angle_radians)
+    if not math.isfinite(angle):
+        raise FitSemanticSessionError("FIT_F3_ROTATE_DELTA_INVALID")
+    world_vector = Vector(gesture.world_axis)
+    world3 = _frozen_world3(session)
+    rig_axis = Vector(world3.inverted() @ world_vector)
+    if rig_axis.length <= 1e-12:
+        raise FitSemanticSessionError("FIT_F3_ROTATE_AXIS_INVALID")
+    rig_axis.normalize()
+    delta = Quaternion(rig_axis, angle).normalized()
+    delta_tuple = tuple(float(value) for value in delta)
+    try:
+        candidate = rotate_fit_part_rig_local(
+            gesture.draft,
+            gesture.part_id,
+            delta_tuple,
+        )
+    except FitCommandError as exc:
+        raise FitSemanticSessionError(str(exc)) from exc
+
+    changed = _rebuild_preview_geometry(context, session, candidate)
+    return FitSemanticRotateReceipt(
+        part_id=gesture.part_id,
+        revision_before=gesture.revision,
+        revision_after=int(session.revision),
+        preview_serial=int(session.preview_serial),
+        angle_radians=angle,
+        world_axis=tuple(float(value) for value in world_vector),
+        rig_axis=tuple(float(value) for value in rig_axis),
+        delta_quaternion_rig=delta_tuple,
+        changed=changed,
+    )
+
+
+def commit_fit_rotate_gesture(
+    context,
+    gesture: FitRotateGestureBaseline,
+) -> bool:
+    session = _require_rotate_gesture(context, gesture)
+    changed = session.draft != gesture.draft
+    if changed:
+        session.revision = gesture.revision + 1
+        session.preview_serial += 1
+        session.geometry = _build_geometry(
+            session.character_id,
+            session.revision,
+            session.preview_serial,
+            session.geometry.rig_pointer,
+            Matrix(session.matrix_world_frozen),
+            session.document,
+            session.draft,
+        )
+    else:
+        session.draft = gesture.draft
+        session.geometry = gesture.geometry
+        session.revision = gesture.revision
+        session.preview_serial = gesture.preview_serial
+    session.active_rotate_gesture = None
+    if context.area is not None:
+        context.area.tag_redraw()
+    return changed
+
+
+def cancel_fit_rotate_gesture(
+    context,
+    gesture: FitRotateGestureBaseline,
+) -> bool:
+    session = fit_semantic_session(context)
+    if session is None or session.active_rotate_gesture is not gesture:
+        return False
+    session.draft = gesture.draft
+    session.geometry = gesture.geometry
+    session.revision = gesture.revision
+    session.preview_serial = gesture.preview_serial
+    session.selected_part_ids = set(gesture.selected_part_ids)
+    session.active_part_id = gesture.active_part_id
+    session.active_rotate_gesture = None
     if context.area is not None:
         context.area.tag_redraw()
     return True

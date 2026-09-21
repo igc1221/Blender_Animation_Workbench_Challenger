@@ -128,3 +128,54 @@ def test_f3_commit_primitive_revalidates_canonical_setup_signature():
     assert "descriptor.signature != session.setup_signature" in block
     assert "descriptor.revision != session.setup_revision" in block
     assert "FIT_SESSION_DESCRIPTOR_CHANGED" in block
+
+
+def test_f3b1_com_rotate_has_explicit_capability_and_session_lifecycle():
+    session = _source("rigped_fit_session.py")
+
+    assert "(FitOperation.MOVE, FitOperation.ROTATE)" in session
+    assert "class FitRotateGestureBaseline" in session
+    assert "active_rotate_gesture: FitRotateGestureBaseline | None" in session
+    assert "world_axis: tuple[float, float, float]" in session
+    assert "def fit_figure_rotate_available" in session
+    assert "def begin_fit_rotate_gesture" in session
+    assert "def apply_fit_rotate_preview" in session
+    assert "def commit_fit_rotate_gesture" in session
+    assert "def cancel_fit_rotate_gesture" in session
+    assert "world_axis=tuple(float(value) for value in frozen_axis)" in session
+    assert "world_vector = Vector(gesture.world_axis)" in session
+    assert "world3 = _frozen_world3(session)" in session
+    assert "Quaternion(rig_axis, angle).normalized()" in session
+
+
+def test_f3b1_com_rotate_keeps_center_compensation_in_pure_command():
+    commands = _source("rigped_fit_commands.py")
+
+    start = commands.index("def rotate_fit_part_rig_local")
+    block = commands[start:]
+    assert "definition.semantic_key == \"awb.com\"" in commands
+    assert "pivot = _vec_scale(_vec_add(rest.head, rest.tail), 0.5)" in block
+    assert "rotate_vector(delta, _vec_sub(rest.head, pivot))" in block
+    assert "local_orientation=new_local_orientation" in block
+    assert "attachment_offset=new_attachment" in block
+
+
+def test_f3b1_figure_rotate_is_xyz_only_and_never_calls_native_rotate():
+    gizmo = _source("global_transform_gizmo.py")
+    keymap = _source("viewport_keymap.py")
+    init = _source("__init__.py")
+
+    assert 'return "FIGURE", "ROTATE"' in gizmo
+    assert 'if self.mode in {"MOVE", "ROTATE"}' in keymap
+    assert "BAW_OT_figure_fit_rotate_axis" in init
+    assert '("FIGURE", BAW_OT_figure_fit_rotate_axis.bl_idname)' in gizmo
+    assert 'if route == "FIGURE"\n                else ("X", "Y", "Z", "VIEW", "FREE")' in gizmo
+
+    start = gizmo.index("class BAW_OT_figure_fit_rotate_axis")
+    end = gizmo.index("class BAW_GT_free_rotate_disk", start)
+    block = gizmo[start:end]
+    assert '("X", "X", "Rotate around X")' in block
+    assert '("Y", "Y", "Rotate around Y")' in block
+    assert '("Z", "Z", "Rotate around Z")' in block
+    assert "bpy.ops.transform.rotate" not in block
+    assert "apply_fit_rotate_preview" in block

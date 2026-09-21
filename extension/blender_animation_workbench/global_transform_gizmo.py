@@ -33,11 +33,16 @@ from .rigped_create_fit_ui import (
 from .rigped_fit_session import (
     FitSemanticSessionError,
     apply_fit_move_preview,
+    apply_fit_rotate_preview,
     begin_fit_move_gesture,
+    begin_fit_rotate_gesture,
     cancel_fit_move_gesture,
+    cancel_fit_rotate_gesture,
     commit_fit_move_gesture,
+    commit_fit_rotate_gesture,
     fit_active_part_world_pivot_axes,
     fit_figure_move_available,
+    fit_figure_rotate_available,
     fit_semantic_session,
 )
 from .rigped_fit_transform import (
@@ -86,7 +91,10 @@ def _force_figure_safe_workspace_tool(context) -> None:
     active_tool = _active_tool_id(context)
     if active_tool not in {"builtin.move", "builtin.rotate", "builtin.scale"}:
         return
-    safe_tool = "baw.move_object" if fit_transform_mode(context) == "MOVE" else "baw.select_object"
+    safe_tool = {
+        "MOVE": "baw.move_object",
+        "ROTATE": "baw.rotate_object",
+    }.get(fit_transform_mode(context), "baw.select_object")
     try:
         bpy.ops.wm.tool_set_by_id(name=safe_tool)
     except RuntimeError:
@@ -123,6 +131,8 @@ def _route_and_mode(context) -> tuple[str, str]:
         mode = str(fit_transform_mode(context) or "")
         if mode == "MOVE" and fit_figure_move_available(context):
             return "FIGURE", "MOVE"
+        if mode == "ROTATE" and fit_figure_rotate_available(context):
+            return "FIGURE", "ROTATE"
         return "", ""
 
     # Fit deliberately keeps the AWB Select workspace tool active and owns its
@@ -986,6 +996,215 @@ class BAW_OT_figure_fit_move_axis(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
 
+class BAW_OT_figure_fit_rotate_axis(bpy.types.Operator):
+    """Object-hosted Figure Rotate preview that mutates FitDraft only."""
+
+    bl_idname = "baw.figure_fit_rotate_axis"
+    bl_label = "Figure Rotate"
+    bl_options: ClassVar[set[str]] = {"REGISTER"}
+
+    axis: EnumProperty(
+        items=(
+            ("X", "X", "Rotate around X"),
+            ("Y", "Y", "Rotate around Y"),
+            ("Z", "Z", "Rotate around Z"),
+        ),
+        default="X",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        route, mode = _route_and_mode(context)
+        return route == "FIGURE" and mode == "ROTATE"
+
+    def _axis_world(self) -> Vector | None:
+        axis = self._axes.get(self.axis)
+        return Vector(axis) if axis is not None else None
+
+    def invoke(self, context, event):
+        session = fit_semantic_session(context)
+        if session is None or session.active_part_id is None:
+            return {"CANCELLED"}
+        pivot, axes = _pivot_axes(context, "FIGURE")
+        if pivot is None or axes is None:
+            return {"CANCELLED"}
+
+        self._part_id = str(session.active_part_id)
+        self._pivot = Vector(pivot)
+        self._axes = {
+            name: Vector(vector).normalized()
+            for name, vector in axes.items()
+        }
+        axis = self._axis_world()
+        if axis is None:
+            return {"CANCELLED"}
+
+        mouse = Vector((float(event.mouse_region_x), float(event.mouse_region_y)))
+        start = _rotation_vector(
+            context,
+            self._pivot,
+            axis,
+            event.mouse_region_x,
+            event.mouse_region_y,
+        )
+        tangent = linear_roll_screen_tangent(
+            context,
+            self._pivot,
+            axis,
+            mouse,
+            Vector(start) if start is not None else None,
+        )
+        if tangent is None:
+            return {"CANCELLED"}
+        self._previous_rotation_mouse = Vector(mouse)
+        self._rotate_screen_tangent = Vector(tangent)
+        self._raw_angle = 0.0
+        self._applied_angle = 0.0
+
+        try:
+            self._gesture = begin_fit_rotate_gesture(
+                context,
+                part_id=self._part_id,
+                world_axis=axis,
+            )
+        except FitSemanticSessionError as exc:
+            trace_event(
+                "INPUT",
+                "FIT_F3_ROTATE_REFUSED",
+                context=context,
+                part_id=self._part_id,
+                axis=self.axis,
+                reason=str(exc),
+            )
+            return {"CANCELLED"}
+
+        show_rotation_angle(context, 0.0, self._pivot)
+        trace_event(
+            "INPUT",
+            "FIT_F3_ROTATE_BEGIN",
+            context=context,
+            part_id=self._part_id,
+            axis=self.axis,
+            fit_revision=self._gesture.revision,
+            preview_serial=self._gesture.preview_serial,
+        )
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def _cancel_gesture(self, context) -> None:
+        gesture = getattr(self, "_gesture", None)
+        if gesture is None:
+            return
+        try:
+            cancel_fit_rotate_gesture(context, gesture)
+        except FitSemanticSessionError:
+            pass
+
+    def modal(self, context, event):
+        if event.type == "MOUSEMOVE":
+            mouse = Vector((float(event.mouse_region_x), float(event.mouse_region_y)))
+            axis = self._axis_world()
+            if axis is None:
+                self._cancel_gesture(context)
+                clear_rotation_angle(context)
+                return {"CANCELLED"}
+            mouse_delta = mouse - self._previous_rotation_mouse
+            raw_step = (
+                float(mouse_delta.dot(self._rotate_screen_tangent))
+                * MAX_LINEAR_ROTATION_RADIANS_PER_PIXEL
+            )
+            self._raw_angle += raw_step
+            self._previous_rotation_mouse = Vector(mouse)
+            desired = float(snapped_rotation_angle(context, event, self._raw_angle))
+            try:
+                receipt = apply_fit_rotate_preview(
+                    context,
+                    gesture=self._gesture,
+                    angle_radians=desired,
+                )
+            except FitSemanticSessionError as exc:
+                self._cancel_gesture(context)
+                clear_rotation_angle(context)
+                trace_event(
+                    "ERROR",
+                    "FIT_F3_ROTATE_FAIL",
+                    context=context,
+                    part_id=self._part_id,
+                    axis=self.axis,
+                    reason=str(exc),
+                )
+                self.report({"WARNING"}, str(exc))
+                return {"CANCELLED"}
+
+            self._applied_angle = desired
+            show_rotation_angle(context, desired, self._pivot)
+            trace_event(
+                "INPUT",
+                "FIT_F3_ROTATE_PREVIEW",
+                context=context,
+                part_id=self._part_id,
+                axis=self.axis,
+                angle_radians=receipt.angle_radians,
+                world_axis=receipt.world_axis,
+                rig_axis=receipt.rig_axis,
+                fit_revision=receipt.revision_after,
+                preview_serial=receipt.preview_serial,
+                changed=receipt.changed,
+            )
+            if context.area is not None:
+                context.area.tag_redraw()
+            return {"RUNNING_MODAL"}
+
+        if event.type == "LEFTMOUSE" and event.value == "RELEASE":
+            clear_rotation_angle(context)
+            try:
+                changed = commit_fit_rotate_gesture(context, self._gesture)
+            except FitSemanticSessionError as exc:
+                self._cancel_gesture(context)
+                trace_event(
+                    "ERROR",
+                    "FIT_F3_ROTATE_FAIL",
+                    context=context,
+                    part_id=self._part_id,
+                    axis=self.axis,
+                    reason=str(exc),
+                )
+                self.report({"WARNING"}, str(exc))
+                return {"CANCELLED"}
+            session = fit_semantic_session(context)
+            trace_event(
+                "INPUT",
+                "FIT_F3_ROTATE_COMMIT",
+                context=context,
+                part_id=self._part_id,
+                axis=self.axis,
+                angle_radians=float(self._applied_angle),
+                fit_revision=(None if session is None else int(session.revision)),
+                preview_serial=(None if session is None else int(session.preview_serial)),
+                changed=changed,
+            )
+            return {"FINISHED"}
+
+        if event.type in {"RIGHTMOUSE", "ESC"}:
+            self._cancel_gesture(context)
+            clear_rotation_angle(context)
+            session = fit_semantic_session(context)
+            trace_event(
+                "INPUT",
+                "FIT_F3_ROTATE_CANCEL",
+                context=context,
+                part_id=self._part_id,
+                axis=self.axis,
+                fit_revision=(None if session is None else int(session.revision)),
+                preview_serial=(None if session is None else int(session.preview_serial)),
+            )
+            if context.area is not None:
+                context.area.tag_redraw()
+            return {"CANCELLED"}
+
+        return {"RUNNING_MODAL"}
+
+
 class BAW_GT_free_rotate_disk(bpy.types.Gizmo):
     """Invisible circular hit surface for Max-style free rotation."""
 
@@ -1197,10 +1416,16 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
         for route, operator in (
             ("NATIVE", BAW_OT_global_native_transform_axis.bl_idname),
             ("FIT", BAW_OT_rigped_fit_transform_axis.bl_idname),
+            ("FIGURE", BAW_OT_figure_fit_rotate_axis.bl_idname),
             ("DIRECT_ROTATE", BAW_OT_rigped_direct_rotate_axis.bl_idname),
         ):
             route_hits = {}
-            for handle in ("X", "Y", "Z", "VIEW", "FREE"):
+            handles = (
+                ("X", "Y", "Z")
+                if route == "FIGURE"
+                else ("X", "Y", "Z", "VIEW", "FREE")
+            )
+            for handle in handles:
                 gizmo_type = (
                     BAW_GT_free_rotate_disk.bl_idname
                     if handle == "FREE"
@@ -1377,7 +1602,7 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
                     props.orient_type = "VIEW" if mode == "ROTATE" and handle == "VIEW" else orientation
 
         if mode == "ROTATE":
-            view_axes = _view_axes(context)
+            view_axes = _view_axes(context) if route != "FIGURE" else None
             if view_axes is not None:
                 base_matrix = _axis_matrix(view_axes["Z"], pivot)
                 free_hit, free_props = hits["FREE"]
@@ -1425,7 +1650,7 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
                 visible.alpha = 0.95 if active else 0.65
                 visible.hide = False
                 hit.hide = False
-            view_axes = _view_axes(context)
+            view_axes = _view_axes(context) if route != "FIGURE" else None
             if view_axes is not None:
                 hit, _props = hits["VIEW"]
                 matrix = _axis_matrix(view_axes["Z"], pivot)

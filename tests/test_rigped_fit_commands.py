@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import sys
+from dataclasses import replace
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType
@@ -34,7 +36,9 @@ commands_spec.loader.exec_module(commands)
 
 FitCommandError = commands.FitCommandError
 fit_move_supported = commands.fit_move_supported
+fit_rotate_supported = commands.fit_rotate_supported
 move_fit_part_rig_local = commands.move_fit_part_rig_local
+rotate_fit_part_rig_local = commands.rotate_fit_part_rig_local
 FitOperation = fit.FitOperation
 FitPartKind = fit.FitPartKind
 FitRestPartSnapshot = fit.FitRestPartSnapshot
@@ -77,7 +81,7 @@ def _draft():
                 width=0.2,
                 depth=0.2,
                 kind=FitPartKind.FRAME,
-                allowed_operations=(FitOperation.MOVE,),
+                allowed_operations=(FitOperation.MOVE, FitOperation.ROTATE),
                 name_hint="COM",
             ),
             FitRestPartSnapshot(
@@ -143,3 +147,103 @@ def test_zero_delta_still_rejects_unsupported_part():
 
     with pytest.raises(FitCommandError, match="FIT_F3_MOVE_UNSUPPORTED_PART"):
         move_fit_part_rig_local(draft, "pelvis", (0.0, 0.0, 0.0))
+
+
+def test_com_rotate_keeps_center_fixed_and_rotates_subtree_only():
+    draft = _draft()
+    before = _rest_map(draft)
+    before_values = {record.part_id: record.value for record in draft.values}
+    half = math.sqrt(0.5)
+
+    rotated = rotate_fit_part_rig_local(
+        draft,
+        "com",
+        (half, 0.0, 0.0, half),
+    )
+    after = _rest_map(rotated)
+    after_values = {record.part_id: record.value for record in rotated.values}
+
+    before_center = tuple(
+        (before["com"].head[index] + before["com"].tail[index]) * 0.5
+        for index in range(3)
+    )
+    after_center = tuple(
+        (after["com"].head[index] + after["com"].tail[index]) * 0.5
+        for index in range(3)
+    )
+
+    assert after["root"].head == pytest.approx(before["root"].head)
+    assert after["root"].tail == pytest.approx(before["root"].tail)
+    assert after_center == pytest.approx(before_center)
+    assert after["com"].head == pytest.approx((0.25, 0.45, 0.0))
+    assert after["com"].tail == pytest.approx((-0.25, 0.45, 0.0))
+    assert after["pelvis"].head == pytest.approx(after["com"].head)
+    assert after["com"].orientation == pytest.approx((half, 0.0, 0.0, half))
+    assert after["pelvis"].orientation == pytest.approx((half, 0.0, 0.0, half))
+    assert after_values["root"] == before_values["root"]
+    assert after_values["pelvis"] == before_values["pelvis"]
+
+
+def test_com_rotate_is_the_only_first_slice_rotate_capability():
+    draft = _draft()
+
+    assert fit_rotate_supported(draft, "com")
+    assert not fit_rotate_supported(draft, "pelvis")
+
+    with pytest.raises(FitCommandError, match="FIT_F3_ROTATE_UNSUPPORTED_PART"):
+        rotate_fit_part_rig_local(draft, "pelvis", (1.0, 0.0, 0.0, 0.0))
+
+
+def test_identity_rotate_is_exact_noop_after_capability_check():
+    draft = _draft()
+
+    assert rotate_fit_part_rig_local(
+        draft,
+        "com",
+        (1.0, 0.0, 0.0, 0.0),
+    ) is draft
+
+
+def test_com_rotate_parent_local_conversion_with_rotated_parent():
+    draft = _draft()
+    half = math.sqrt(0.5)
+    root_record = next(record for record in draft.values if record.part_id == "root")
+    rotated_parent = fit.replace_draft_value(
+        draft,
+        "root",
+        replace(
+            root_record.value,
+            local_orientation=(half, 0.0, 0.0, half),
+        ),
+    )
+    before = _rest_map(rotated_parent)
+    before_values = {record.part_id: record.value for record in rotated_parent.values}
+
+    rotated = rotate_fit_part_rig_local(
+        rotated_parent,
+        "com",
+        (half, 0.0, 0.0, half),
+    )
+    after = _rest_map(rotated)
+    after_values = {record.part_id: record.value for record in rotated.values}
+
+    before_center = tuple(
+        (before["com"].head[index] + before["com"].tail[index]) * 0.5
+        for index in range(3)
+    )
+    after_center = tuple(
+        (after["com"].head[index] + after["com"].tail[index]) * 0.5
+        for index in range(3)
+    )
+
+    assert before["root"].tail == pytest.approx((-1.0, 0.0, 0.0))
+    assert after["root"] == before["root"]
+    assert before_center == pytest.approx((-0.45, 0.0, 0.0))
+    assert after_center == pytest.approx(before_center)
+    assert after["com"].head == pytest.approx((-0.45, 0.25, 0.0))
+    assert after["com"].tail == pytest.approx((-0.45, -0.25, 0.0))
+    assert after_values["com"].attachment_offset == pytest.approx((0.25, 0.45, 0.0))
+    assert after_values["com"].local_orientation == pytest.approx(
+        (half, 0.0, 0.0, half)
+    )
+    assert after_values["pelvis"] == before_values["pelvis"]
