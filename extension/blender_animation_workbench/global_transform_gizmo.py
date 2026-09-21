@@ -82,6 +82,11 @@ def _route_and_mode(context) -> tuple[str, str]:
     if bool(getattr(getattr(context, "scene", None), "baw_trajectory_edit_mode", False)):
         return "", ""
 
+    if fit_ui_state(context) is not None and getattr(context, "mode", "") == "OBJECT":
+        # F2 Figure is Object-hosted but semantic-only. Never fall through
+        # to Blender Object transforms or the native transform gizmo.
+        return "", ""
+
     # Fit deliberately keeps the AWB Select workspace tool active and owns its
     # transform mode internally, so resolve Fit before the Select-tool guard.
     if getattr(context, "mode", "") == "EDIT_ARMATURE" and fit_ui_state(context) is not None:

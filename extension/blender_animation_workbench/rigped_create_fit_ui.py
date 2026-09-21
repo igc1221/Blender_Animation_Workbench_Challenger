@@ -30,6 +30,13 @@ from .rigped_fit_runtime import (
     commit_fit_session,
     inspect_fit_entry,
 )
+from .rigped_fit_session import (
+    FitSemanticSession,
+    FitSemanticSessionError,
+    begin_fit_semantic_session,
+    end_fit_semantic_session,
+    fit_semantic_session,
+)
 from .rigped_humanoid_builder import (
     build_generated_rigped_humanoid,
     discard_generated_rigped_humanoid,
@@ -63,6 +70,7 @@ class _FitHistoryEntry:
 class _FitUiState:
     character_id: str
     session: Any
+    semantic_session: FitSemanticSession
     rig_object: Any
     rest_snapshot: tuple[_BoneRestSnapshot, ...]
     original_active: Any | None
@@ -111,7 +119,13 @@ def _window_key(context) -> int | None:
 
 def fit_ui_state(context) -> _FitUiState | None:
     key = _window_key(context)
-    return _FIT_STATES.get(key) if key is not None else None
+    state = _FIT_STATES.get(key) if key is not None else None
+    if state is None:
+        return None
+    semantic = fit_semantic_session(context)
+    if semantic is None or semantic is not state.semantic_session:
+        return None
+    return state
 
 
 def set_fit_transform_mode(context, mode: str) -> bool:
@@ -453,21 +467,26 @@ def _begin_fit(context, character_id: str) -> _FitUiState:
     original_pivot_point = str(context.scene.tool_settings.transform_pivot_point)
     orientation_slot = context.scene.transform_orientation_slots[0]
     original_orientation = str(orientation_slot.type)
-    _enter_fit_box_wire_display(rig, context.scene)
+    _ensure_object_mode()
     _select_only_object(context, rig)
-    bpy.ops.object.mode_set(mode="EDIT")
-    bpy.ops.wm.tool_set_by_id(name="baw.select_edit_armature")
-    bpy.ops.armature.select_all(action="DESELECT")
+    bpy.ops.wm.tool_set_by_id(name="baw.select_object")
     context.scene.tool_settings.transform_pivot_point = "ACTIVE_ELEMENT"
-    # Fit owns its gizmo orientation state. Keep Blender's visible label on
-    # LOCAL while the custom Fit gizmo computes the active bone's local basis.
     orientation_slot.type = "LOCAL"
-    snapshot = _capture_edit_rest(rig)
+    try:
+        semantic_session = begin_fit_semantic_session(
+            context,
+            character_id=character_id,
+            token=inspection.session,
+            rig=rig,
+        )
+    except FitSemanticSessionError as exc:
+        raise RigpedFitRuntimeError(str(exc)) from exc
     state = _FitUiState(
         character_id=character_id,
         session=inspection.session,
+        semantic_session=semantic_session,
         rig_object=rig,
-        rest_snapshot=snapshot,
+        rest_snapshot=(),
         original_active=original_active,
         original_selected=original_selected,
         original_mode=original_mode,
@@ -1101,13 +1120,9 @@ class BAW_OT_rigped_fit_off(bpy.types.Operator):
             _ensure_object_mode()
             result = commit_fit_session(context.scene, state.session)
         except (RigpedFitRuntimeError, RuntimeError) as exc:
-            try:
-                _select_only_object(context, state.rig_object)
-                bpy.ops.object.mode_set(mode="EDIT")
-            except RuntimeError:
-                pass
             self.report({"ERROR"}, f"Fit commit failed: {exc}")
             return {"CANCELLED"}
+        end_fit_semantic_session(context)
         _FIT_STATES.pop(key, None)
         _restore_fit_transform_settings(context, state)
         _transition_to_rig_selection(context, state.rig_object)
@@ -1138,10 +1153,7 @@ class BAW_OT_rigped_fit_cancel(bpy.types.Operator):
         if key is None or state is None:
             return {"CANCELLED"}
         try:
-            _select_only_object(context, state.rig_object)
-            bpy.ops.object.mode_set(mode="EDIT")
-            _restore_edit_rest(state.rig_object, state.rest_snapshot)
-            bpy.ops.object.mode_set(mode="OBJECT")
+            _ensure_object_mode()
             view = resolve_character(context.scene, state.character_id)
             descriptor, issues = read_setup_descriptor(view)
             if descriptor is None or issues or descriptor.signature != state.session.setup_signature:
@@ -1149,6 +1161,7 @@ class BAW_OT_rigped_fit_cancel(bpy.types.Operator):
         except (RigpedFitRuntimeError, RuntimeError) as exc:
             self.report({"ERROR"}, f"Fit cancel could not restore exactly: {exc}")
             return {"CANCELLED"}
+        end_fit_semantic_session(context)
         _FIT_STATES.pop(key, None)
         _restore_fit_transform_settings(context, state)
         _transition_to_rig_selection(context, state.rig_object)

@@ -31,6 +31,11 @@ from .rigped_create_fit_ui import (
     set_fit_orientation_mode,
     set_fit_transform_mode,
 )
+from .rigped_fit_session import (
+    apply_fit_part_selection,
+    fit_geometry_snapshot,
+    fit_semantic_session,
+)
 from .rigped_transform import (
     activate_rigped_fk_joint_move_tool,
     activate_rigped_semantic_move_tool,
@@ -745,6 +750,46 @@ def _box_bone_pick_name(context, rig, location: tuple[int, int]) -> str | None:
     return max(hits, key=lambda item: item[0])[1]
 
 
+def _fit_part_pick_id(
+    context,
+    location: tuple[int, int],
+    *,
+    diagnostics: dict[str, object] | None = None,
+) -> str | None:
+    snapshot = fit_geometry_snapshot(context)
+    rv3d = getattr(context, "region_data", None) or getattr(
+        getattr(context, "space_data", None), "region_3d", None
+    )
+    if snapshot is None or rv3d is None:
+        if diagnostics is not None:
+            diagnostics["rejection"] = "NO_FIT_SNAPSHOT"
+        return None
+
+    hits = []
+    hit_parts = []
+    for part in snapshot.parts:
+        if len(part.vertices) != 8:
+            continue
+        polygon = _project_box_polygon(context, rv3d, part.vertices)
+        if polygon and _point_hits_polygon_2d(location, polygon):
+            depth = _box_view_depth(rv3d, part.vertices)
+            hits.append((depth, part.part_id, part.name_hint))
+            hit_parts.append({"part_id": part.part_id, "name": part.name_hint, "depth": depth})
+    picked = max(hits, key=lambda item: item[0]) if hits else None
+    if diagnostics is not None:
+        diagnostics.update(
+            {
+                "fit_revision": snapshot.revision,
+                "fit_parts": len(snapshot.parts),
+                "hit_parts": hit_parts[:32],
+                "picked_part_id": picked[1] if picked else None,
+                "picked_name": picked[2] if picked else None,
+                "rejection": None if picked else "NO_FIT_PART_HIT",
+            }
+        )
+    return picked[1] if picked else None
+
+
 def _box_display_rigs(context):
     scene = getattr(context, "scene", None)
     if scene is None:
@@ -913,6 +958,21 @@ def _mesh_object_intersects_rect(context, rv3d, obj, rect, depsgraph) -> bool:
     finally:
         if mesh is not None:
             evaluated.to_mesh_clear()
+
+
+def _fit_part_box_crossing_ids(context, rect) -> tuple[str, ...]:
+    snapshot = fit_geometry_snapshot(context)
+    rv3d = getattr(context, "region_data", None) or getattr(
+        getattr(context, "space_data", None), "region_3d", None
+    )
+    if snapshot is None or rv3d is None:
+        return ()
+    hits = []
+    for part in snapshot.parts:
+        polygon = _project_box_polygon(context, rv3d, part.vertices)
+        if polygon and _polygon_intersects_rect(polygon, rect):
+            hits.append(part.part_id)
+    return tuple(hits)
 
 
 def _object_box_crossing_hits(context, rect) -> tuple[object, ...]:
@@ -1108,6 +1168,13 @@ def _apply_box_pick(
     # rectangle is enough. Blender's native box selection is origin/containment
     # biased in these modes, which made Animate behave differently.
     if mode == "OBJECT":
+        if fit_semantic_session(context) is not None:
+            apply_fit_part_selection(
+                context,
+                _fit_part_box_crossing_ids(context, rect),
+                action,
+            )
+            return {"FINISHED"}
         return _apply_crossing_hits(
             context,
             _object_box_crossing_hits(context, rect),
@@ -1275,6 +1342,30 @@ def apply_awb_click_selection(
     """Run the same global AWB click-selection path from non-selection modals."""
 
     mode = str(getattr(context, "mode", ""))
+    if mode == "OBJECT" and fit_semantic_session(context) is not None:
+        fit_diagnostics: dict[str, object] = {}
+        picked_part_id = _fit_part_pick_id(
+            context,
+            location,
+            diagnostics=fit_diagnostics,
+        )
+        apply_fit_part_selection(
+            context,
+            (() if picked_part_id is None else (picked_part_id,)),
+            action,
+        )
+        trace_event(
+            "INPUT",
+            "FIT_SELECTION_CLICK_RESULT",
+            context=context,
+            source=source,
+            action=action,
+            location=location,
+            result=("MISS" if picked_part_id is None else "PICK"),
+            picked_part_id=picked_part_id,
+            pick_diagnostics=fit_diagnostics,
+        )
+        return {"FINISHED"}
     active_tool_before = _active_native_transform_tool_id(context)
     if mode in {"POSE", "OBJECT", "EDIT_ARMATURE"}:
         pick_diagnostics: dict[str, object] = {}
@@ -1477,8 +1568,20 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
             context.area.tag_redraw()
             return {"FINISHED"}
 
-        fit_state = fit_ui_state(context) if context.mode == "EDIT_ARMATURE" else None
-        if fit_state is not None:
+        fit_state = fit_ui_state(context)
+        if fit_state is not None and context.mode == "OBJECT":
+            set_fit_transform_mode(context, "NONE")
+            deactivate_rigped_semantic_tool(context)
+            _hide_native_tool_gizmo(context)
+            trace_event(
+                "INPUT",
+                "FIT_F2_TRANSFORM_BLOCKED",
+                context=context,
+                requested_mode=self.mode,
+            )
+            return {"FINISHED"}
+
+        if fit_state is not None and context.mode == "EDIT_ARMATURE":
             fit_mode_before = fit_transform_mode(context)
             set_fit_transform_mode(context, self.mode)
             # Fit owns W/E/R as structural tools. Move/Rotate use an AWB modal

@@ -6,6 +6,13 @@ from bpy_extras.view3d_utils import location_3d_to_region_2d
 from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
 
+from .rigped_fit_session import (
+    fit_active_part_id,
+    fit_geometry_part_by_name,
+    fit_geometry_snapshot_for_rig,
+    fit_selected_part_ids,
+)
+
 _BOX_WIRE_PROPERTY = "awb_biped_box_wire_v1"
 _DRAW_HANDLE_VIEW = None
 _DRAW_HANDLE_PIXEL = None
@@ -123,6 +130,9 @@ def sync_native_bone_overlay_visibility() -> None:
 
 
 def box_display_names(rig) -> tuple[str, ...]:
+    snapshot = fit_geometry_snapshot_for_rig(bpy.context, rig)
+    if snapshot is not None:
+        return tuple(part.name_hint for part in snapshot.parts)
     if rig is None or getattr(rig, "type", None) != "ARMATURE":
         return ()
     collection = rig.data.collections.get("Authored")
@@ -169,6 +179,9 @@ def box_world_vertices(rig, name: str):
 
     if rig is None or getattr(rig, "type", None) != "ARMATURE":
         return ()
+    fit_part = fit_geometry_part_by_name(bpy.context, rig, name)
+    if fit_part is not None:
+        return fit_part.vertices
     box = _edit_box(rig, name) if str(getattr(rig, "mode", "")) == "EDIT" else _pose_box(rig, name)
     if box is None:
         return ()
@@ -194,7 +207,15 @@ def _bone_color(rig, name: str) -> tuple[float, float, float, float]:
     custom = bone.color.custom
     mode = str(getattr(rig, "mode", ""))
     if mode == "OBJECT":
-        value = custom.normal
+        fit_part = fit_geometry_part_by_name(bpy.context, rig, name)
+        selected_ids = set(fit_selected_part_ids(bpy.context))
+        active_id = fit_active_part_id(bpy.context)
+        if fit_part is not None and fit_part.part_id == active_id:
+            value = custom.active
+        elif fit_part is not None and fit_part.part_id in selected_ids:
+            value = custom.select
+        else:
+            value = custom.normal
     elif mode == "EDIT":
         edit_bone = rig.data.edit_bones.get(name)
         active_bone = getattr(bpy.context, "active_bone", None)
@@ -347,7 +368,26 @@ def _projected_box_hulls(rig, region, region_3d):
 
 
 def _rig_outline_segments(rig, region, region_3d):
+    snapshot = fit_geometry_snapshot_for_rig(bpy.context, rig)
+    selected_ids = set(fit_selected_part_ids(bpy.context))
     coords = []
+    if snapshot is not None:
+        for part in snapshot.parts:
+            if part.part_id not in selected_ids:
+                continue
+            projected = []
+            for vertex in part.vertices:
+                point = location_3d_to_region_2d(region, region_3d, Vector(vertex))
+                if point is not None:
+                    projected.append(point)
+            polygon = _convex_hull_2d(projected)
+            if len(polygon) < 3:
+                continue
+            for index, first in enumerate(polygon):
+                second = polygon[(index + 1) % len(polygon)]
+                coords.extend((first, second))
+        return tuple(coords)
+
     for polygon in _projected_box_hulls(rig, region, region_3d):
         for index, first in enumerate(polygon):
             second = polygon[(index + 1) % len(polygon)]
