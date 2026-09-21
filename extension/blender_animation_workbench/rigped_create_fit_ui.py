@@ -25,6 +25,10 @@ from .rigped_create_policy import (
     fitted_humanoid_spec,
     height_from_free_mouse,
 )
+from .rigped_fit_commit import (
+    FitCommitTransactionError,
+    commit_fit_semantic_session_atomic,
+)
 from .rigped_fit_runtime import (
     RigpedFitRuntimeError,
     commit_fit_session,
@@ -1130,19 +1134,17 @@ class BAW_OT_rigped_fit_off(bpy.types.Operator):
             if semantic_issues:
                 self.report({"ERROR"}, f"Fit session stale: {','.join(semantic_issues)}")
                 return {"CANCELLED"}
-        if (
+        dirty_semantic_draft = (
             semantic_session is not None
             and semantic_session.draft.values != semantic_session.document.baseline_values
-        ):
-            self.report(
-                {"ERROR"},
-                "Fit Apply blocked until semantic draft commit is implemented (F4)",
-            )
-            return {"CANCELLED"}
+        )
         try:
             _ensure_object_mode()
-            result = commit_fit_session(context.scene, state.session)
-        except (RigpedFitRuntimeError, RuntimeError) as exc:
+            if dirty_semantic_draft:
+                result = commit_fit_semantic_session_atomic(context, semantic_session)
+            else:
+                result = commit_fit_session(context.scene, state.session)
+        except (FitCommitTransactionError, RigpedFitRuntimeError, RuntimeError) as exc:
             self.report({"ERROR"}, f"Fit commit failed: {exc}")
             return {"CANCELLED"}
         end_fit_semantic_session(context)
@@ -1177,6 +1179,13 @@ class BAW_OT_rigped_fit_cancel(bpy.types.Operator):
             return {"CANCELLED"}
         try:
             _ensure_object_mode()
+            semantic_session = fit_semantic_session(context)
+            if semantic_session is not None:
+                semantic_issues = validate_fit_semantic_session(context, semantic_session)
+                if semantic_issues:
+                    raise RigpedFitRuntimeError(
+                        "FIT_CANCEL_NATIVE_STATE_STALE:" + ",".join(semantic_issues)
+                    )
             view = resolve_character(context.scene, state.character_id)
             descriptor, issues = read_setup_descriptor(view)
             if descriptor is None or issues or descriptor.signature != state.session.setup_signature:

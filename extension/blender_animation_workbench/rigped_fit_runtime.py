@@ -354,3 +354,62 @@ def commit_fit_session(
     if descriptor.revision != decision.next_revision or descriptor.signature != final_signature:
         raise RigpedFitRuntimeError("FIT_DESCRIPTOR_PUBLISH_MISMATCH")
     return FitCommitResult(decision, descriptor.revision, descriptor.signature)
+
+
+def publish_fit_session_after_native_commit(
+    scene,
+    session: FitSessionToken,
+) -> FitCommitResult:
+    """Publish the setup descriptor after one already-verified F4 native mutation.
+
+    The caller must validate the live Figure session immediately before entering
+    its bounded native mutation window. During this function the previous
+    descriptor is expected to be structurally stale until the new signature is
+    published, so read_setup_descriptor() must not be used as a precondition.
+    """
+
+    view = resolve_character(scene, session.character_id)
+    if view.issues:
+        raise RigpedFitRuntimeError("FIT_SESSION_CHARACTER_INCOHERENT")
+
+    carrier, raw = _raw_descriptor(view)
+    if raw["schema_version"] != RIGPED_SETUP_SCHEMA_VERSION:
+        raise RigpedFitRuntimeError("FIT_SESSION_SCHEMA_CHANGED")
+    if raw["character_id"] != session.character_id:
+        raise RigpedFitRuntimeError("FIT_SESSION_CHARACTER_CHANGED")
+    if raw["profile_id"] != session.profile_id:
+        raise RigpedFitRuntimeError("FIT_SESSION_PROFILE_CHANGED")
+    if raw["lifecycle"] != RigpedLifecycle.FITTED_UNBOUND.value:
+        raise RigpedFitRuntimeError("FIT_SESSION_LIFECYCLE_CHANGED")
+    if raw["revision"] != session.setup_revision or raw["signature"] != session.setup_signature:
+        raise RigpedFitRuntimeError("FIT_SESSION_DESCRIPTOR_CHANGED")
+
+    _has_animation, animation_issues = _animation_state(view)
+    if animation_issues:
+        raise RigpedFitRuntimeError(",".join(animation_issues))
+    if _animation_signature(view) != session.animation_signature:
+        raise RigpedFitRuntimeError("FIT_ANIMATION_CHANGED_DURING_SESSION")
+
+    final_signature = compute_setup_signature(view)
+    decision = decide_fit_commit(
+        previous_revision=session.setup_revision,
+        previous_signature=session.setup_signature,
+        candidate_signature=final_signature,
+    )
+    if not decision.structural_change:
+        return FitCommitResult(decision, session.setup_revision, session.setup_signature)
+
+    carrier[RIGPED_SETUP_PROPERTY] = {
+        "schema_version": RIGPED_SETUP_SCHEMA_VERSION,
+        "character_id": session.character_id,
+        "profile_id": session.profile_id,
+        "revision": decision.next_revision,
+        "signature": final_signature,
+        "lifecycle": RigpedLifecycle.FITTED_UNBOUND.value,
+    }
+    descriptor, issues = read_setup_descriptor(resolve_character(scene, session.character_id))
+    if descriptor is None or issues:
+        raise RigpedFitRuntimeError(f"FIT_DESCRIPTOR_PUBLISH_FAILED: {issues!r}")
+    if descriptor.revision != decision.next_revision or descriptor.signature != final_signature:
+        raise RigpedFitRuntimeError("FIT_DESCRIPTOR_PUBLISH_MISMATCH")
+    return FitCommitResult(decision, descriptor.revision, descriptor.signature)

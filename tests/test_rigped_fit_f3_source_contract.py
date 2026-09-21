@@ -81,7 +81,7 @@ def test_f3_session_freshness_is_full_and_fail_closed():
     assert "FIT_SESSION_SETUP_SIGNATURE_INVALID" in runtime
 
 
-def test_f3_rejects_shear_and_apply_cannot_drop_semantic_draft():
+def test_f3_rejects_shear_and_dirty_apply_routes_only_through_f4_atomic_commit():
     session = _source("rigped_fit_session.py")
     ui = _source("rigped_create_fit_ui.py")
 
@@ -91,7 +91,8 @@ def test_f3_rejects_shear_and_apply_cannot_drop_semantic_draft():
     assert "_frozen_world3(session)" in session
     assert "validate_fit_semantic_session(context, semantic_session)" in ui
     assert "semantic_session.draft.values != semantic_session.document.baseline_values" in ui
-    assert "Fit Apply blocked until semantic draft commit is implemented (F4)" in ui
+    assert "commit_fit_semantic_session_atomic(context, semantic_session)" in ui
+    assert "Fit Apply blocked until semantic draft commit is implemented (F4)" not in ui
 
 
 def test_f3_draw_snapshot_path_stays_lightweight_but_input_boundaries_are_full():

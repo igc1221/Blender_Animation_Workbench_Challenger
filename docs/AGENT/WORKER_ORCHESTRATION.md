@@ -104,6 +104,14 @@ A production request normally supplies or points to:
 
 For web-only workers, package the actual relevant source excerpts; do not assume filesystem visibility.
 
+**External Web Bridge source-visibility invariant (2026-09-21):**
+- A GitHub/pinned-commit URL in a challenger packet is only a **locator/provenance hint**, not proof that the provider can fetch or inspect that source.
+- Unless the provider response explicitly proves repository access by citing concrete fetched source content, Main must assume the linked GitHub files were **not read**.
+- PRE/POST review packets for web-only providers must therefore include the exact decision-critical source/diff **inline in the request body** (or in another directly consumable inline evidence block). Do not rely on `context_files` being converted to readable source.
+- Before a review can count toward the mandatory reviewer minimum, Main verifies the generated REQUEST artifact itself and confirms that the required function/class/diff text is actually present inline.
+- A response that reports link-only evidence, no fetch channel, or source-unavailable status is an **evidence-packaging failure**, not a valid source review. Correct the packet and resend the same review gate; do not grade the provider for missing source it was never given.
+- Record this as a Main orchestration defect in the worker ledger when it happens. Distinguish it from providers/modes that have separately demonstrated real repository fetch capability (for example, a proven Agent-mode fetch in a prior task).
+
 ### C. Worker-profile compensation gate
 
 Read `docs/AGENT/WORKER_PROFILES/<worker>.md` and add targeted guardrails.
