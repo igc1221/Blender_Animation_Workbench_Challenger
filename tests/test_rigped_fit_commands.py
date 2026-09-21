@@ -325,13 +325,8 @@ def _leg_draft():
                 parent_binding_id="thigh_l",
                 connected=True,
                 head=(0.5, 0.0, 0.0),
-                tail=(1.5, 0.0, 0.0),
-                orientation=(
-                    math.sqrt(0.5),
-                    0.0,
-                    0.0,
-                    -math.sqrt(0.5),
-                ),
+                tail=(0.5, -1.0, 0.0),
+                orientation=(0.0, 1.0, 0.0, 0.0),
                 width=0.12,
                 depth=0.12,
                 allowed_operations=fit_operations_for_role("awb.calf"),
@@ -406,13 +401,23 @@ def test_com_scale_uses_local_axes_without_native_object_scale_semantics():
     after = _rest_map(scaled)
     after_values = {record.part_id: record.value for record in scaled.values}
 
-    assert after["com"].head == pytest.approx(before["com"].head)
+    before_center = tuple(
+        (before["com"].head[i] + before["com"].tail[i]) * 0.5 for i in range(3)
+    )
+    after_center = tuple(
+        (after["com"].head[i] + after["com"].tail[i]) * 0.5 for i in range(3)
+    )
+    assert after_center == pytest.approx(before_center)
     assert _length(after["com"]) == pytest.approx(_length(before["com"]) * 1.5)
     assert after["com"].width == pytest.approx(before["com"].width * 1.5)
     assert after["com"].depth == pytest.approx(before["com"].depth * 1.5)
     tail_delta = tuple(
         after["com"].tail[i] - before["com"].tail[i] for i in range(3)
     )
+    head_delta = tuple(
+        after["com"].head[i] - before["com"].head[i] for i in range(3)
+    )
+    assert head_delta == pytest.approx(tuple(-value for value in tail_delta))
     assert after["pelvis"].head == pytest.approx(
         tuple(before["pelvis"].head[i] + tail_delta[i] for i in range(3))
     )

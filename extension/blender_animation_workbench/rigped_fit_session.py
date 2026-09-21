@@ -949,6 +949,63 @@ def apply_fit_rotate_preview(
     )
 
 
+def apply_fit_rotate_quaternion_preview(
+    context,
+    *,
+    gesture: FitRotateGestureBaseline,
+    world_delta_quaternion,
+) -> FitSemanticRotateReceipt:
+    session = _require_rotate_gesture(context, gesture)
+    values = tuple(float(value) for value in world_delta_quaternion)
+    if (
+        len(values) != 4
+        or not all(math.isfinite(value) for value in values)
+        or sum(value * value for value in values) <= 1e-24
+    ):
+        raise FitSemanticSessionError("FIT_F3_ROTATE_DELTA_INVALID")
+
+    world_delta = Quaternion(values).normalized()
+    angle = float(world_delta.angle)
+    world_axis = (
+        Vector(world_delta.axis)
+        if angle > 1e-12
+        else Vector(gesture.world_axis)
+    )
+    if world_axis.length <= 1e-12:
+        raise FitSemanticSessionError("FIT_F3_ROTATE_AXIS_INVALID")
+    world_axis.normalize()
+
+    world3 = _frozen_world3(session)
+    rig_axis = Vector(world3.inverted() @ world_axis)
+    if rig_axis.length <= 1e-12:
+        raise FitSemanticSessionError("FIT_F3_ROTATE_AXIS_INVALID")
+    rig_axis.normalize()
+
+    delta = Quaternion(rig_axis, angle).normalized()
+    delta_tuple = tuple(float(value) for value in delta)
+    try:
+        candidate = rotate_fit_part_rig_local(
+            gesture.draft,
+            gesture.part_id,
+            delta_tuple,
+        )
+    except FitCommandError as exc:
+        raise FitSemanticSessionError(str(exc)) from exc
+
+    changed = _rebuild_preview_geometry(context, session, candidate)
+    return FitSemanticRotateReceipt(
+        part_id=gesture.part_id,
+        revision_before=gesture.revision,
+        revision_after=int(session.revision),
+        preview_serial=int(session.preview_serial),
+        angle_radians=angle,
+        world_axis=tuple(float(value) for value in world_axis),
+        rig_axis=tuple(float(value) for value in rig_axis),
+        delta_quaternion_rig=delta_tuple,
+        changed=changed,
+    )
+
+
 def commit_fit_rotate_gesture(
     context,
     gesture: FitRotateGestureBaseline,

@@ -34,6 +34,7 @@ from .rigped_fit_session import (
     FitSemanticSessionError,
     apply_fit_move_preview,
     apply_fit_rotate_preview,
+    apply_fit_rotate_quaternion_preview,
     apply_fit_scale_preview,
     begin_fit_move_gesture,
     begin_fit_rotate_gesture,
@@ -337,11 +338,7 @@ def _pivot_axes(
     if route == "FIGURE":
         return fit_active_part_world_pivot_axes(
             context,
-            orientation_mode=(
-                "LOCAL"
-                if str(mode).upper() == "SCALE"
-                else fit_orientation_mode(context)
-            ),
+            orientation_mode=fit_orientation_mode(context),
         )
     if route == "FIT":
         rig = getattr(context, "active_object", None)
@@ -1024,8 +1021,17 @@ class BAW_OT_figure_fit_rotate_axis(bpy.types.Operator):
             ("X", "X", "Rotate around X"),
             ("Y", "Y", "Rotate around Y"),
             ("Z", "Z", "Rotate around Z"),
+            ("VIEW", "View", "Rotate around the current view axis"),
+            ("FREE", "Free", "Free virtual-trackball rotation"),
         ),
         default="X",
+    )
+
+    trackball_radius_px: FloatProperty(
+        name="",
+        description="",
+        default=64.0,
+        min=8.0,
     )
 
     @classmethod
@@ -1038,6 +1044,14 @@ class BAW_OT_figure_fit_rotate_axis(bpy.types.Operator):
         return Vector(axis) if axis is not None else None
 
     def invoke(self, context, event):
+        if self.axis == "FREE":
+            from .viewport_keymap import prioritize_awb_selection_over_free_rotate
+
+            if prioritize_awb_selection_over_free_rotate(context, event):
+                if context.area is not None:
+                    context.area.tag_redraw()
+                return {"FINISHED"}
+
         session = fit_semantic_session(context)
         if session is None or session.active_part_id is None:
             return {"CANCELLED"}
@@ -1051,31 +1065,51 @@ class BAW_OT_figure_fit_rotate_axis(bpy.types.Operator):
             name: Vector(vector).normalized()
             for name, vector in axes.items()
         }
-        axis = self._axis_world()
-        if axis is None:
-            return {"CANCELLED"}
-
         mouse = Vector((float(event.mouse_region_x), float(event.mouse_region_y)))
-        start = _rotation_vector(
-            context,
-            self._pivot,
-            axis,
-            event.mouse_region_x,
-            event.mouse_region_y,
-        )
-        tangent = linear_roll_screen_tangent(
-            context,
-            self._pivot,
-            axis,
-            mouse,
-            Vector(start) if start is not None else None,
-        )
-        if tangent is None:
-            return {"CANCELLED"}
-        self._previous_rotation_mouse = Vector(mouse)
-        self._rotate_screen_tangent = Vector(tangent)
         self._raw_angle = 0.0
         self._applied_angle = 0.0
+        self._free_rotation = Quaternion((1.0, 0.0, 0.0, 0.0))
+
+        if self.axis == "FREE":
+            view_axes = _view_axes(context)
+            if view_axes is None:
+                return {"CANCELLED"}
+            axis = Vector(view_axes["Z"]).normalized()
+            self._previous_free_mouse = Vector(mouse)
+            self._free_start_mouse = Vector(mouse)
+            self._free_dragging = False
+            clear_rotation_angle(context)
+        else:
+            if self.axis == "VIEW":
+                view_axes = _view_axes(context)
+                axis = (
+                    None
+                    if view_axes is None
+                    else Vector(view_axes["Z"]).normalized()
+                )
+            else:
+                axis = self._axis_world()
+            if axis is None:
+                return {"CANCELLED"}
+            self._frozen_axis = Vector(axis).normalized()
+            start = _rotation_vector(
+                context,
+                self._pivot,
+                self._frozen_axis,
+                event.mouse_region_x,
+                event.mouse_region_y,
+            )
+            tangent = linear_roll_screen_tangent(
+                context,
+                self._pivot,
+                self._frozen_axis,
+                mouse,
+                Vector(start) if start is not None else None,
+            )
+            if tangent is None:
+                return {"CANCELLED"}
+            self._previous_rotation_mouse = Vector(mouse)
+            self._rotate_screen_tangent = Vector(tangent)
 
         try:
             self._gesture = begin_fit_rotate_gesture(
@@ -1119,25 +1153,48 @@ class BAW_OT_figure_fit_rotate_axis(bpy.types.Operator):
     def modal(self, context, event):
         if event.type == "MOUSEMOVE":
             mouse = Vector((float(event.mouse_region_x), float(event.mouse_region_y)))
-            axis = self._axis_world()
-            if axis is None:
-                self._cancel_gesture(context)
-                clear_rotation_angle(context)
-                return {"CANCELLED"}
-            mouse_delta = mouse - self._previous_rotation_mouse
-            raw_step = (
-                float(mouse_delta.dot(self._rotate_screen_tangent))
-                * MAX_LINEAR_ROTATION_RADIANS_PER_PIXEL
-            )
-            self._raw_angle += raw_step
-            self._previous_rotation_mouse = Vector(mouse)
-            desired = float(snapped_rotation_angle(context, event, self._raw_angle))
             try:
-                receipt = apply_fit_rotate_preview(
-                    context,
-                    gesture=self._gesture,
-                    angle_radians=desired,
-                )
+                if self.axis == "FREE":
+                    if not self._free_dragging:
+                        if (mouse - self._free_start_mouse).length < 6.0:
+                            return {"RUNNING_MODAL"}
+                        self._free_dragging = True
+                    rotation_step = arcball_world_step(
+                        context,
+                        self._pivot,
+                        self._previous_free_mouse,
+                        mouse,
+                        float(self.trackball_radius_px),
+                    )
+                    if abs(float(rotation_step.angle)) > 1e-12:
+                        self._free_rotation = (
+                            self._free_rotation @ rotation_step
+                        ).normalized()
+                    self._previous_free_mouse = Vector(mouse)
+                    receipt = apply_fit_rotate_quaternion_preview(
+                        context,
+                        gesture=self._gesture,
+                        world_delta_quaternion=tuple(
+                            float(value) for value in self._free_rotation
+                        ),
+                    )
+                    desired = float(receipt.angle_radians)
+                else:
+                    mouse_delta = mouse - self._previous_rotation_mouse
+                    raw_step = (
+                        float(mouse_delta.dot(self._rotate_screen_tangent))
+                        * MAX_LINEAR_ROTATION_RADIANS_PER_PIXEL
+                    )
+                    self._raw_angle += raw_step
+                    self._previous_rotation_mouse = Vector(mouse)
+                    desired = float(
+                        snapped_rotation_angle(context, event, self._raw_angle)
+                    )
+                    receipt = apply_fit_rotate_preview(
+                        context,
+                        gesture=self._gesture,
+                        angle_radians=desired,
+                    )
             except FitSemanticSessionError as exc:
                 self._cancel_gesture(context)
                 clear_rotation_angle(context)
@@ -1643,11 +1700,7 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
             ("DIRECT_ROTATE", BAW_OT_rigped_direct_rotate_axis.bl_idname),
         ):
             route_hits = {}
-            handles = (
-                ("X", "Y", "Z")
-                if route == "FIGURE"
-                else ("X", "Y", "Z", "VIEW", "FREE")
-            )
+            handles = ("X", "Y", "Z", "VIEW", "FREE")
             for handle in handles:
                 gizmo_type = (
                     BAW_GT_free_rotate_disk.bl_idname
@@ -1829,7 +1882,7 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
                     props.orient_type = "VIEW" if mode == "ROTATE" and handle == "VIEW" else orientation
 
         if mode == "ROTATE":
-            view_axes = _view_axes(context) if route != "FIGURE" else None
+            view_axes = _view_axes(context)
             if view_axes is not None:
                 base_matrix = _axis_matrix(view_axes["Z"], pivot)
                 free_hit, free_props = hits["FREE"]
@@ -1877,7 +1930,7 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
                 visible.alpha = 0.95 if active else 0.65
                 visible.hide = False
                 hit.hide = False
-            view_axes = _view_axes(context) if route != "FIGURE" else None
+            view_axes = _view_axes(context)
             if view_axes is not None:
                 hit, _props = hits["VIEW"]
                 matrix = _axis_matrix(view_axes["Z"], pivot)

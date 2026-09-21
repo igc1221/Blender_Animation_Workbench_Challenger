@@ -161,7 +161,8 @@ def test_f3b1_com_rotate_keeps_center_compensation_in_pure_command():
     assert "local_orientation=new_local_orientation" in block
 
 
-def test_f3b1_figure_rotate_is_xyz_only_and_never_calls_native_rotate():
+def test_f3_figure_rotate_matches_full_awb_gizmo_and_never_calls_native_rotate():
+    session = _source("rigped_fit_session.py")
     gizmo = _source("global_transform_gizmo.py")
     keymap = _source("viewport_keymap.py")
     init = _source("__init__.py")
@@ -170,7 +171,7 @@ def test_f3b1_figure_rotate_is_xyz_only_and_never_calls_native_rotate():
     assert 'if self.mode in {"MOVE", "ROTATE", "SCALE"}' in keymap
     assert "BAW_OT_figure_fit_rotate_axis" in init
     assert '("FIGURE", BAW_OT_figure_fit_rotate_axis.bl_idname)' in gizmo
-    assert 'if route == "FIGURE"\n                else ("X", "Y", "Z", "VIEW", "FREE")' in gizmo
+    assert 'handles = ("X", "Y", "Z", "VIEW", "FREE")' in gizmo
 
     start = gizmo.index("class BAW_OT_figure_fit_rotate_axis")
     end = gizmo.index("class BAW_GT_free_rotate_disk", start)
@@ -178,8 +179,12 @@ def test_f3b1_figure_rotate_is_xyz_only_and_never_calls_native_rotate():
     assert '("X", "X", "Rotate around X")' in block
     assert '("Y", "Y", "Rotate around Y")' in block
     assert '("Z", "Z", "Rotate around Z")' in block
+    assert '("VIEW", "View", "Rotate around the current view axis")' in block
+    assert '("FREE", "Free", "Free virtual-trackball rotation")' in block
     assert "bpy.ops.transform.rotate" not in block
     assert "apply_fit_rotate_preview" in block
+    assert "apply_fit_rotate_quaternion_preview" in block
+    assert "def apply_fit_rotate_quaternion_preview" in session
 
 
 def test_f3_completion_scale_route_is_semantic_and_registered():
@@ -200,7 +205,9 @@ def test_f3_completion_scale_route_is_semantic_and_registered():
     assert '("FIGURE", BAW_OT_figure_fit_scale_axis.bl_idname)' in gizmo
     assert "BAW_OT_figure_fit_scale_axis" in init
     assert 'if self.mode in {"MOVE", "ROTATE", "SCALE"}' in keymap
-    assert "set_fit_orientation_mode(context, \"LOCAL\")" in keymap
+    assert "if fit_mode_before == self.mode:" in keymap
+    assert 'orientation_mode=fit_orientation_mode(context)' in gizmo
+    assert 'if self.mode == "SCALE":\n                    set_fit_orientation_mode' not in keymap
     assert "def scale_fit_part_local" in commands
     assert "bpy.ops.transform.resize" not in gizmo[
         gizmo.index("class BAW_OT_figure_fit_scale_axis") :

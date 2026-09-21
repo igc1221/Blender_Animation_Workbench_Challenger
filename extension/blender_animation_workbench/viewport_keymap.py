@@ -246,7 +246,11 @@ def _activate_awb_transform_workspace_tool(context, mode: str) -> bool:
 
 def _cycle_transform_orientation(context) -> str:
     enabled = transform_orientation_cycle(context)
-    if context.mode == "EDIT_ARMATURE":
+    if context.mode == "POSE":
+        # Animate mode cycles only World/Local. VIEW remains available elsewhere
+        # but never enters repeated W/E/R transform-orientation cycling here.
+        enabled = ("GLOBAL", "LOCAL")
+    elif context.mode == "EDIT_ARMATURE":
         # In armature Edit Mode Blender LOCAL is the Armature object's basis.
         # Treat the user's Local preference as NORMAL so the gizmo follows the
         # active edit bone instead of looking identical to Global.
@@ -1690,9 +1694,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                     set_fit_transform_mode(context, "NONE")
                     return {"CANCELLED"}
                 set_fit_transform_mode(context, self.mode)
-                if self.mode == "SCALE":
-                    set_fit_orientation_mode(context, "LOCAL")
-                elif fit_mode_before == self.mode:
+                if fit_mode_before == self.mode:
                     current = fit_orientation_mode(context)
                     set_fit_orientation_mode(
                         context,

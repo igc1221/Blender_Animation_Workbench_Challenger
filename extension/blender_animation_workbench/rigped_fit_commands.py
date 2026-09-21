@@ -390,10 +390,46 @@ def _two_bone_move(
         elbow,
         _vec_add(shoulder, _vec_scale(baseline_dir, baseline_along)),
     )
-    if _vec_length(baseline_perp) <= 1e-7:
+
+    # Match the legacy gesture-start bend preference without depending on
+    # EditBone/IK-pole runtime state. Authored legs are intentionally straight,
+    # so their documented knee pole points toward rig-local -Y. Arms normally
+    # carry a meaningful authored bend; if one becomes effectively straight,
+    # use the upper segment's authored local Z as the stable seed, matching the
+    # legacy no-pole fallback.
+    chain_length = upper_length + fore_length
+    bend_epsilon = max(1e-7, chain_length * 1e-4)
+    if _vec_length(baseline_perp) <= bend_epsilon:
+        fore_role = _role(draft, fore_id)
+        if fore_role == "calf":
+            straight_seed = (0.0, -1.0, 0.0)
+        elif fore_role == "forearm":
+            straight_seed = rotate_vector(upper.orientation, (0.0, 0.0, 1.0))
+        else:
+            straight_seed = (1.0, 0.0, 0.0)
+        baseline_perp = _vec_sub(
+            straight_seed,
+            _vec_scale(
+                baseline_dir,
+                _vec_dot(straight_seed, baseline_dir),
+            ),
+        )
+    if _vec_length(baseline_perp) <= bend_epsilon:
+        fallback = (1.0, 0.0, 0.0)
+        if abs(_vec_dot(fallback, baseline_dir)) > 0.9:
+            fallback = (0.0, 0.0, 1.0)
+        baseline_perp = _vec_sub(
+            fallback,
+            _vec_scale(
+                baseline_dir,
+                _vec_dot(fallback, baseline_dir),
+            ),
+        )
+    if _vec_length(baseline_perp) <= bend_epsilon:
         raise FitCommandError("FIT_F3_BEND_PLANE_UNRESOLVED")
+
     bend_plane_normal = _vec_cross(baseline_dir, baseline_perp)
-    if _vec_length(bend_plane_normal) <= 1e-7:
+    if _vec_length(bend_plane_normal) <= bend_epsilon:
         raise FitCommandError("FIT_F3_BEND_PLANE_UNRESOLVED")
     bend_plane_normal = _vec_normalized(bend_plane_normal)
     bend_dir = _vec_cross(bend_plane_normal, target_dir)
@@ -752,6 +788,27 @@ def _scale_one_axis(
         direction,
         new_effective_length - old_effective_length,
     )
+    if definition.kind is FitPartKind.FRAME:
+        half_delta = _vec_scale(tail_delta, 0.5)
+        targets = {
+            part_id: (
+                _vec_sub(rest.head, half_delta),
+                rest.orientation,
+            )
+        }
+        targets.update(
+            _absolute_pose_targets(
+                draft,
+                part_ids=_descendant_ids(draft, part_id),
+                translation=half_delta,
+            )
+        )
+        return _reencode_absolute_pose(
+            draft,
+            targets,
+            value_overrides={part_id: new_value},
+        )
+
     targets = _absolute_pose_targets(
         draft,
         part_ids=_descendant_ids(draft, part_id),
