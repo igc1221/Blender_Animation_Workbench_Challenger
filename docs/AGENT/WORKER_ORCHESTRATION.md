@@ -1,8 +1,10 @@
 # Blender Animation Workbench — Worker Orchestration
 
-> Updated: **2026-09-20 — balanced web-challenger rotation**
+> Updated: **2026-09-21 15:55 KST**
 > Authority: **Main / Sol**
 > Purpose: turn model-specific strengths/weaknesses into better task packets and lower Main repair cost.
+
+> **MANDATORY TWO-SIDED REVIEW GATE:** every non-trivial implementation/stabilization slice has two blocking review stages. **PRE:** send the proposed design/contract to at least **2 independent reviewers/workers**, wait for and consume both responses, then Main synthesizes them with its own judgment before implementation. **POST:** after implementation, send the actual current source/diff to at least **2 independent reviewers/workers**, wait for and consume both responses, disposition every material finding, fix as needed, and rerun regression gates. USER FIRST / user-final testing starts only after the POST gate is closed. A sent-but-unread review is still open work and blocks progression.
 
 ## 1. Core rule
 
@@ -49,7 +51,7 @@ Current routing priority:
 7. Astra: manual high-value architecture escalation.
 ```
 
-**External Web challenger invariant:** for every non-trivial AWB implementation/stabilization batch, Main should send at least one small decision-boundary review through the provider-agnostic External Web Bridge using the current frozen contract plus exact relevant source/diff. While provider traits remain provisional, distribute requests across DeepSeek / Qwen / GLM over successive gates; do not send all three for every item unless the decision is genuinely ambiguous enough to justify it. Record concrete hits, false alarms, context failures, and Main repair burden in the worker ledger so routing can become evidence-driven later. Launcher auto-open/import behavior remains the dispatch mechanism; if bridge/service auto-open is unavailable, record that explicitly and continue from authoritative Main + Blender evidence rather than pretending the challenger pass occurred.
+**External Web challenger invariant:** for every non-trivial AWB implementation/stabilization batch, Main sends at least one small decision-boundary review through the provider-agnostic External Web Bridge using the current frozen contract plus exact relevant source/diff; that reviewer may occupy one slot in the mandatory PRE/POST minimum of two independent reviewers. While provider traits remain provisional, distribute requests across DeepSeek / Qwen / GLM over successive gates; do not send all three for every item unless the decision is genuinely ambiguous enough to justify it. Record concrete hits, false alarms, context failures, and Main repair burden in the worker ledger so routing can become evidence-driven later. Launcher auto-open/import behavior remains the dispatch mechanism. Reviewer conclusions are advisory, but once a request is sent **Main must consume and disposition it before that gate closes**. If a bridge/provider is unavailable, record that explicitly and fill the missing reviewer slot with another independent reviewer rather than lowering the minimum.
 
 **Luna concurrency is a fixed orchestration invariant:** normal operation may use **two High workers in parallel**; when a third genuinely independent/low-overlap slice exists, Main may use **three High workers in parallel** via burst. **Max is one worker only and must run alone with respect to Luna**: all High lanes must be drained before Max starts, and no High lane may launch while Max is active.
 

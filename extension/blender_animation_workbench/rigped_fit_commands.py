@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from .rigped_fit_state import (
     FitDraft,
+    FitOperation,
     FitPartValue,
     Vec3,
     derive_rest_parts,
@@ -34,7 +35,11 @@ def fit_move_supported(draft: FitDraft, part_id: str) -> bool:
         (part for part in draft.document.parts if part.part_id == str(part_id)),
         None,
     )
-    return bool(definition is not None and definition.semantic_key == "awb.com")
+    return bool(
+        definition is not None
+        and definition.semantic_key == "awb.com"
+        and FitOperation.MOVE in definition.allowed_operations
+    )
 
 
 def move_fit_part_rig_local(

@@ -4,7 +4,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 from .character_metadata import resolve_character
 from .rigped_fit_commands import FitCommandError, fit_move_supported, move_fit_part_rig_local
@@ -12,6 +12,7 @@ from .rigped_fit_policy import FitSessionToken
 from .rigped_fit_state import (
     FitDocument,
     FitDraft,
+    FitOperation,
     FitPartKind,
     FitRestPartSnapshot,
     derive_rest_parts,
@@ -45,6 +46,7 @@ class FitSemanticSession:
     document: FitDocument
     draft: FitDraft
     matrix_signature: tuple[float, ...]
+    matrix_world_frozen: tuple[tuple[float, float, float, float], ...]
     geometry: FitBodyGeometrySnapshot
     selected_part_ids: set[str] = field(default_factory=set)
     active_part_id: str | None = None
@@ -87,6 +89,13 @@ def _window_key(context) -> int | None:
 
 def _matrix_signature(matrix) -> tuple[float, ...]:
     return tuple(round(float(matrix[row][column]), 9) for row in range(4) for column in range(4))
+
+
+def _matrix_snapshot(matrix) -> tuple[tuple[float, float, float, float], ...]:
+    return tuple(
+        tuple(float(matrix[row][column]) for column in range(4))
+        for row in range(4)
+    )
 
 
 def _animation_digest(token: FitSessionToken) -> str:
@@ -133,6 +142,11 @@ def _primary_rest_snapshots(scene, character_id: str):
                     FitPartKind.FRAME
                     if str(binding.semantic_key) == "awb.com"
                     else FitPartKind.BONE
+                ),
+                allowed_operations=(
+                    (FitOperation.MOVE,)
+                    if str(binding.semantic_key) == "awb.com"
+                    else ()
                 ),
                 name_hint=str(bone.name),
             )
@@ -229,6 +243,7 @@ def begin_fit_semantic_session(
         document=document,
         draft=draft,
         matrix_signature=_matrix_signature(rig.matrix_world),
+        matrix_world_frozen=_matrix_snapshot(rig.matrix_world),
         geometry=geometry,
     )
     _SESSIONS[key] = session

@@ -35,6 +35,7 @@ commands_spec.loader.exec_module(commands)
 FitCommandError = commands.FitCommandError
 fit_move_supported = commands.fit_move_supported
 move_fit_part_rig_local = commands.move_fit_part_rig_local
+FitOperation = fit.FitOperation
 FitPartKind = fit.FitPartKind
 FitRestPartSnapshot = fit.FitRestPartSnapshot
 derive_rest_parts = fit.derive_rest_parts
@@ -76,6 +77,7 @@ def _draft():
                 width=0.2,
                 depth=0.2,
                 kind=FitPartKind.FRAME,
+                allowed_operations=(FitOperation.MOVE,),
                 name_hint="COM",
             ),
             FitRestPartSnapshot(
