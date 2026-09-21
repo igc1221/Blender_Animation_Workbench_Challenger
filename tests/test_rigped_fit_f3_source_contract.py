@@ -133,7 +133,8 @@ def test_f3_commit_primitive_revalidates_canonical_setup_signature():
 def test_f3b1_com_rotate_has_explicit_capability_and_session_lifecycle():
     session = _source("rigped_fit_session.py")
 
-    assert "(FitOperation.MOVE, FitOperation.ROTATE)" in session
+    assert "fit_operations_for_role(" in session
+    assert '"awb.com",' in _source("rigped_fit_commands.py")
     assert "class FitRotateGestureBaseline" in session
     assert "active_rotate_gesture: FitRotateGestureBaseline | None" in session
     assert "world_axis: tuple[float, float, float]" in session
@@ -153,11 +154,11 @@ def test_f3b1_com_rotate_keeps_center_compensation_in_pure_command():
 
     start = commands.index("def rotate_fit_part_rig_local")
     block = commands[start:]
-    assert "definition.semantic_key == \"awb.com\"" in commands
+    assert 'if role == "com":' in block
     assert "pivot = _vec_scale(_vec_add(rest.head, rest.tail), 0.5)" in block
     assert "rotate_vector(delta, _vec_sub(rest.head, pivot))" in block
-    assert "local_orientation=new_local_orientation" in block
     assert "attachment_offset=new_attachment" in block
+    assert "local_orientation=new_local_orientation" in block
 
 
 def test_f3b1_figure_rotate_is_xyz_only_and_never_calls_native_rotate():
@@ -166,7 +167,7 @@ def test_f3b1_figure_rotate_is_xyz_only_and_never_calls_native_rotate():
     init = _source("__init__.py")
 
     assert 'return "FIGURE", "ROTATE"' in gizmo
-    assert 'if self.mode in {"MOVE", "ROTATE"}' in keymap
+    assert 'if self.mode in {"MOVE", "ROTATE", "SCALE"}' in keymap
     assert "BAW_OT_figure_fit_rotate_axis" in init
     assert '("FIGURE", BAW_OT_figure_fit_rotate_axis.bl_idname)' in gizmo
     assert 'if route == "FIGURE"\n                else ("X", "Y", "Z", "VIEW", "FREE")' in gizmo
@@ -179,3 +180,29 @@ def test_f3b1_figure_rotate_is_xyz_only_and_never_calls_native_rotate():
     assert '("Z", "Z", "Rotate around Z")' in block
     assert "bpy.ops.transform.rotate" not in block
     assert "apply_fit_rotate_preview" in block
+
+
+def test_f3_completion_scale_route_is_semantic_and_registered():
+    session = _source("rigped_fit_session.py")
+    gizmo = _source("global_transform_gizmo.py")
+    keymap = _source("viewport_keymap.py")
+    init = _source("__init__.py")
+    commands = _source("rigped_fit_commands.py")
+
+    assert "def fit_figure_scale_available" in session
+    assert "class FitScaleGestureBaseline" in session
+    assert "def begin_fit_scale_gesture" in session
+    assert "def apply_fit_scale_preview" in session
+    assert "def commit_fit_scale_gesture" in session
+    assert "def cancel_fit_scale_gesture" in session
+    assert 'return "FIGURE", "SCALE"' in gizmo
+    assert "class BAW_OT_figure_fit_scale_axis" in gizmo
+    assert '("FIGURE", BAW_OT_figure_fit_scale_axis.bl_idname)' in gizmo
+    assert "BAW_OT_figure_fit_scale_axis" in init
+    assert 'if self.mode in {"MOVE", "ROTATE", "SCALE"}' in keymap
+    assert "set_fit_orientation_mode(context, \"LOCAL\")" in keymap
+    assert "def scale_fit_part_local" in commands
+    assert "bpy.ops.transform.resize" not in gizmo[
+        gizmo.index("class BAW_OT_figure_fit_scale_axis") :
+        gizmo.index("class BAW_GT_free_rotate_disk")
+    ]

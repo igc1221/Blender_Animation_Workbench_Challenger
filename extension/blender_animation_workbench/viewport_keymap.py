@@ -1685,12 +1685,14 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
             deactivate_rigped_semantic_tool(context)
             context.space_data.show_gizmo = True
             _hide_native_tool_gizmo(context)
-            if self.mode in {"MOVE", "ROTATE"}:
+            if self.mode in {"MOVE", "ROTATE", "SCALE"}:
                 if not _activate_awb_transform_workspace_tool(context, self.mode):
                     set_fit_transform_mode(context, "NONE")
                     return {"CANCELLED"}
                 set_fit_transform_mode(context, self.mode)
-                if fit_mode_before == self.mode:
+                if self.mode == "SCALE":
+                    set_fit_orientation_mode(context, "LOCAL")
+                elif fit_mode_before == self.mode:
                     current = fit_orientation_mode(context)
                     set_fit_orientation_mode(
                         context,

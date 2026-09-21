@@ -11,16 +11,18 @@ from .character_metadata import resolve_character
 from .rigped_fit_commands import (
     FitCommandError,
     fit_move_supported,
+    fit_operations_for_role,
     fit_rotate_supported,
+    fit_scale_supported,
     move_fit_part_rig_local,
     rotate_fit_part_rig_local,
+    scale_fit_part_local,
 )
 from .rigped_fit_policy import FitSessionToken
 from .rigped_fit_runtime import validate_fit_runtime_session
 from .rigped_fit_state import (
     FitDocument,
     FitDraft,
-    FitOperation,
     FitPartKind,
     FitRestPartSnapshot,
     FitStateError,
@@ -64,6 +66,7 @@ class FitSemanticSession:
     preview_serial: int = 0
     active_move_gesture: FitMoveGestureBaseline | None = None
     active_rotate_gesture: FitRotateGestureBaseline | None = None
+    active_scale_gesture: FitScaleGestureBaseline | None = None
 
 
 _SESSIONS: dict[int, FitSemanticSession] = {}
@@ -122,6 +125,30 @@ class FitSemanticRotateReceipt:
     changed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class FitScaleGestureBaseline:
+    part_id: str
+    draft: FitDraft
+    geometry: FitBodyGeometrySnapshot
+    revision: int
+    preview_serial: int
+    matrix_signature: tuple[float, ...]
+    selected_part_ids: tuple[str, ...]
+    active_part_id: str
+    axes: str
+
+
+@dataclass(frozen=True, slots=True)
+class FitSemanticScaleReceipt:
+    part_id: str
+    revision_before: int
+    revision_after: int
+    preview_serial: int
+    axes: str
+    factor: float
+    changed: bool
+
+
 def _safe_pointer(value) -> int | None:
     if value is None:
         return None
@@ -174,9 +201,18 @@ def _primary_rest_snapshots(scene, character_id: str):
         raise FitSemanticSessionError("FIT_F2_NO_PRIMARY_PARTS")
 
     bone_to_binding = {bone.name: binding.binding_id for binding, _resolved, bone in primary}
+    semantic_by_binding = {
+        str(binding.binding_id): str(binding.semantic_key)
+        for binding, _resolved, _bone in primary
+    }
     snapshots = []
     for binding, _resolved, bone in primary:
         parent_id = bone_to_binding.get(bone.parent.name) if bone.parent is not None else None
+        parent_semantic_key = (
+            semantic_by_binding.get(str(parent_id))
+            if parent_id is not None
+            else None
+        )
         orientation = bone.matrix_local.to_quaternion().normalized()
         snapshots.append(
             FitRestPartSnapshot(
@@ -195,10 +231,9 @@ def _primary_rest_snapshots(scene, character_id: str):
                     if str(binding.semantic_key) == "awb.com"
                     else FitPartKind.BONE
                 ),
-                allowed_operations=(
-                    (FitOperation.MOVE, FitOperation.ROTATE)
-                    if str(binding.semantic_key) == "awb.com"
-                    else ()
+                allowed_operations=fit_operations_for_role(
+                    str(binding.semantic_key),
+                    parent_semantic_key=parent_semantic_key,
                 ),
                 name_hint=str(bone.name),
             )
@@ -554,6 +589,23 @@ def fit_figure_rotate_available(context) -> bool:
     )
 
 
+def fit_figure_scale_available(context) -> bool:
+    session = fit_semantic_session(context)
+    if session is None or validate_fit_semantic_snapshot_access(context, session):
+        return False
+    try:
+        _frozen_world3(session)
+    except FitSemanticSessionError:
+        return False
+    if len(session.selected_part_ids) != 1:
+        return False
+    definition = _active_part_definition(session)
+    return bool(
+        definition is not None
+        and fit_scale_supported(session.draft, definition.part_id)
+    )
+
+
 def fit_active_part_world_pivot_axes(
     context,
     *,
@@ -658,7 +710,11 @@ def begin_fit_move_gesture(context, *, part_id: str) -> FitMoveGestureBaseline:
     issues = validate_fit_semantic_session(context, session)
     if issues:
         raise FitSemanticSessionError(issues[0])
-    if session.active_move_gesture is not None or session.active_rotate_gesture is not None:
+    if (
+        session.active_move_gesture is not None
+        or session.active_rotate_gesture is not None
+        or session.active_scale_gesture is not None
+    ):
         raise FitSemanticSessionError("FIT_F3_GESTURE_ALREADY_ACTIVE")
     part_id = str(part_id)
     selected_part_ids = _ordered_selected_part_ids(session)
@@ -795,7 +851,11 @@ def begin_fit_rotate_gesture(
     issues = validate_fit_semantic_session(context, session)
     if issues:
         raise FitSemanticSessionError(issues[0])
-    if session.active_move_gesture is not None or session.active_rotate_gesture is not None:
+    if (
+        session.active_move_gesture is not None
+        or session.active_rotate_gesture is not None
+        or session.active_scale_gesture is not None
+    ):
         raise FitSemanticSessionError("FIT_F3_GESTURE_ALREADY_ACTIVE")
     part_id = str(part_id)
     selected_part_ids = _ordered_selected_part_ids(session)
@@ -932,6 +992,150 @@ def cancel_fit_rotate_gesture(
     session.selected_part_ids = set(gesture.selected_part_ids)
     session.active_part_id = gesture.active_part_id
     session.active_rotate_gesture = None
+    if context.area is not None:
+        context.area.tag_redraw()
+    return True
+
+
+def begin_fit_scale_gesture(
+    context,
+    *,
+    part_id: str,
+    axes: str,
+) -> FitScaleGestureBaseline:
+    session = fit_semantic_session(context)
+    if session is None:
+        raise FitSemanticSessionError("FIT_F3_SESSION_MISSING")
+    issues = validate_fit_semantic_session(context, session)
+    if issues:
+        raise FitSemanticSessionError(issues[0])
+    if (
+        session.active_move_gesture is not None
+        or session.active_rotate_gesture is not None
+        or session.active_scale_gesture is not None
+    ):
+        raise FitSemanticSessionError("FIT_F3_GESTURE_ALREADY_ACTIVE")
+    part_id = str(part_id)
+    selected_part_ids = _ordered_selected_part_ids(session)
+    if selected_part_ids != (part_id,) or session.active_part_id != part_id:
+        raise FitSemanticSessionError("FIT_F3_SCALE_SELECTION_INVALID")
+    if not fit_scale_supported(session.draft, part_id):
+        raise FitSemanticSessionError("FIT_F3_SCALE_UNSUPPORTED_PART")
+    axis_set = set(str(axes).upper())
+    if not axis_set or not axis_set.issubset({"X", "Y", "Z"}):
+        raise FitSemanticSessionError("FIT_F3_SCALE_AXIS_INVALID")
+    normalized_axes = "".join(axis for axis in "XYZ" if axis in axis_set)
+    _frozen_world3(session)
+    gesture = FitScaleGestureBaseline(
+        part_id=part_id,
+        draft=session.draft,
+        geometry=session.geometry,
+        revision=int(session.revision),
+        preview_serial=int(session.preview_serial),
+        matrix_signature=session.matrix_signature,
+        selected_part_ids=selected_part_ids,
+        active_part_id=part_id,
+        axes=normalized_axes,
+    )
+    session.active_scale_gesture = gesture
+    return gesture
+
+
+def _require_scale_gesture(
+    context,
+    gesture: FitScaleGestureBaseline,
+) -> FitSemanticSession:
+    session = fit_semantic_session(context)
+    if session is None:
+        raise FitSemanticSessionError("FIT_F3_SESSION_MISSING")
+    if session.active_scale_gesture is not gesture:
+        raise FitSemanticSessionError("FIT_F3_GESTURE_STALE")
+    issues = validate_fit_semantic_session(context, session)
+    if issues:
+        raise FitSemanticSessionError(issues[0])
+    if session.matrix_signature != gesture.matrix_signature:
+        raise FitSemanticSessionError("FIT_F3_OBJECT_MATRIX_CHANGED")
+    if _ordered_selected_part_ids(session) != gesture.selected_part_ids:
+        raise FitSemanticSessionError("FIT_F3_SCALE_SELECTION_CHANGED")
+    if session.active_part_id != gesture.active_part_id:
+        raise FitSemanticSessionError("FIT_F3_SCALE_SELECTION_CHANGED")
+    return session
+
+
+def apply_fit_scale_preview(
+    context,
+    *,
+    gesture: FitScaleGestureBaseline,
+    factor: float,
+) -> FitSemanticScaleReceipt:
+    session = _require_scale_gesture(context, gesture)
+    scale = float(factor)
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise FitSemanticSessionError("FIT_F3_SCALE_FACTOR_INVALID")
+    try:
+        candidate = scale_fit_part_local(
+            gesture.draft,
+            gesture.part_id,
+            gesture.axes,
+            scale,
+        )
+    except FitCommandError as exc:
+        raise FitSemanticSessionError(str(exc)) from exc
+    changed = _rebuild_preview_geometry(context, session, candidate)
+    return FitSemanticScaleReceipt(
+        part_id=gesture.part_id,
+        revision_before=gesture.revision,
+        revision_after=int(session.revision),
+        preview_serial=int(session.preview_serial),
+        axes=gesture.axes,
+        factor=scale,
+        changed=changed,
+    )
+
+
+def commit_fit_scale_gesture(
+    context,
+    gesture: FitScaleGestureBaseline,
+) -> bool:
+    session = _require_scale_gesture(context, gesture)
+    changed = session.draft != gesture.draft
+    if changed:
+        session.revision = gesture.revision + 1
+        session.preview_serial += 1
+        session.geometry = _build_geometry(
+            session.character_id,
+            session.revision,
+            session.preview_serial,
+            session.geometry.rig_pointer,
+            Matrix(session.matrix_world_frozen),
+            session.document,
+            session.draft,
+        )
+    else:
+        session.draft = gesture.draft
+        session.geometry = gesture.geometry
+        session.revision = gesture.revision
+        session.preview_serial = gesture.preview_serial
+    session.active_scale_gesture = None
+    if context.area is not None:
+        context.area.tag_redraw()
+    return changed
+
+
+def cancel_fit_scale_gesture(
+    context,
+    gesture: FitScaleGestureBaseline,
+) -> bool:
+    session = fit_semantic_session(context)
+    if session is None or session.active_scale_gesture is not gesture:
+        return False
+    session.draft = gesture.draft
+    session.geometry = gesture.geometry
+    session.revision = gesture.revision
+    session.preview_serial = gesture.preview_serial
+    session.selected_part_ids = set(gesture.selected_part_ids)
+    session.active_part_id = gesture.active_part_id
+    session.active_scale_gesture = None
     if context.area is not None:
         context.area.tag_redraw()
     return True

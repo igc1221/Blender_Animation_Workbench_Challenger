@@ -24,7 +24,7 @@ class FitPartKind(StrEnum):
 
 FIT_BONE_FRAME_CONVENTION = "BLENDER_REST_FRAME_Y_ALONG_BONE_XZ_ENCODE_ROLL_V1"
 FIT_REST_ROUNDTRIP_TOLERANCE = 5e-6
-FIT_STRUCTURE_FIELDS = ("head", "tail", "orientation")
+FIT_STRUCTURE_FIELDS = ("head", "tail", "orientation", "connected")
 FIT_APPEARANCE_FIELDS = ("width", "depth")
 
 
@@ -64,6 +64,8 @@ class FitPartValue:
     length: float | None
     width: float
     depth: float
+    frame_length_scale: float = 1.0
+    connected_override: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,8 +96,9 @@ class FitRestPartSnapshot:
     Bone.matrix_local. width/depth map to native B-Bone X/Z display dimensions.
 
     FRAME is for semantic frames such as COM. Its native carrier-bone length is
-    frozen into the part definition and is not an editable draft degree of freedom.
-    Object/world transform support is deliberately owned by the later runtime adapter.
+    frozen into the part definition as the base size; `frame_length_scale` is the
+    semantic local-Y frame-size multiplier and never means Armature Object scale.
+    Object/world transform support is deliberately owned by the runtime adapter.
     """
 
     binding_id: str
@@ -318,7 +321,13 @@ def validate_fit_draft(draft: FitDraft) -> None:
 
     for part in ordered:
         value = values[part.part_id]
-        numeric_values = (*value.attachment_offset, *value.local_orientation, value.width, value.depth)
+        numeric_values = (
+            *value.attachment_offset,
+            *value.local_orientation,
+            value.width,
+            value.depth,
+            value.frame_length_scale,
+        )
         if value.length is not None:
             numeric_values = (*numeric_values, value.length)
         if not _finite(numeric_values):
@@ -326,9 +335,13 @@ def validate_fit_draft(draft: FitDraft) -> None:
         if part.kind is FitPartKind.FRAME:
             if value.length is not None:
                 raise FitStateError("FIT_FRAME_LENGTH_MUST_BE_DERIVED")
+            if value.frame_length_scale <= 0.0:
+                raise FitStateError("FIT_FRAME_LENGTH_SCALE_NONPOSITIVE")
         else:
             if value.length is None or value.length <= 0.0:
                 raise FitStateError("FIT_LENGTH_NONPOSITIVE")
+            if abs(float(value.frame_length_scale) - 1.0) > 1e-9:
+                raise FitStateError("FIT_BONE_FRAME_SCALE_UNEXPECTED")
         if value.width <= 0.0 or value.depth <= 0.0:
             raise FitStateError("FIT_APPEARANCE_NONPOSITIVE")
         if abs(_q_norm(value.local_orientation) - 1.0) > 1e-6:
@@ -337,9 +350,9 @@ def validate_fit_draft(draft: FitDraft) -> None:
     derived = derive_rest_parts(draft, _skip_validation=True)
     derived_map = {part.part_id: part for part in derived}
     for part in ordered:
-        if not part.connected or part.parent_part_id is None:
-            continue
         child = derived_map[part.part_id]
+        if not child.connected or part.parent_part_id is None:
+            continue
         parent = derived_map[part.parent_part_id]
         if not _v_close(
             child.head,
@@ -375,7 +388,7 @@ def derive_rest_parts(
             head = _v_add(parent.head, rotate_vector(parent.orientation, value.attachment_offset))
             orientation = normalize_quaternion(_q_mul(parent.orientation, local_orientation))
         effective_length = (
-            float(part.carrier_length)
+            float(part.carrier_length) * float(value.frame_length_scale)
             if part.kind is FitPartKind.FRAME
             else float(value.length)
         )
@@ -383,7 +396,11 @@ def derive_rest_parts(
         item = DerivedRestPart(
             part_id=part.part_id,
             parent_part_id=part.parent_part_id,
-            connected=part.connected,
+            connected=(
+                bool(part.connected)
+                if value.connected_override is None
+                else bool(value.connected_override)
+            ),
             head=head,
             tail=tail,
             orientation=orientation,
@@ -593,6 +610,8 @@ def build_rest_mutation_plan(draft: FitDraft) -> RestMutationPlan:
             changed_fields.append("tail")
         if not _quaternion_close(before.orientation, after.orientation):
             changed_fields.append("orientation")
+        if bool(before.connected) != bool(after.connected):
+            changed_fields.append("connected")
         if abs(float(before.width) - float(after.width)) > 1e-9:
             changed_fields.append("width")
         if abs(float(before.depth) - float(after.depth)) > 1e-9:

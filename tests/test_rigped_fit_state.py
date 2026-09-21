@@ -129,6 +129,8 @@ def test_canonical_fit_values_do_not_store_head_tail_or_roll_as_independent_auth
         "length",
         "width",
         "depth",
+        "frame_length_scale",
+        "connected_override",
     }
 
 
@@ -286,7 +288,7 @@ def test_com_frame_separates_semantic_frame_from_native_carrier_length():
 def test_fit_snapshot_pins_blender_rest_frame_and_bbone_appearance_contract():
     assert fit.FIT_BONE_FRAME_CONVENTION == "BLENDER_REST_FRAME_Y_ALONG_BONE_XZ_ENCODE_ROLL_V1"
     assert fit.FIT_REST_ROUNDTRIP_TOLERANCE == pytest.approx(5e-6)
-    assert fit.FIT_STRUCTURE_FIELDS == ("head", "tail", "orientation")
+    assert fit.FIT_STRUCTURE_FIELDS == ("head", "tail", "orientation", "connected")
     assert fit.FIT_APPEARANCE_FIELDS == ("width", "depth")
     fields = {field.name for field in dataclasses.fields(fit.FitRestPartSnapshot)}
     assert {"head", "tail", "orientation", "width", "depth", "connected", "parent_binding_id"} <= fields

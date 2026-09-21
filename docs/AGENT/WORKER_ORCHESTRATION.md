@@ -8,7 +8,9 @@
 >
 > **STRICT REVIEW COUNT:** each non-trivial slice has exactly **1 PRE round** and exactly **1 POST round**. Never repeat reviewer rounds until they report zero findings, and never add a same-slice closure/re-review round. Main owns all finding disposition and closes fixes with regression/runtime evidence after the single POST round.
 
-> **MANDATORY PROGRESSIVE-SKILL GATE:** every substantive Luna dispatch must carry the relevant AWB progressive skills explicitly. Main first inspects the skill catalog metadata, selects the smallest relevant skill set, and passes it through `awb_skills`. Empty skill injection requires an explicit no-relevant-skill rationale. Worker-learning APPLY decisions are not archival notes: an APPLYed lesson must be exercised by including its target skill on the next relevant worker task. External Web challengers use their bridge-selected skills, but Main must verify the resulting skill/evidence packet is appropriate before the review can satisfy a PRE/POST gate.
+> **REVIEW PROVIDER POLICY:** PRE/POST review and verification use External Web Bridge providers (DeepSeek / Qwen / GLM), at least 2 independent providers per round. Luna is not the default reviewer/verifier; use Luna for implementation/coding tasks where its throughput is useful. Superseded Luna review requests do not satisfy or block the replacement web-review gate after an explicit provider-policy change; clean those lanes when available.
+>
+> **MANDATORY PROGRESSIVE-SKILL GATE:** every substantive Luna **implementation** dispatch must carry the relevant AWB progressive skills explicitly. Main first inspects the skill catalog metadata, selects the smallest relevant skill set, and passes it through `awb_skills`. Empty skill injection requires an explicit no-relevant-skill rationale. Worker-learning APPLY decisions are not archival notes: an APPLYed lesson must be exercised by including its target skill on the next relevant Luna implementation task. External Web reviewers use their bridge-selected skills, but Main must verify the resulting skill/evidence packet is appropriate before the review can satisfy a PRE/POST gate.
 
 ## 1. Core rule
 
@@ -67,9 +69,9 @@ Current routing priority:
 
 ```text
 1. Main FAST PATH for tiny low-ambiguity work.
-2. Luna High pool: 2 lanes normally; optional third High burst lane only for real low-overlap parallelism.
-3. External Web challenger: DeepSeek / Qwen / GLM are the active comparison set. Until AWB-specific characteristics are established from enough real tasks, rotate them deliberately across PRE/POST/adjacent decision boundaries instead of favoring one provider.
-4. Luna Max: one exclusive deep-reasoning lane for genuinely difficult reasoning. Drain High first; High and Max never overlap.
+2. Luna High pool: implementation/coding only by default; 2 lanes normally, optional third High burst lane only for real low-overlap implementation work.
+3. External Web review pool: DeepSeek / Qwen / GLM provide PRE/POST review and verification slots; use at least 2 independent providers per review round.
+4. Luna Max: one exclusive deep-reasoning/implementation lane for genuinely difficult work. Drain High first; High and Max never overlap. Do not use it for routine PRE/POST review.
 5. Gemini API: MANUAL OPTIONAL ONLY. Never auto-route or depend on it; use only when Main explicitly chooses expendable free capacity.
 6. Antigravity: dormant capacity only; preserve integration, do not assign normal work.
 7. Astra: manual high-value architecture escalation.

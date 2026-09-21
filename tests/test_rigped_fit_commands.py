@@ -37,8 +37,11 @@ commands_spec.loader.exec_module(commands)
 FitCommandError = commands.FitCommandError
 fit_move_supported = commands.fit_move_supported
 fit_rotate_supported = commands.fit_rotate_supported
+fit_scale_supported = commands.fit_scale_supported
+fit_operations_for_role = commands.fit_operations_for_role
 move_fit_part_rig_local = commands.move_fit_part_rig_local
 rotate_fit_part_rig_local = commands.rotate_fit_part_rig_local
+scale_fit_part_local = commands.scale_fit_part_local
 FitOperation = fit.FitOperation
 FitPartKind = fit.FitPartKind
 FitRestPartSnapshot = fit.FitRestPartSnapshot
@@ -81,7 +84,7 @@ def _draft():
                 width=0.2,
                 depth=0.2,
                 kind=FitPartKind.FRAME,
-                allowed_operations=(FitOperation.MOVE, FitOperation.ROTATE),
+                allowed_operations=(FitOperation.MOVE, FitOperation.ROTATE, FitOperation.SCALE),
                 name_hint="COM",
             ),
             FitRestPartSnapshot(
@@ -95,6 +98,7 @@ def _draft():
                 orientation=(1.0, 0.0, 0.0, 0.0),
                 width=0.2,
                 depth=0.15,
+                allowed_operations=(FitOperation.MOVE, FitOperation.ROTATE, FitOperation.SCALE),
                 name_hint="Pelvis",
             ),
         ),
@@ -126,14 +130,12 @@ def test_com_move_translates_com_subtree_only():
     assert after["pelvis"].orientation == pytest.approx(before["pelvis"].orientation)
 
 
-def test_com_move_is_the_only_first_slice_move_capability():
+def test_pelvis_move_is_explicit_consumed_noop():
     draft = _draft()
 
     assert fit_move_supported(draft, "com")
-    assert not fit_move_supported(draft, "pelvis")
-
-    with pytest.raises(FitCommandError, match="FIT_F3_MOVE_UNSUPPORTED_PART"):
-        move_fit_part_rig_local(draft, "pelvis", (0.1, 0.0, 0.0))
+    assert fit_move_supported(draft, "pelvis")
+    assert move_fit_part_rig_local(draft, "pelvis", (0.1, 0.0, 0.0)) is draft
 
 
 def test_zero_delta_is_exact_noop():
@@ -142,11 +144,11 @@ def test_zero_delta_is_exact_noop():
     assert move_fit_part_rig_local(draft, "com", (0.0, 0.0, 0.0)) is draft
 
 
-def test_zero_delta_still_rejects_unsupported_part():
+def test_unsupported_root_move_fails_even_for_zero_delta():
     draft = _draft()
 
     with pytest.raises(FitCommandError, match="FIT_F3_MOVE_UNSUPPORTED_PART"):
-        move_fit_part_rig_local(draft, "pelvis", (0.0, 0.0, 0.0))
+        move_fit_part_rig_local(draft, "root", (0.0, 0.0, 0.0))
 
 
 def test_com_rotate_keeps_center_fixed_and_rotates_subtree_only():
@@ -184,14 +186,15 @@ def test_com_rotate_keeps_center_fixed_and_rotates_subtree_only():
     assert after_values["pelvis"] == before_values["pelvis"]
 
 
-def test_com_rotate_is_the_only_first_slice_rotate_capability():
+def test_pelvis_rotate_is_capability_enabled_but_root_is_not():
     draft = _draft()
 
     assert fit_rotate_supported(draft, "com")
-    assert not fit_rotate_supported(draft, "pelvis")
+    assert fit_rotate_supported(draft, "pelvis")
+    assert not fit_rotate_supported(draft, "root")
 
     with pytest.raises(FitCommandError, match="FIT_F3_ROTATE_UNSUPPORTED_PART"):
-        rotate_fit_part_rig_local(draft, "pelvis", (1.0, 0.0, 0.0, 0.0))
+        rotate_fit_part_rig_local(draft, "root", (1.0, 0.0, 0.0, 0.0))
 
 
 def test_identity_rotate_is_exact_noop_after_capability_check():
@@ -247,3 +250,241 @@ def test_com_rotate_parent_local_conversion_with_rotated_parent():
         (half, 0.0, 0.0, half)
     )
     assert after_values["pelvis"] == before_values["pelvis"]
+
+
+def _leg_draft():
+    _document, draft = extract_fit_document(
+        character_id="char",
+        profile_id="rigped",
+        schema_version=1,
+        setup_revision=1,
+        setup_signature="setup",
+        owner_data_identity=("obj", "data"),
+        animation_footprint_digest="anim",
+        snapshots=(
+            FitRestPartSnapshot(
+                binding_id="root",
+                semantic_key="awb.root",
+                side="CENTER",
+                parent_binding_id=None,
+                connected=False,
+                head=(0.0, 0.0, 0.0),
+                tail=(0.0, 1.0, 0.0),
+                orientation=(1.0, 0.0, 0.0, 0.0),
+                width=0.1,
+                depth=0.1,
+                name_hint="Root",
+            ),
+            FitRestPartSnapshot(
+                binding_id="com",
+                semantic_key="awb.com",
+                side="CENTER",
+                parent_binding_id="root",
+                connected=False,
+                head=(0.0, 1.0, 0.0),
+                tail=(0.0, 1.5, 0.0),
+                orientation=(1.0, 0.0, 0.0, 0.0),
+                width=0.2,
+                depth=0.2,
+                kind=FitPartKind.FRAME,
+                allowed_operations=fit_operations_for_role("awb.com"),
+                name_hint="COM",
+            ),
+            FitRestPartSnapshot(
+                binding_id="pelvis",
+                semantic_key="awb.pelvis",
+                side="CENTER",
+                parent_binding_id="com",
+                connected=False,
+                head=(0.0, 1.0, 0.0),
+                tail=(0.0, 1.6, 0.0),
+                orientation=(1.0, 0.0, 0.0, 0.0),
+                width=0.3,
+                depth=0.2,
+                allowed_operations=fit_operations_for_role("awb.pelvis"),
+                name_hint="Pelvis",
+            ),
+            FitRestPartSnapshot(
+                binding_id="thigh_l",
+                semantic_key="awb.thigh",
+                side="LEFT",
+                parent_binding_id="pelvis",
+                connected=False,
+                head=(0.5, 1.0, 0.0),
+                tail=(0.5, 0.0, 0.0),
+                orientation=(0.0, 1.0, 0.0, 0.0),
+                width=0.15,
+                depth=0.15,
+                allowed_operations=fit_operations_for_role("awb.thigh"),
+                name_hint="Thigh.L",
+            ),
+            FitRestPartSnapshot(
+                binding_id="calf_l",
+                semantic_key="awb.calf",
+                side="LEFT",
+                parent_binding_id="thigh_l",
+                connected=True,
+                head=(0.5, 0.0, 0.0),
+                tail=(1.5, 0.0, 0.0),
+                orientation=(
+                    math.sqrt(0.5),
+                    0.0,
+                    0.0,
+                    -math.sqrt(0.5),
+                ),
+                width=0.12,
+                depth=0.12,
+                allowed_operations=fit_operations_for_role("awb.calf"),
+                name_hint="Calf.L",
+            ),
+            FitRestPartSnapshot(
+                binding_id="thigh_r",
+                semantic_key="awb.thigh",
+                side="RIGHT",
+                parent_binding_id="pelvis",
+                connected=False,
+                head=(-0.5, 1.0, 0.0),
+                tail=(-0.5, 0.0, 0.0),
+                orientation=(0.0, 1.0, 0.0, 0.0),
+                width=0.15,
+                depth=0.15,
+                allowed_operations=fit_operations_for_role("awb.thigh"),
+                name_hint="Thigh.R",
+            ),
+            FitRestPartSnapshot(
+                binding_id="calf_r",
+                semantic_key="awb.calf",
+                side="RIGHT",
+                parent_binding_id="thigh_r",
+                connected=True,
+                head=(-0.5, 0.0, 0.0),
+                tail=(-0.5, -1.0, 0.0),
+                orientation=(0.0, 1.0, 0.0, 0.0),
+                width=0.12,
+                depth=0.12,
+                allowed_operations=fit_operations_for_role("awb.calf"),
+                name_hint="Calf.R",
+            ),
+        ),
+    )
+    return draft
+
+
+def _length(part):
+    return math.sqrt(
+        sum((float(part.tail[i]) - float(part.head[i])) ** 2 for i in range(3))
+    )
+
+
+def test_role_capability_matrix_is_explicit_and_unknown_fails_closed():
+    assert fit_operations_for_role("awb.com") == (
+        FitOperation.MOVE,
+        FitOperation.ROTATE,
+        FitOperation.SCALE,
+    )
+    assert fit_operations_for_role(
+        "awb.spine",
+        parent_semantic_key="awb.spine",
+    ) == (
+        FitOperation.MOVE,
+        FitOperation.ROTATE,
+        FitOperation.SCALE,
+    )
+    assert fit_operations_for_role("awb.spine") == (
+        FitOperation.ROTATE,
+        FitOperation.SCALE,
+    )
+    assert fit_operations_for_role("awb.unknown") == ()
+
+
+def test_com_scale_uses_local_axes_without_native_object_scale_semantics():
+    draft = _draft()
+    before = _rest_map(draft)
+    before_values = {record.part_id: record.value for record in draft.values}
+
+    scaled = scale_fit_part_local(draft, "com", "XYZ", 1.5)
+    after = _rest_map(scaled)
+    after_values = {record.part_id: record.value for record in scaled.values}
+
+    assert after["com"].head == pytest.approx(before["com"].head)
+    assert _length(after["com"]) == pytest.approx(_length(before["com"]) * 1.5)
+    assert after["com"].width == pytest.approx(before["com"].width * 1.5)
+    assert after["com"].depth == pytest.approx(before["com"].depth * 1.5)
+    tail_delta = tuple(
+        after["com"].tail[i] - before["com"].tail[i] for i in range(3)
+    )
+    assert after["pelvis"].head == pytest.approx(
+        tuple(before["pelvis"].head[i] + tail_delta[i] for i in range(3))
+    )
+    assert after["pelvis"].tail == pytest.approx(
+        tuple(before["pelvis"].tail[i] + tail_delta[i] for i in range(3))
+    )
+    assert after_values["pelvis"] != before_values["pelvis"]
+    assert after_values["com"].frame_length_scale == pytest.approx(1.5)
+
+
+def test_pelvis_x_scale_moves_leg_sockets_rigidly_and_preserves_lengths():
+    draft = _leg_draft()
+    before = _rest_map(draft)
+    scaled = scale_fit_part_local(draft, "pelvis", "X", 1.5)
+    after = _rest_map(scaled)
+
+    assert after["pelvis"].width == pytest.approx(before["pelvis"].width * 1.5)
+    assert after["thigh_l"].head[0] == pytest.approx(0.75)
+    assert after["thigh_r"].head[0] == pytest.approx(-0.75)
+    for part_id in ("thigh_l", "calf_l", "thigh_r", "calf_r"):
+        assert _length(after[part_id]) == pytest.approx(_length(before[part_id]))
+    assert tuple(
+        after["calf_l"].head[i] - before["calf_l"].head[i] for i in range(3)
+    ) == pytest.approx((0.25, 0.0, 0.0))
+    assert tuple(
+        after["calf_r"].head[i] - before["calf_r"].head[i] for i in range(3)
+    ) == pytest.approx((-0.25, 0.0, 0.0))
+
+
+def test_structural_y_scale_reanchors_connected_descendants_without_length_loss():
+    draft = _leg_draft()
+    before = _rest_map(draft)
+    scaled = scale_fit_part_local(draft, "thigh_l", "Y", 1.25)
+    after = _rest_map(scaled)
+
+    assert _length(after["thigh_l"]) == pytest.approx(
+        _length(before["thigh_l"]) * 1.25
+    )
+    assert after["calf_l"].head == pytest.approx(after["thigh_l"].tail)
+    assert _length(after["calf_l"]) == pytest.approx(_length(before["calf_l"]))
+    assert after["calf_l"].orientation == pytest.approx(
+        before["calf_l"].orientation
+    )
+
+
+def test_two_bone_calf_move_preserves_segment_lengths():
+    draft = _leg_draft()
+    before = _rest_map(draft)
+    moved = move_fit_part_rig_local(draft, "calf_l", (0.2, 0.15, 0.0))
+    after = _rest_map(moved)
+
+    assert _length(after["thigh_l"]) == pytest.approx(_length(before["thigh_l"]))
+    assert _length(after["calf_l"]) == pytest.approx(_length(before["calf_l"]))
+    assert after["calf_l"].head == pytest.approx(after["thigh_l"].tail)
+    assert after["calf_l"].tail != pytest.approx(before["calf_l"].tail)
+
+
+def test_pelvis_rotation_is_isolated_from_leg_absolute_pose():
+    draft = _leg_draft()
+    before = _rest_map(draft)
+    half = math.sqrt(0.5)
+
+    rotated = rotate_fit_part_rig_local(
+        draft,
+        "pelvis",
+        (half, 0.0, 0.0, half),
+    )
+    after = _rest_map(rotated)
+
+    assert after["pelvis"].orientation != pytest.approx(
+        before["pelvis"].orientation
+    )
+    for part_id in ("thigh_l", "calf_l", "thigh_r", "calf_r"):
+        assert after[part_id].head == pytest.approx(before[part_id].head)
+        assert after[part_id].tail == pytest.approx(before[part_id].tail)
