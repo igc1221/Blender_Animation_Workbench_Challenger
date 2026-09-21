@@ -202,6 +202,21 @@ def test_validation_rejects_non_normalized_orientation_and_nonpositive_dimension
             )
 
 
+
+def test_connected_round_trip_accepts_only_measured_float_scale_jitter():
+    root = _snapshot("root-binding")
+    child = _snapshot(
+        "child-binding",
+        parent="root-binding",
+        connected=True,
+        head=(0.0, 1.0 + 2e-6, 0.0),
+        tail=(0.0, 2.0 + 2e-6, 0.0),
+    )
+    document, draft = _document(root, child)
+    assert document.parts
+    assert fit.derive_rest_parts(draft)
+
+
 def test_validation_rejects_topology_cycle_and_connected_attachment_mismatch():
     root = _snapshot("root-binding")
     child = _snapshot(
@@ -270,6 +285,7 @@ def test_com_frame_separates_semantic_frame_from_native_carrier_length():
 
 def test_fit_snapshot_pins_blender_rest_frame_and_bbone_appearance_contract():
     assert fit.FIT_BONE_FRAME_CONVENTION == "BLENDER_REST_FRAME_Y_ALONG_BONE_XZ_ENCODE_ROLL_V1"
+    assert fit.FIT_REST_ROUNDTRIP_TOLERANCE == pytest.approx(5e-6)
     assert fit.FIT_STRUCTURE_FIELDS == ("head", "tail", "orientation")
     assert fit.FIT_APPEARANCE_FIELDS == ("width", "depth")
     fields = {field.name for field in dataclasses.fields(fit.FitRestPartSnapshot)}

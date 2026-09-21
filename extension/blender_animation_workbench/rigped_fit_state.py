@@ -23,6 +23,7 @@ class FitPartKind(StrEnum):
 
 
 FIT_BONE_FRAME_CONVENTION = "BLENDER_REST_FRAME_Y_ALONG_BONE_XZ_ENCODE_ROLL_V1"
+FIT_REST_ROUNDTRIP_TOLERANCE = 5e-6
 FIT_STRUCTURE_FIELDS = ("head", "tail", "orientation")
 FIT_APPEARANCE_FIELDS = ("width", "depth")
 
@@ -340,7 +341,11 @@ def validate_fit_draft(draft: FitDraft) -> None:
             continue
         child = derived_map[part.part_id]
         parent = derived_map[part.parent_part_id]
-        if not _v_close(child.head, parent.tail):
+        if not _v_close(
+            child.head,
+            parent.tail,
+            tolerance=FIT_REST_ROUNDTRIP_TOLERANCE,
+        ):
             raise FitStateError("FIT_CONNECTED_ATTACHMENT_MISMATCH")
 
     if topology_fingerprint(parts) != document.baseline.topology_fingerprint:
@@ -531,9 +536,17 @@ def extract_fit_document(
 
     for part in derived:
         source = by_id[part.part_id]
-        if not _v_close(part.head, tuple(float(value) for value in source.head)):
+        if not _v_close(
+            part.head,
+            tuple(float(value) for value in source.head),
+            tolerance=FIT_REST_ROUNDTRIP_TOLERANCE,
+        ):
             raise FitStateError("FIT_ROUNDTRIP_HEAD_MISMATCH")
-        if not _v_close(part.tail, tuple(float(value) for value in source.tail)):
+        if not _v_close(
+            part.tail,
+            tuple(float(value) for value in source.tail),
+            tolerance=FIT_REST_ROUNDTRIP_TOLERANCE,
+        ):
             raise FitStateError("FIT_ROUNDTRIP_TAIL_MISMATCH")
         if not _quaternion_close(part.orientation, source.orientation):
             raise FitStateError("FIT_ROUNDTRIP_ORIENTATION_MISMATCH")
