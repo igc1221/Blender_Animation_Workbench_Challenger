@@ -1,4 +1,4 @@
-# Phase 4 Rigped — Stabilization + Sliding Integrated Execution Plan
+﻿# Phase 4 Rigped — Stabilization + Sliding Integrated Execution Plan
 
 > Updated: **2026-09-20 00:00 KST**
 > Status: **ACTIVE EXECUTION PLAN / CHALLENGER-REVIEWED**
@@ -17,8 +17,8 @@
 E1 through E6 are **USER PASS / CLOSED**.
 
 E6 closure authority:
-- `debug/사용자최종테스트 리플레이/E6/evidence.json`
-- `debug/사용자최종테스트 리플레이/E6/README.md`
+- `debug/user_final_tests/E6/evidence.json`
+- `debug/user_final_tests/E6/README.md`
 - final regression/user gesture: `12_four_limb_nonidentity_inverse_left_knee_regression.json`
 - final accepted replay: `13_four_limb_nonidentity_user_final.json`
 - static gate: **297 passed, Ruff 0**
@@ -61,7 +61,7 @@ PRE-IMPLEMENTATION CHALLENGER
 
 After the user's first debug run has produced logs/capture, Main may use the resulting Flight Recorder/replay artifact repeatedly to diagnose and verify fixes without asking the user to manually recreate the same gesture. Replay verification is a debugging/verification loop derived from the user's real run, not a substitute for the user's final confirmation.
 
-Each item’s user-confirmed final replay is frozen under `debug/사용자최종테스트 리플레이/<ITEM>/user_final_replay.json`. `debug/awb_replay_latest.json` remains a rolling capture and must not replace an existing frozen final replay unless the user-test behavior itself changes. After a code fix, Main reuses the frozen item replay on a clean baseline before asking the user to repeat any already-captured gesture.
+Each item’s user-confirmed final replay is frozen under `debug/user_final_tests/<ITEM>/user_final_replay.json`. `debug/awb_replay_latest.json` remains a rolling capture and must not replace an existing frozen final replay unless the user-test behavior itself changes. After a code fix, Main reuses the frozen item replay on a clean baseline before asking the user to repeat any already-captured gesture.
 
 A challenger may reject a design or identify missing proof, but **user-observed Blender behavior + Flight Recorder/replay evidence + frozen product contract + current source remain the acceptance authority**.
 
@@ -1014,7 +1014,7 @@ BLENDER API/STATE: USER-FIRST fresh Blender 5.2.1 session 9661249eed604aa68218e2
 GUI INPUT/SCREEN: USER PASS. User reported no visible anomaly through repeated four-limb Rotate, single-active/passive-three Rotate, and final overall check.
 UNDO/REDO/CANCEL: ESC cancel on UpperArm.L-only Rotate logged TRANSFORM_CANCEL reason=ESC with active=1 passive=3; user confirmed the active arm returned exactly to pre-gesture pose and passive limbs showed no visible jump/change.
 AUTO OFF: both AWB Auto and native Auto Key were OFF. Post-sequence state inspection showed 116 FCurves / 116 total keys / 116 frame-0 keys / max one frame-0 key per FCurve, exactly matching the preceding four-limb SLIDING C footprint; accepted Rotate gestures created zero additional keys.
-FROZEN REPLAY: debug/사용자최종테스트 리플레이/E5/user_final_replay.json
+FROZEN REPLAY: debug/user_final_tests/E5/user_final_replay.json
 FROZEN REPLAY SHA-256: f7755ff7370ffd073594b74535f98468d3e6e878c25466c80cf7719957edc69c
 OPEN RISK: none blocking E5. E6 still owns straight-limb singularity seed and inheritance-aware native conversion. E7 owns live body/ancestor dependency. Sibling MOVE/FK_MOVE post-write dynamic display rescans are recorded for later ownership hardening unless they become relevant earlier.
 NEXT ITEM ALLOWED: YES — proceed to E6 only.

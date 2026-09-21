@@ -58,6 +58,16 @@ def test_f2_draw_and_pick_share_fitdraft_geometry_snapshot():
     assert "_fit_part_pick_id" in keymap
     assert "_fit_part_box_crossing_ids" in keymap
     assert "FIT_SELECTION_CLICK_RESULT" in keymap
+    assert "FIT_SELECTION_BOX_RESULT" in keymap
+
+
+def test_f2_selection_tool_owns_press_to_release_modal_gesture():
+    keymap = _source("viewport_keymap.py")
+
+    assert '{"type": "LEFTMOUSE", "value": "PRESS"}' in keymap
+    assert '{"type": "LEFTMOUSE", "value": "CLICK_DRAG"}' not in keymap
+    assert 'if event.value != "PRESS":' in keymap
+    assert 'if event.type == "LEFTMOUSE" and event.value == "RELEASE":' in keymap
 
 
 def test_f2_session_first_routing_blocks_native_object_transform_tools():

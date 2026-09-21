@@ -1169,10 +1169,38 @@ def _apply_box_pick(
     # biased in these modes, which made Animate behave differently.
     if mode == "OBJECT":
         if fit_semantic_session(context) is not None:
+            hit_part_ids = _fit_part_box_crossing_ids(context, rect)
             apply_fit_part_selection(
                 context,
-                _fit_part_box_crossing_ids(context, rect),
+                hit_part_ids,
                 action,
+            )
+            session = fit_semantic_session(context)
+            selected_part_ids = ()
+            active_part_id = None
+            fit_revision = None
+            fit_parts = 0
+            if session is not None:
+                selected_part_ids = tuple(
+                    part.part_id
+                    for part in session.geometry.parts
+                    if part.part_id in session.selected_part_ids
+                )
+                active_part_id = session.active_part_id
+                fit_revision = session.revision
+                fit_parts = len(session.geometry.parts)
+            trace_event(
+                "INPUT",
+                "FIT_SELECTION_BOX_RESULT",
+                context=context,
+                source="AWB_SELECT_BOX",
+                action=action,
+                rect=rect,
+                hit_part_ids=hit_part_ids,
+                selected_part_ids=selected_part_ids,
+                active_part_id=active_part_id,
+                fit_revision=fit_revision,
+                fit_parts=fit_parts,
             )
             return {"FINISHED"}
         return _apply_crossing_hits(
@@ -1780,42 +1808,22 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
 _AWB_SELECTION_TOOL_KEYMAP = (
     (
         "baw.awb_select_click",
-        {"type": "LEFTMOUSE", "value": "CLICK"},
+        {"type": "LEFTMOUSE", "value": "PRESS"},
         {"properties": [("action", "SET")]},
     ),
     (
         "baw.awb_select_click",
-        {"type": "LEFTMOUSE", "value": "CLICK", "ctrl": True},
+        {"type": "LEFTMOUSE", "value": "PRESS", "ctrl": True},
         {"properties": [("action", "ADD")]},
     ),
     (
         "baw.awb_select_click",
-        {"type": "LEFTMOUSE", "value": "CLICK", "alt": True},
+        {"type": "LEFTMOUSE", "value": "PRESS", "alt": True},
         {"properties": [("action", "REMOVE")]},
     ),
     (
         "baw.awb_select_click",
-        {"type": "LEFTMOUSE", "value": "CLICK", "shift": True},
-        {"properties": [("action", "SET")]},
-    ),
-    (
-        "baw.awb_select_click",
-        {"type": "LEFTMOUSE", "value": "CLICK_DRAG"},
-        {"properties": [("action", "SET")]},
-    ),
-    (
-        "baw.awb_select_click",
-        {"type": "LEFTMOUSE", "value": "CLICK_DRAG", "ctrl": True},
-        {"properties": [("action", "ADD")]},
-    ),
-    (
-        "baw.awb_select_click",
-        {"type": "LEFTMOUSE", "value": "CLICK_DRAG", "alt": True},
-        {"properties": [("action", "REMOVE")]},
-    ),
-    (
-        "baw.awb_select_click",
-        {"type": "LEFTMOUSE", "value": "CLICK_DRAG", "shift": True},
+        {"type": "LEFTMOUSE", "value": "PRESS", "shift": True},
         {"properties": [("action", "SET")]},
     ),
 )
@@ -2007,10 +2015,7 @@ class BAW_OT_awb_select_click(bpy.types.Operator):
 
     def invoke(self, context, event):
         active_tool_before = _active_native_transform_tool_id(context)
-        if str(getattr(context, "mode", "")) == "OBJECT" and event.value in {
-            "CLICK",
-            "CLICK_DRAG",
-        }:
+        if str(getattr(context, "mode", "")) == "OBJECT" and event.value == "PRESS":
             trace_event(
                 "INPUT",
                 "SELECTION_CLICK_BEGIN",
@@ -2031,35 +2036,16 @@ class BAW_OT_awb_select_click(bpy.types.Operator):
         }:
             deactivate_rigped_semantic_tool(context)
 
-        if event.value == "CLICK":
-            # The Track Bar is drawn inside the 3D View WINDOW region and owns
-            # its own click grammar.
-            if (
-                bool(getattr(context.scene, "baw_trackbar_enabled", True))
-                and float(event.mouse_region_y) <= float(TRACKBAR_INTERACTION_HEIGHT)
-            ):
-                return {"PASS_THROUGH"}
-            location = (int(event.mouse_region_x), int(event.mouse_region_y))
-            cycle_location = (int(event.mouse_x), int(event.mouse_y))
-            return apply_awb_click_selection(
-                context,
-                location,
-                cycle_location,
-                self.action,
-                source="AWB_SELECT_CLICK",
-            )
-
-        if event.value != "CLICK_DRAG":
+        if event.value != "PRESS":
             return {"CANCELLED"}
 
-        region = context.region
         self._start_window = (
-            int(event.mouse_prev_press_x),
-            int(event.mouse_prev_press_y),
+            int(event.mouse_x),
+            int(event.mouse_y),
         )
         self._start_region = (
-            self._start_window[0] - int(region.x),
-            self._start_window[1] - int(region.y),
+            int(event.mouse_region_x),
+            int(event.mouse_region_y),
         )
         if (
             bool(getattr(context.scene, "baw_trackbar_enabled", True))
@@ -2067,16 +2053,9 @@ class BAW_OT_awb_select_click(bpy.types.Operator):
         ):
             return {"PASS_THROUGH"}
 
-        self._last_region = (int(event.mouse_region_x), int(event.mouse_region_y))
-        self._dragging = True
+        self._last_region = self._start_region
+        self._dragging = False
         self._cursor_changed = False
-        if (
-            context.window is not None
-            and str(getattr(context, "mode", "")) != "EDIT_ARMATURE"
-        ):
-            context.window.cursor_modal_set("CROSSHAIR")
-            self._cursor_changed = True
-        _set_viewport_box_overlay(context, self._start_region, self._last_region)
         context.window_manager.modal_handler_add(self)
         return {"RUNNING_MODAL"}
 
