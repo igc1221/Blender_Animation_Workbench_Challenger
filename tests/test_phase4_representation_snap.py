@@ -385,3 +385,10 @@ def test_generated_rigped_transient_hinge_branch_uses_builder_authority() -> Non
     source = inspect.getsource(representation_snap._configure_generated_rigped_hinge_branch)
     assert "configure_generated_rigped_ik_hinge_branch" in source
     assert "math.radians(179.0)" not in source
+
+
+def test_generated_rigped_canonical_pole_preserves_solved_gauge() -> None:
+    source = inspect.getsource(representation_snap._canonical_generated_rigped_pole)
+    assert "return tuple(float(value) for value in pole_world_position), float(pole_angle)" in source
+    assert "mirrored" not in source
+    assert "+ math.pi" not in source
