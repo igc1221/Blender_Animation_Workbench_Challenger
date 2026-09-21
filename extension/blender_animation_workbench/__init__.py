@@ -527,17 +527,6 @@ def register():
         default=False,
         options={"HIDDEN", "SKIP_SAVE"},
     )
-    bpy.types.Scene.baw_rigped_initial_box_size = FloatProperty(
-        name="Initial Box Size",
-        description="Temporary tuning multiplier for generated Rigped Box thickness; 1.0 is the current default",
-        default=1.0,
-        min=0.1,
-        max=2.0,
-        soft_min=0.4,
-        soft_max=1.2,
-        step=5,
-        precision=2,
-    )
     bpy.types.Scene.baw_rigped_box_wire_options_expanded = BoolProperty(
         name="Biped Box Wire Options",
         description="Show Biped Box Wire display options",
@@ -838,7 +827,6 @@ def unregister():
         "baw_rigped_box_wire_right_color",
         "baw_rigped_box_wire_left_color",
         "baw_rigped_box_wire_width",
-        "baw_rigped_initial_box_size",
         "baw_rigped_box_wire_options_expanded",
         "baw_rigped_semantic_transform_mode",
         "baw_trajectory_edit_mode",

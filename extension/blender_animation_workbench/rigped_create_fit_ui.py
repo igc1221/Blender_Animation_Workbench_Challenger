@@ -81,6 +81,7 @@ _INTERNAL_HELPERS_HIDDEN_PROPERTY = "awb_internal_helpers_hidden_v1"
 _BIPED_BOX_WIRE_PROPERTY = "awb_biped_box_wire_v1"
 _BIPED_BOX_WIRE_SHAPE_OBJECT = "AWB_BipedBoxWireShape"
 _BIPED_BOX_WIRE_DEFAULT_WIDTH = 1.5
+_RIGPED_INITIAL_BOX_SCALE = 0.5
 _BIPED_BOX_WIRE_DEFAULT_LEFT = (28.0 / 255.0, 28.0 / 255.0, 177.0 / 255.0)
 _BIPED_BOX_WIRE_DEFAULT_RIGHT = (6.0 / 255.0, 134.0 / 255.0, 6.0 / 255.0)
 _BIPED_BOX_WIRE_DEFAULT_CENTER = (8.0 / 255.0, 110.0 / 255.0, 134.0 / 255.0)
@@ -806,13 +807,12 @@ class BAW_OT_create_rigped_drag(bpy.types.Operator):
             return {"CANCELLED"}
         try:
             origin = _viewport_placement_location(context, event, self._window_region)
-            box_size = float(getattr(context.scene, "baw_rigped_initial_box_size", 1.0))
             spec = fitted_humanoid_spec(
                 self._initial_height,
                 origin,
                 base=rigify_reference_humanoid_spec(),
             )
-            spec = replace(spec, display_scale=spec.display_scale * box_size)
+            spec = replace(spec, display_scale=spec.display_scale * _RIGPED_INITIAL_BOX_SCALE)
             result = build_generated_rigped_humanoid(context.scene, spec)
             set_rigped_box_wire_display(
                 result.armature_object,
@@ -867,8 +867,7 @@ class BAW_OT_create_rigped_drag(bpy.types.Operator):
             )
             final_spec = replace(
                 final_spec,
-                display_scale=final_spec.display_scale
-                * float(getattr(context.scene, "baw_rigped_initial_box_size", 1.0)),
+                display_scale=final_spec.display_scale * _RIGPED_INITIAL_BOX_SCALE,
             )
             result = build_generated_rigped_humanoid(context.scene, final_spec)
             set_rigped_box_wire_display(
@@ -1343,12 +1342,6 @@ def draw_rigped_workflow(layout, context) -> None:
         status.label(text=ui_text("rigped.current", context), icon="OUTLINER_OB_ARMATURE")
 
     if mode == "OBJECT":
-        tune = box.row(align=True)
-        tune.prop(
-            context.scene,
-            "baw_rigped_initial_box_size",
-            text="Initial Box Size (Temp)",
-        )
         box.operator(
             "baw.create_rigped_drag",
             text=ui_text("rigped.new", context),
