@@ -676,9 +676,6 @@ def _generated_rigped_hinge_branch(capability: LimbRepresentationCapability) -> 
 
 
 def _configure_generated_rigped_hinge_branch(owner, branch_sign: int) -> bool:
-    # Keep transient FK->IK branch selection on the same hidden-solver envelope
-    # authored by the generated Rigped. A looser duplicate here can make native
-    # IK choose a different chain solution even when the terminal target is exact.
     from .rigped_humanoid_builder import configure_generated_rigped_ik_hinge_branch
 
     return configure_generated_rigped_ik_hinge_branch(owner, branch_sign)
@@ -724,39 +721,17 @@ def _canonical_generated_rigped_pole(
     pole_angle: float,
     branch_sign: int | None,
 ) -> tuple[tuple[float, float, float], float]:
-    """Choose the stable equivalent pole gauge for generated Rigped arms.
+    """Preserve the pole gauge derived from the evaluated generated limb.
 
-    Blender IK admits an equivalent representation obtained by mirroring the
-    pole target across the root-terminal axis and shifting ``pole_angle`` by pi.
-    Keep the gauge tied to the authored elbow branch rather than to left/right;
-    this preserves valid FK poses that cross local hinge zero while keeping each
-    Sliding branch in one stable half-turn gauge during playback.
+    With constrained generated arm IK, mirroring the pole across the root-tip
+    axis and adding pi to pole_angle is not solver-equivalent: it can preserve
+    the terminal while selecting a different shoulder/elbow chain. The current
+    evaluated chain is already the authoring authority for FK->IK snap, so keep
+    its directly solved pole position/angle unchanged.
     """
 
-    from mathutils import Vector
-
-    solver_name = str(getattr(capability.native_ik.solver_owner.target, "name", ""))
-    if solver_name not in {"MCH_ForeArm.L", "MCH_ForeArm.R"} or branch_sign is None:
-        return tuple(float(value) for value in pole_world_position), float(pole_angle)
-    preferred_center = math.pi if int(branch_sign) > 0 else 0.0
-
-    same_angle = _nearest_angle_about(float(pole_angle), preferred_center)
-    mirrored_angle = _nearest_angle_about(float(pole_angle) + math.pi, preferred_center)
-    if abs(same_angle - preferred_center) <= abs(mirrored_angle - preferred_center) + 1e-9:
-        return tuple(float(value) for value in pole_world_position), same_angle
-
-    points = two_bone_world_points(capability.native_ik)
-    if points is None:
-        return tuple(float(value) for value in pole_world_position), float(pole_angle)
-    root, _joint, end = (Vector(point) for point in points)
-    axis = end - root
-    if axis.length <= 1e-9:
-        return tuple(float(value) for value in pole_world_position), float(pole_angle)
-    axis.normalize()
-    offset = Vector(pole_world_position) - root
-    axial = axis * float(offset.dot(axis))
-    mirrored = root + axial - (offset - axial)
-    return tuple(float(value) for value in mirrored), mirrored_angle
+    del capability, branch_sign
+    return tuple(float(value) for value in pole_world_position), float(pole_angle)
 
 
 def _initial_pole_solution(capability: LimbRepresentationCapability):
