@@ -12,6 +12,39 @@
 > - `PHASE4_RIGPED_STABILIZATION_OWNERSHIP_PLAN.md` (2026-09-19 ownership gate)
 > - `docs/AGENT/ASTRA_REVIEW_RESPONSE_PHASE4_STABILIZATION_20260919.md` (2026-09-19 Astra architecture response)
 
+## 2026-09-22 Astra full-audit reopen — A5 RE-CLOSED BEFORE A6
+
+Astra's A5 full audit recommended a narrow reopen before A6 and raised B1/B2. Main reproduced both findings against HEAD `b1dde98a7fad8b974c7278dd5eb7ca2f4ce32e21` before accepting them.
+
+- **B1 ACCEPTED** — generic Track Bar per-FCurve collision replacement could move Free onto an occupied Sliding frame while leaving the destination-only same-time `pole_angle`, creating a malformed Free Contact bundle.
+  - Final repair keeps the generic Track Bar domain-agnostic.
+  - The Contact edit guard validates the existing whole Contact track before mutation and rejects cross-schema Contact collisions with **zero writes**.
+  - Same-schema collisions, empty-target edits, Move/Clone/Delete, and valid selection-range Move/Scale remain supported.
+  - Dynamic preview/range updates restore original authored state before destination preflight; rejected destinations never become persistent malformed bundles.
+- **B2 ACCEPTED** — Direct Move committed AUTO data before fallible Sliding reconciliation, while Direct Rotate reconciliation could escape outside the rollback-capable release boundary.
+  - Direct Move/Rotate AUTO writers now remain deferred through required Sliding reconciliation.
+  - Direct Rotate reconciliation uses the gesture-start frozen `_sliding_affected_capabilities` set.
+  - Persistent mutation crosses the boundary once through grouped journal commit.
+  - Failure attempts every still-open journal in reverse order before pose/preview recovery; rollback outcome traces are emitted immediately around each rollback and aggregate residue does not skip cleanup.
+- **H1 CLOSED** — isolated E9 mixed reachable/reach-limited proof passed: `foot_gap=1.357945`, `hand_gap=0.056574`; one-limb failure still restores the whole batch.
+- **H2 CLOSED** — malformed/missing/partially-retimed Contact source and malformed destination cases all refuse with zero persistent writes.
+- **M2 CLOSED FOR A5** — E11 recovery `blender_code` is now explicitly rejected by the attached USER FIRST replay dispatcher when marked as recovery schema/kind; recovery execution remains isolated/background-only.
+
+Review discipline for this reopen:
+- PRE round **1/1**, two independent reviewers: **Gemini = CHANGE**, **GLM = CHANGE**. Main accepted the concrete atomicity/preflight concerns and implemented the narrower zero-write collision policy plus full reconciliation rollback boundary.
+- POST round **1/1**, two independent reviewers: **Qwen = PASS**, **Gemini = PASS**. No release-blocking regression was identified.
+- A6 Planted was not started during adjudication or repair.
+
+Closure evidence on the final source:
+- `awb-check`: **444 pytest PASS + Ruff PASS**.
+- Blender 5.2.1 isolated I13: B1 Free→Sliding, Sliding→Free, preview collision, malformed source/destination zero-write cases **PASS**.
+- Blender 5.2.1 isolated I14: valid generic Contact Move/Clone/Delete/range edits plus B1/H2 fail-closed integrity matrix **PASS**.
+- Blender 5.2.1 isolated E11: rollback-all, Direct Move reconciliation failure, group-commit failure, happy ordering, Direct Rotate reconciliation failure **PASS**.
+- Blender 5.2.1 isolated E9: multi-limb reach-limit proof and whole-batch failure restore **PASS**.
+- Existing USER FIRST E1-E12 evidence, golden baseline, and `debug/user_final_tests/E9` through `E12` remain preserved.
+
+A5 is therefore **RE-CLOSED**. The next implementation item is A6 Planted, but A6 begins only in a new work slice with its normal PRE gate.
+
 ## 2026-09-22 execution override — E1-E6 COMPREHENSIVE-REVIEW STABILIZATION CLOSED / E7 UNBLOCKED
 
 E1 through E6 remain **USER PASS / CLOSED**. The later Astra comprehensive review produced three accepted stabilization blockers before E7:
