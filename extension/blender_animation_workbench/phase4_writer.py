@@ -70,16 +70,17 @@ def clear_committed_operation_ids_for_file_lifecycle() -> None:
 
 
 def finalize_deferred_direct_writer_result(result: DirectWriterResult) -> None:
-    """Finalize one already-verified deferred direct writer transaction."""
+    """Finalize one verified deferred direct writer after its commit boundary."""
 
     journal = result.pending_journal
     if not result.applied or journal is None or result.operation_id is None:
         raise DirectWriterError("Deferred direct writer result is not commit-ready.")
-    if journal.state.value != "OPEN":
+    if journal.state.value == "OPEN":
+        journal.commit()
+    elif journal.state.value != "COMMITTED":
         raise DirectWriterError(
-            f"Deferred direct writer journal is not open: {journal.state.value}."
+            f"Deferred direct writer journal is not finalizable: {journal.state.value}."
         )
-    journal.commit()
     _COMMITTED_OPERATION_IDS.add(result.operation_id)
     trace_event(
         "WRITER",

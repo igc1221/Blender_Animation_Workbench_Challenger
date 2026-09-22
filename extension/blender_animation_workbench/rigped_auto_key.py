@@ -16,6 +16,7 @@ from .phase4_contact_authoring import (
     snapshot_contact_transform_rows,
 )
 from .phase4_contact_model import ContactKeyType
+from .phase4_mutation_journal import MutationJournal
 from .phase4_operation_plan import ChannelFamily, OperationPlan, PlannedChannel
 from .phase4_preflight import build_direct_key_plan
 from .phase4_verification import (
@@ -111,6 +112,17 @@ def commit_rigped_auto_writer_results(
                 f"{result.pending_journal.state.value}."
             )
 
+    MutationJournal.commit_group(
+        tuple(
+            result.pending_journal
+            for result in pending
+            if result.pending_journal is not None
+        )
+    )
+
+    # The persistent rollback boundary is crossed exactly once above. The
+    # per-result finalizers now perform only direct-writer bookkeeping and
+    # non-blocking trace emission for already-COMMITTED journals.
     for result in pending:
         if isinstance(result, DirectWriterResult):
             finalize_deferred_direct_writer_result(result)

@@ -161,6 +161,37 @@ def test_commit_is_terminal_and_cannot_be_rolled_back():
         journal.record(_created_key(1, 1.0))
 
 
+def test_commit_group_commits_all_after_full_prevalidation():
+    first = _journal()
+    second = _journal()
+
+    journal_model.MutationJournal.commit_group((first, second))
+
+    assert first.state is journal_model.JournalState.COMMITTED
+    assert second.state is journal_model.JournalState.COMMITTED
+
+
+def test_commit_group_rejects_non_open_member_before_any_new_commit():
+    first = _journal()
+    second = _journal()
+    second.commit()
+
+    with pytest.raises(RuntimeError, match="group cannot commit"):
+        journal_model.MutationJournal.commit_group((first, second))
+
+    assert first.state is journal_model.JournalState.OPEN
+    assert second.state is journal_model.JournalState.COMMITTED
+
+
+def test_commit_group_rejects_duplicate_without_crossing_commit_boundary():
+    journal = _journal()
+
+    with pytest.raises(ValueError, match="duplicate journal"):
+        journal_model.MutationJournal.commit_group((journal, journal))
+
+    assert journal.state is journal_model.JournalState.OPEN
+
+
 def test_one_rollback_failure_does_not_stop_other_restores():
     executor = FakeExecutor()
     executor.fail_rollback = {2}

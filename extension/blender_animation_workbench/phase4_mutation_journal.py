@@ -345,6 +345,28 @@ class MutationJournal:
             raise RuntimeError(f"Mutation journal cannot commit from {self._state.value}.")
         self._state = JournalState.COMMITTED
 
+    @classmethod
+    def commit_group(cls, journals: tuple[MutationJournal, ...]) -> None:
+        """Commit multiple already-verified journals with one prevalidated state flip.
+
+        No Blender mutation occurs here. Every journal is checked while all are
+        still OPEN; only after the full group passes validation are their states
+        changed to COMMITTED. The second loop contains assignment only, so there
+        is no per-journal commit call that can fail after an earlier journal has
+        already crossed the rollback boundary.
+        """
+
+        if len({id(journal) for journal in journals}) != len(journals):
+            raise ValueError("Mutation journal group contains a duplicate journal.")
+        for journal in journals:
+            if journal._state is not JournalState.OPEN:
+                raise RuntimeError(
+                    "Mutation journal group cannot commit because "
+                    f"{journal.operation_id!r} is {journal._state.value}."
+                )
+        for journal in journals:
+            journal._state = JournalState.COMMITTED
+
     def rollback(self) -> RollbackReport:
         if self._state is not JournalState.OPEN:
             raise RuntimeError(

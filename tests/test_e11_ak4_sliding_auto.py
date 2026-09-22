@@ -62,14 +62,19 @@ def test_e11_contact_single_and_batch_can_prepare_without_committing() -> None:
     assert "journal.commit()" in finalize
 
 
-def test_e11_composite_auto_transaction_prevalidates_then_finalizes_or_rolls_back_reverse() -> None:
+def test_e11_composite_auto_transaction_prevalidates_then_group_commits_or_rolls_back_reverse() -> None:
     commit = _function(AUTO, "commit_rigped_auto_writer_results")
     rollback = _function(AUTO, "rollback_rigped_auto_writer_results")
 
     assert "result.operation_id is None" in commit
     assert 'result.pending_journal.state.value != "OPEN"' in commit
-    assert "finalize_deferred_direct_writer_result(result)" in commit
-    assert "finalize_deferred_contact_authoring_result(result)" in commit
+    assert "MutationJournal.commit_group(" in commit
+    assert commit.index("MutationJournal.commit_group(") < commit.index(
+        "finalize_deferred_direct_writer_result(result)"
+    )
+    assert commit.index("MutationJournal.commit_group(") < commit.index(
+        "finalize_deferred_contact_authoring_result(result)"
+    )
     assert 'trace_event(' in commit and '"AUTO_TRANSACTION_COMMIT"' in commit
     assert "for result in reversed(results):" in rollback
     assert 'journal.state.value == "OPEN"' in rollback
@@ -253,3 +258,13 @@ def test_e11_direct_first_key_baseline_stays_existing_direct_policy() -> None:
     assert "if channels and keyed_count == 0:" in helper
     assert "AK_AUTO_PARTIAL_DIRECT_POSITION" in helper
     assert "AK_AUTO_PARTIAL_DIRECT_ROTATION" in helper
+
+
+def test_e11_sliding_move_and_rotate_auto_share_existing_anchor_authority() -> None:
+    move_invoke = _method(TRANSFORM, "BAW_OT_rigped_semantic_move_axis", "invoke")
+    rotate_invoke = _method(TRANSFORM, "BAW_OT_rigped_direct_rotate_axis", "invoke")
+
+    assert "plan_rigped_auto_anchor(" in move_invoke
+    assert "Sliding Move Auto must preserve Sliding authority." in move_invoke
+    assert "plan_rigped_auto_anchor(" in rotate_invoke
+    assert "ContactKeyType.SLIDING" in rotate_invoke

@@ -276,16 +276,17 @@ class ContactAuthoringResult:
 
 
 def finalize_deferred_contact_authoring_result(result: ContactAuthoringResult) -> None:
-    """Finalize one already-verified deferred Contact writer transaction."""
+    """Finalize one verified deferred Contact writer after its commit boundary."""
 
     journal = result.pending_journal
     if not result.applied or journal is None or result.operation_id is None:
         raise ContactAuthoringError("Deferred Contact writer result is not commit-ready.")
-    if journal.state.value != "OPEN":
+    if journal.state.value == "OPEN":
+        journal.commit()
+    elif journal.state.value != "COMMITTED":
         raise ContactAuthoringError(
-            f"Deferred Contact writer journal is not open: {journal.state.value}."
+            f"Deferred Contact writer journal is not finalizable: {journal.state.value}."
         )
-    journal.commit()
     trace_event(
         "WRITER",
         "CONTACT_DEFERRED_COMMIT",
