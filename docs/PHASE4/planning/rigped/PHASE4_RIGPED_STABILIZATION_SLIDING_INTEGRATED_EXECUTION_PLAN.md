@@ -1208,6 +1208,38 @@ OPEN RISK: no E9 blocker. Separate I19 continuous-contact broad-smoke residual r
 NEXT ITEM ALLOWED: YES — E10 may proceed.
 ```
 
+## 5A. Astra A5 full-audit reopen closure — 2026-09-22
+
+```text
+SCOPE: A5 Sliding reopen only. A6 Planted was explicitly not started.
+AUDIT REQUEST: docs/AGENT/ASTRA_A5_FULL_AUDIT_REQUEST_20260922.md
+AUDIT RESPONSE: docs/AGENT/ASTRA_A5_FULL_AUDIT_RESPONSE_20260922.md
+
+MAIN B1 VERDICT: ACCEPTED BLOCKER.
+ROOT CAUSE: generic Track Bar per-FCurve replacement skipped Contact rows that existed only at the occupied destination. Free -> Sliding replacement could therefore leave destination pole_angle and create malformed Free.
+FIX: Contact's higher-layer Track Bar guard validates the existing Contact track before mutation and fail-closes cross-schema Contact collisions with zero writes. Generic Track Bar primitives remain domain-agnostic. Dynamic Move/Clone preview and selection-range scale re-preflight exact destinations from restored authored state; malformed source/destination tracks fail closed.
+B1/H2 PROOF: isolated I13 runtime PASS for Free->Sliding collision zero-write, preview collision zero-write, Sliding->Free collision zero-write, malformed source missing scalar, partially retimed source, and malformed destination. Existing I14 isolated runtime also remains PASS for generic Contact Move/Clone/Delete, selection-range Move/Scale, and malformed integrity cases.
+
+MAIN B2 VERDICT: ACCEPTED BLOCKER.
+ROOT CAUSE: Direct Rotate could run fallible Sliding reconciliation after deferred writer activity but outside the rollback envelope; Direct Move committed its AUTO writer before the same reconciliation.
+FIX: Direct Move now uses defer_commit=True and keeps its writer journal OPEN through reconciliation before one group commit. Direct Rotate keeps all deferred writer journals OPEN through reconciliation of the gesture-start frozen affected capability set, then group commits. Selection cleanup happens after commit. rollback_rigped_auto_writer_results now attempts every OPEN journal in reverse order, records rollback begin/end outcome before gesture recovery, aggregates failures only after all attempts, and the transform wrapper continues pose/preview cleanup after aggregate rollback failure.
+B2/M1 PROOF: exact current-modal synthetic refresh-failure probes return CANCELLED with writer -> refresh -> rollback -> pose/preview restore and no group commit. Executable pytest proves a later journal rollback failure does not prevent an earlier journal rollback attempt. Current isolated E11 runtime remains PASS for multi-limb group commit, AUTO-OFF no-write, ESC restore, and scrub no-write.
+
+H1 VERDICT: CLOSED / PROOF GAP FILLED.
+H1 PROOF: isolated E9 mixed reachable/reach-limited case PASS with foot_gap=1.357945 and hand_gap=0.056574; whole-batch failure restore and native Undo contract also PASS. No solver redesign was introduced.
+
+M2 VERDICT: ACCEPTED TOOLING SAFETY FIX.
+FIX: scripts/replay_user_final_test_via_mcp.py rejects recovery blender_code routes before constructing the persistent Blender client when replay schema is awb-user-final-recovery/* or recovery_kind is present. E11 recovery verification remains isolated/background-only.
+PROOF: direct E11 replay-dispatch command fails before Blender connection with the isolated/background-only RuntimeError. Frozen debug/user_final_tests/E11 evidence was preserved.
+
+FULL GATE: awb-check = 444 pytest PASS + Ruff PASS.
+BACKGROUND REGRESSION: current I13, I14, E11, E9 verifiers PASS.
+POST ROUND 1/1: DeepSeek = A5 RE-CLOSE SAFE; Gemini API sidecar = A5 RE-CLOSE SAFE. Qwen/Gemini Web transport tasks that disappeared without consumable responses were not counted.
+FINAL MAIN VERDICT: A5 RE-CLOSED. No release blocker remains from Astra B1/B2/H1/H2/M1/M2.
+USER EVIDENCE: prior E1-E12 USER FIRST acceptance remains authoritative and was not reset/recreated. Golden baseline and debug/user_final_tests/E9-E12 were preserved.
+NEXT ITEM ALLOWED: A6 Planted, but only in a new work slice after this A5 checkpoint; A6 was not started during this closure.
+```
+
 ## 6. Explicit non-goals until this plan closes
 
 Do not start or redesign:
@@ -1225,8 +1257,10 @@ Do not start or redesign:
 
 ## 7. Immediate next action
 
-**E1 through E12 are USER PASS / CLOSED. A5 stabilization is CLOSED.**
+**E1 through E12 are USER PASS / CLOSED. Astra's A5 reopen is adjudicated and A5 stabilization is RE-CLOSED.**
 
-Proceed to **A6 — Planted** using the current Phase 4 product contracts and the next focused A6 implementation plan.
+Create/push the A5 reopen checkpoint and stop this work slice. **Do not start A6 in this closure session.**
+
+The next implementation item, when a new work slice begins, is **A6 — Planted** using the current Phase 4 product contracts and its normal narrow PRE gate.
 
 Do not reopen E1-E12 without new concrete regression evidence. The separate I19 continuous-contact broad-smoke residual remains debt and does not reopen A5.
