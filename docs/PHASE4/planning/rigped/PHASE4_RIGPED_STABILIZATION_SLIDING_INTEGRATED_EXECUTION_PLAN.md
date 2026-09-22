@@ -1,6 +1,6 @@
 ﻿# Phase 4 Rigped — Stabilization + Sliding Integrated Execution Plan
 
-> Updated: **2026-09-22 KST**
+> Updated: **2026-09-22 21:41 KST**
 > Status: **A5 STABILIZATION CLOSED / E1-E12 USER PASS / CLOSED / A6 PLANTED NEXT**
 > Runtime target: **Blender 5.2.1 LTS**
 > Main authority: **Sol Main**
@@ -1234,10 +1234,10 @@ PROOF: direct E11 replay-dispatch command fails before Blender connection with t
 
 FULL GATE: awb-check = 444 pytest PASS + Ruff PASS.
 BACKGROUND REGRESSION: current I13, I14, E11, E9 verifiers PASS.
-POST ROUND 1/1: DeepSeek = A5 RE-CLOSE SAFE; Gemini API sidecar = A5 RE-CLOSE SAFE. Qwen/Gemini Web transport tasks that disappeared without consumable responses were not counted.
+POST ROUND 1/1: Qwen = PASS; Gemini Web = PASS. No release-blocking regression was identified.
 FINAL MAIN VERDICT: A5 RE-CLOSED. No release blocker remains from Astra B1/B2/H1/H2/M1/M2.
 USER EVIDENCE: prior E1-E12 USER FIRST acceptance remains authoritative and was not reset/recreated. Golden baseline and debug/user_final_tests/E9-E12 were preserved.
-NEXT ITEM ALLOWED: A6 Planted, but only in a new work slice after this A5 checkpoint; A6 was not started during this closure.
+NEXT ITEM ALLOWED: A6 Planted in the next work slice; A6 was not started during A5 closure.
 ```
 
 ## 6. Explicit non-goals until this plan closes
@@ -1259,8 +1259,8 @@ Do not start or redesign:
 
 **E1 through E12 are USER PASS / CLOSED. Astra's A5 reopen is adjudicated and A5 stabilization is RE-CLOSED.**
 
-Create/push the A5 reopen checkpoint and stop this work slice. **Do not start A6 in this closure session.**
+The A5 reopen checkpoint and subsequent agent-document cleanup checkpoints are complete and pushed. **Do not start A6 in this closure session.**
 
-The next implementation item, when a new work slice begins, is **A6 — Planted** using the current Phase 4 product contracts and its normal narrow PRE gate.
+The next implementation item, when the new session begins, is **A6 — Planted** using the current Phase 4 product contracts and its normal narrow PRE gate.
 
 Do not reopen E1-E12 without new concrete regression evidence. The separate I19 continuous-contact broad-smoke residual remains debt and does not reopen A5.
