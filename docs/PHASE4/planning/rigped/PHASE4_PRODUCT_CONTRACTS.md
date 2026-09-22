@@ -1,6 +1,6 @@
 # AWB Phase 4 — Product Contracts
 
-> Updated: **2026-09-19 late session**
+> Updated: **2026-09-23 04:49 KST**
 > Role: **authoritative Phase 4 product-behavior contract**. This file owns user-visible Rigped semantics. Historical reviews, milestone proofs, and implementation experiments must not override it.
 
 ## 1. Authority and layering
@@ -20,18 +20,19 @@ No parallel hidden Character database, Contact-session cache, or independent ani
 Primary flow:
 
 ```text
-New Rigped -> Fit -> Apply Fit -> Animate
+New Rigped -> Figure/Fit -> Apply -> Animate
 ```
 
 Current practical baseline:
 
-- Fit FK behavior is accepted enough to serve as the structural editing baseline.
-- Animate FK behavior is accepted enough to serve as the animation baseline.
-- Fit and Animate use the same native-style Move/Rotate/Scale visual language where the corresponding operation is supported.
-- Fit edits rest/setup structure. Animate edits pose/animation only; Animate must not silently change rest structure.
+- Figure/Fit F1-F6 is USER PASS / CLOSED and is the structural editing baseline.
+- live Figure interaction is Object-hosted and semantic; native EditBone/rest mutation is bounded to atomic Apply.
+- Animate A1-A6 is the accepted first animation-core baseline.
+- Figure and Animate use the same AWB Move/Rotate/Scale visual language where the corresponding operation is supported.
+- Figure edits rest/setup structure. Animate edits pose/animation only; Animate must not silently change rest structure.
 - Root, COM, and Pelvis are distinct authored roles.
 - hidden mechanism, deform, IK target, and pole controls are never normal animator selection targets.
-- post-animation structural-fit safety/rebase remains a separate unresolved contract and must not be inferred from raw FCurve preservation alone.
+- post-animation structural Figure/rebuild migration remains outside the current frozen core and must not be inferred from raw FCurve preservation alone.
 
 ## 3. Selection grammar
 
@@ -110,7 +111,8 @@ Rigped C
 = when one broad mixed Rigped selection contains Contact limbs plus ordinary/direct authored controls,
   one C operation must author the touched Contact limb domains coherently AND author the selected direct controls as supported Free keys at that frame
 = the direct controls remain Free while the selected Contact group advances its Contact semantic
-= this broad-mixed requirement does NOT by itself freeze direct-only C behavior; direct-only C remains an explicit architecture decision under review
+= on supported direct-only body controls, C authors the normal Free/direct key bundle at that frame
+= direct-only body C must not create Sliding/Planted Contact authority
 
 Rigped K / KEY
 = complete no-op
@@ -175,7 +177,7 @@ First-key baseline은 AUTO만의 보조 정책이다. 아직 animation이 없는
 
 일반 Object와 custom/external bone Auto는 기존 AWB 경로를 유지한다. generated Rigped + custom/external mixed gesture는 atomic ownership이 증명되기 전까지 fail-closed한다.
 
-상세 계획은 `PHASE4_RIGPED_AUTO_KEY_IMPLEMENTATION_PLAN.md`를 따른다.
+AUTO의 상세 구현 이력은 `PHASE4_RIGPED_AUTO_KEY_IMPLEMENTATION_PLAN.md`에 보존한다. 현재 AUTO 제품 계약과 RC0 동결 의미는 이 문서와 통합 로드맵이 우선한다.
 
 ## 7. C state-time behavior
 
@@ -189,23 +191,21 @@ First-key baseline은 AUTO만의 보조 정책이다. 아직 animation이 없는
 - Contact state interpolation is discrete/constant.
 - incomplete Contact bundles fail closed; playback/scrubbing never repairs them through frame handlers.
 
-## 8. Current practical state and blockers
+## 8. Frozen practical core baseline entering RC0
 
-Confirmed through USER PASS as of 2026-09-16:
+The first complete Rigped animator core is USER-accepted:
 
-- Fit/Animate FK practical foundation is accepted.
-- Rigped `K` is a complete no-op; `C` owns explicit Contact semantic authoring.
-- A5 Free/Sliding authoring works for Hand/Foot and whole generated limb domains; Free = gray, Sliding = yellow.
-- Sliding red terminal pivot, visible-chain IK-follow movement, replay, broad-selection semantic color aggregation, Contact key selection/Delete, Selection Range, Move/Clone, Undo/Redo, whole-Rigped C routing, and direction-independent C authoring latch behavior are accepted.
+- Figure/Fit F1-F6 is closed and provides the structural editing boundary.
+- A1-A4 FK/keying foundation is USER PASS.
+- A5 Free/Sliding plus E1-E12 stabilization is USER PASS / CLOSED.
+- A6 Planted is USER PASS / CLOSED.
+- Free / Sliding / Planted Track Bar semantics and red-pivot visibility are accepted.
+- C, AUTO, semantic W/E/R, supported multi-selection/domain partitioning, atomic rollback and native Undo/Redo are part of the RC0 core.
+- supported direct-only body C writes normal Free/direct keys and no body Contact authority.
 - direct native IK constraints on visible ForeArm/Calf remain rejected/reverted.
-- Track Bar whole-Rigped interaction performance has been materially optimized without changing the accepted semantic bundle behavior.
+- Blender Action/FCurve remains authored replay authority.
 
-A5 remains open only for closure work:
-
-1. final Preferred-Angle / no-flip manual acceptance for large Hand/Foot Sliding motion, including ForeArm/Calf twist continuity and return-to-origin behavior.
-2. one final whole-Rigped semantic/edit regression pass covering Free/Sliding C, Move, Shift-Clone, Delete, Selection Range, Undo/Redo, colors, selection, and replay.
-
-A6 Planted/light-blue authoring remains deferred until full A5 closure.
+There is no A7 feature currently defined. The mandatory next sequence is RC0 -> RC1 -> RC2 -> RC3 before unrelated feature expansion.
 
 ## 9. Multi-selection and solver-domain boundary
 

@@ -1,7 +1,8 @@
 ﻿# Phase 4 Rigped — Stabilization + Sliding Integrated Execution Plan
 
-> Updated: **2026-09-22 21:41 KST**
-> Status: **A5 STABILIZATION CLOSED / E1-E12 USER PASS / CLOSED / A6 PLANTED NEXT**
+> Updated: **2026-09-23 04:49 KST**
+> Status: **A5 STABILIZATION + E1-E12 USER PASS / CLOSED — HISTORICAL EXECUTION LEDGER; A6 is also CLOSED**
+> Current override: this document no longer owns the next action. Current sequence is RC0 -> RC1 -> RC2 -> RC3.
 > Runtime target: **Blender 5.2.1 LTS**
 > Main authority: **Sol Main**
 > Mandatory challenger policy: **every implementation/stabilization item receives a narrow pre-implementation challenger review and a narrow post-implementation challenger review; challenger output is advisory evidence and Main decides whether a finding blocks, improves, defers, or is rejected**
