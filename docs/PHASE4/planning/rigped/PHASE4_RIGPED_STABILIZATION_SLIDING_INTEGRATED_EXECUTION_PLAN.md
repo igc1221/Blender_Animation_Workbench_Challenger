@@ -872,6 +872,25 @@ Question:
 - separately run command mode under current C semantics;
 - verify no write/repair during ordinary playback beyond intended replay execution.
 
+## Completion ledger — 2026-09-22
+
+Status: **USER PASS / CLOSED**.
+
+- Added explicit replay authority split: `RECORDED_RESULT` vs `COMMAND`; `run_semantic_replay` requires the mode explicitly.
+- `RECORDED_RESULT` bypasses current C latch/cycle membership and executes explicit historical Contact targets through the existing single/batch Contact planners and atomic writers.
+- Missing historical mapping/direct coverage fails closed instead of guessing. Legacy broad-C with direct controls and no recorded direct footprint reports incomplete context; recorded direct binding coverage without a frozen transform payload reports unsupported direct replay rather than synthesizing current broad-C keys.
+- Single Contact results now expose `mapping_contact_types`, and recorded-result replay validates actual single/multi mapping coverage after execution.
+- Existing semantic-replay manifests were migrated to explicit authority: E2/E7/E8/E9 = `RECORDED_RESULT`; E3/E4/E5/E6 = `COMMAND`.
+- New Contact captures record explicit `direct_binding_ids` coverage when the frozen operation domain contains supported direct controls.
+- `resolve_operation_domain` was audited as read-only selection/rig-domain classification; it does not read current C latch/cycle/enabled-type authority.
+- Global pre-E10 Undo/Redo regression on semantic Sliding Move and FK Move passed one gesture -> one Undo -> one Redo with no Contact rollback or pose residue.
+- Static gate after final fixes: **419 pytest PASS + Ruff PASS**.
+- POST re-review: **DeepSeek USER-FIRST READY + Gemini USER-FIRST READY**.
+- USER FIRST historical replay: E7 completed **58/58 actions** in `RECORDED_RESULT`.
+- Main follow-up after USER FIRST: same E7 capture completed **58/58 actions** in `COMMAND`; ordinary frame playback preserved the exact persistent animation signature (**58 FCurves / 58 keys before and after**), proving no passive repair/write.
+- Durable E10 rule: semantic replay callers/manifests must declare replay mode explicitly; do not restore an implicit COMMAND fallback.
+- Durable coverage rule: single-mapping historical replay must validate actual `mapping_contact_types`, not scalar `contact_type` alone.
+
 ## Exit
 
 Flight Recorder captures remain useful after semantic-rule changes.
