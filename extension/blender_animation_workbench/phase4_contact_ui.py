@@ -96,9 +96,10 @@ def contact_enabled_types(context) -> tuple[ContactKeyType, ...]:
     enabled: list[ContactKeyType] = []
     if bool(preferences.contact_free_enabled):
         enabled.append(ContactKeyType.FREE)
-    if bool(preferences.contact_sliding_enabled):
+    sliding_enabled = bool(preferences.contact_sliding_enabled)
+    if sliding_enabled:
         enabled.append(ContactKeyType.SLIDING)
-    if bool(preferences.contact_planted_enabled):
+    if sliding_enabled and bool(preferences.contact_planted_enabled):
         enabled.append(ContactKeyType.PLANTED)
     return tuple(enabled) or default_cycle
 

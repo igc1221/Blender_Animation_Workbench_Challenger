@@ -42,6 +42,7 @@ def test_a6_public_contact_cycle_defaults_to_free_sliding_planted() -> None:
     assert "ContactKeyType.SLIDING" in enabled
     assert "ContactKeyType.PLANTED" in enabled
     assert "enabled.append(ContactKeyType.PLANTED)" in enabled
+    assert "sliding_enabled and bool(preferences.contact_planted_enabled)" in enabled
     assert "return default_cycle" in enabled
     assert "return tuple(enabled) or default_cycle" in enabled
 
@@ -61,6 +62,24 @@ def test_a6_planted_preference_is_exposed_and_default_on() -> None:
 
     draw = _function(CONTACT_UI_PATH, "draw")
     assert 'row.prop(self, "contact_planted_enabled", toggle=True)' in draw
+
+
+
+
+def test_a6_max_style_planted_requires_and_inherits_active_ik_anchor() -> None:
+    planner = _function(CONTACT_PATH, "build_contact_intent_plan")
+    assert "target_type is ContactKeyType.PLANTED and physical_type is ContactKeyType.FREE" in planner
+    assert "Planted requires an active Sliding/Planted IK contact anchor; author Sliding first." in planner
+    assert "physical_type is ContactKeyType.SLIDING" in planner
+    assert "inherit_active_anchor=inherit_active_anchor" in planner
+
+    single = _function(CONTACT_PATH, "execute_contact_intent_plan")
+    batch = _function(CONTACT_PATH, "_prepare_contact_intent_for_batch")
+    for source in (single, batch):
+        assert "if intent.inherit_active_anchor" in source
+        assert "capability.native_ik.ik_target.target.matrix.copy()" in source
+        assert "_hold_state_for_contact_point(hold, contact_matrix, local_point)" in source
+        assert "_point_state_for_local_contact(hold, contact_matrix, local_point)" in source
 
 
 def test_a6_authoritative_red_pivot_includes_sliding_and_planted() -> None:

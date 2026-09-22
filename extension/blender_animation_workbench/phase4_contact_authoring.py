@@ -195,6 +195,7 @@ class ContactIntentPlan:
     target_plant_space: ContactPlantSpace
     contact_point_local: tuple[float, float, float] | None
     apply_contact_point: bool
+    inherit_active_anchor: bool
     external_target_runtime_key: int | None
     effective_type: ContactKeyType | None
     exact_current_type: ContactKeyType | None
@@ -2630,6 +2631,15 @@ def build_contact_intent_plan(
             insertion_type = _contact_authoring_latch_type(capability) or effective_type
             target_type = insertion_type if insertion_type in enabled else enabled[0]
 
+        if target_type is ContactKeyType.PLANTED and physical_type is ContactKeyType.FREE:
+            raise ContactAuthoringError(
+                "Planted requires an active Sliding/Planted IK contact anchor; author Sliding first."
+            )
+        inherit_active_anchor = (
+            target_type is ContactKeyType.PLANTED
+            and physical_type is ContactKeyType.SLIDING
+            and mode is not ContactAuthoringMode.REPLANT
+        )
         apply_contact_point = (
             target_type is ContactKeyType.PLANTED
             and (mode is ContactAuthoringMode.REPLANT or physical_type is not ContactKeyType.PLANTED)
@@ -2781,6 +2791,7 @@ def build_contact_intent_plan(
             target_plant_space=target_plant_space,
             contact_point_local=point_local if apply_contact_point else None,
             apply_contact_point=apply_contact_point,
+            inherit_active_anchor=inherit_active_anchor,
             external_target_runtime_key=(
                 int(external_target_runtime_key)
                 if external_target_runtime_key is not None
@@ -4031,11 +4042,16 @@ def _prepare_contact_intent_for_batch(
             local_point = intent.contact_point_local
             if local_point is None:
                 raise ContactAuthoringError("I20 Planted/Replant operation lost its frozen local Contact point.")
+            contact_matrix = (
+                capability.native_ik.ik_target.target.matrix.copy()
+                if intent.inherit_active_anchor
+                else expected_terminal
+            )
             if intent.target_plant_space is ContactPlantSpace.OBJECT:
-                hold_state = _hold_state_for_external_contact_point(hold, expected_terminal)
+                hold_state = _hold_state_for_external_contact_point(hold, contact_matrix)
             else:
-                hold_state = _hold_state_for_contact_point(hold, expected_terminal, local_point)
-            point_state = _point_state_for_local_contact(hold, expected_terminal, local_point)
+                hold_state = _hold_state_for_contact_point(hold, contact_matrix, local_point)
+            point_state = _point_state_for_local_contact(hold, contact_matrix, local_point)
     elif intent.target_type is ContactKeyType.SLIDING and _same_float(float(hold.constraint.influence), 1.0):
         ik_contract = _contract_by_runtime_key(
             target,
@@ -4336,11 +4352,16 @@ def execute_contact_intent_plan(
             local_point = intent.contact_point_local
             if local_point is None:
                 raise ContactAuthoringError("Planted/Replant operation lost its frozen local Contact point.")
+            contact_matrix = (
+                capability.native_ik.ik_target.target.matrix.copy()
+                if intent.inherit_active_anchor
+                else expected_terminal
+            )
             if intent.target_plant_space is ContactPlantSpace.OBJECT:
-                hold_state = _hold_state_for_external_contact_point(hold, expected_terminal)
+                hold_state = _hold_state_for_external_contact_point(hold, contact_matrix)
             else:
-                hold_state = _hold_state_for_contact_point(hold, expected_terminal, local_point)
-            point_state = _point_state_for_local_contact(hold, expected_terminal, local_point)
+                hold_state = _hold_state_for_contact_point(hold, contact_matrix, local_point)
+            point_state = _point_state_for_local_contact(hold, contact_matrix, local_point)
     elif (
         intent.target_type is ContactKeyType.SLIDING
         and _same_float(float(hold.constraint.influence), 1.0)
