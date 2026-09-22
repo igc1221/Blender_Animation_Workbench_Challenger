@@ -1099,23 +1099,25 @@ OPEN RISK: none blocking E8. E9 owns multi-limb Sliding body dependency; the sep
 NEXT ITEM ALLOWED: YES — proceed to E9 only.
 ```
 
-### E9 evidence ledger — 2026-09-22 USER FIRST PENDING
+### E9 evidence ledger — 2026-09-22 USER PASS / CLOSED
 
 ```text
 ITEM: E9 — Multi-limb Sliding body dependency
-MAIN DIFF / SHA: production code unchanged; evidence-only expansion adds tests/test_rigped_transform_e9.py and scripts/verify_phase4_e9_multilimb_sliding.py.
-CHALLENGER REQUEST: Qwen PRE awb-e9-pre-qwen-20260922-01; Gemini PRE awb-e9-pre-gemini-20260922-01.
-CHALLENGER RESPONSE: both recommended GO with safeguards, but Main rejected unsupported architectural claims after direct source adjudication. Qwen incorrectly claimed no existing multi-limb atomic container and proposed a new transaction coordinator/body-delta aggregation; current rigped_transform.py already freezes character-wide Sliding capability tuples, captures/restores per-limb dependency guards and hidden seed snapshots inside one modal operation, batches public-overlay convergence, and restores the entire frozen set on error/cancel. Gemini correctly identified that the tuple-based E7/E8 structure is multi-limb-ready, but its claimed convergence and flat-diagnostic blockers were stale against current source: convergence requires every capability to remain stable, and SLIDING_BODY_DEPENDENCY_PREVIEW already emits per-limb records.
-MAIN VERDICT: EVIDENCE GREEN / USER FIRST PENDING. E9 requires no production-code redesign. Preserve the existing union of independent hidden native-IK domains; do not add a coordinator, body compensation, cross-limb solve, or full-body balance layer.
-CODE/STATIC: 410 pytest PASS; Ruff PASS. New E9 source-contract tests freeze character-wide Sliding collection ownership, all-limb guard capture/restore, batched convergence, per-limb diagnostics, active/passive Rotate partitioning, whole-operation Move restore, no body-compensation/full-body symbols, four-target red-cue enumeration, hidden-Rigped fixture cleanup that does not depend on viewport selection, and immutable golden-baseline SHA/working-copy preparation.
-BLENDER API/STATE: Blender 5.2.1 E9 runtime FULL PASS. Cases passed: left Sliding/right Free; both feet Sliding; foot+hand Sliding; both hands body Rotate; all four Sliding; one deliberately reach-limited Foot.L with independent Hand.R still solving; injected one-limb target drift fails closed then restores the whole four-limb batch; AUTO OFF creates zero additional keys; one native Undo restores the committed four-limb COM gesture.
+MAIN DIFF / SHA: multi-limb architecture remained the existing E7/E8 tuple/guard design. USER FIRST exposed one production Undo/Redo defect in BAW_OT_rigped_direct_move_axis; final rigped_transform.py SHA-256 is 059fbda3ed35f8e80ccd828e777742088d14bbe54594662259b02eaa57991d37. Direct Move now uses Blender native operator bl_options {REGISTER, UNDO, BLOCKING} with zero manual bpy.ops.ed.undo_push calls.
+PRE REVIEW: Qwen awb-e9-pre-qwen-20260922-01 + Gemini awb-e9-pre-gemini-20260922-01; GO after Main adjudication, with no new coordinator/body compensation/full-body solver accepted.
+POST REVIEW: corrected inline packet docs/AGENT/E9_POST_UNDO_INLINE_SOURCE_PACKET_20260922.md reviewed by DeepSeek awb-e9-post-deepseek-20260922-01-corrected and Qwen awb-e9-post-qwen-20260922-01-corrected; both CLEAR. An earlier POST transport used a stale challenger mirror, was consumed, and was explicitly not counted.
+MAIN VERDICT: USER PASS / CLOSED. Existing independent hidden native-IK domains remain the authority model; no body compensation, cross-limb solve, or full-body balance layer was added.
+CODE/STATIC: 410 pytest PASS; Ruff PASS. E9 source tests now also freeze the native operator UNDO boundary and absence of manual undo_push in direct Move.
+BLENDER API/STATE: Blender 5.2.1 E9 runtime FULL PASS after POST. Cases passed: left Sliding/right Free; both feet; foot+hand; both hands Rotate; all four; deliberate reach limit; injected one-limb authority drift whole-batch restore; AUTO OFF; native-UNDO source contract.
 REACH-LIMIT EVIDENCE: deliberate Foot.L saturation produced target/result gap 1.357945 while Hand.R remained independently near target at 0.056574; no COM/body compensation or abort was introduced.
 REGRESSION: E7 runtime PASS; E8 runtime PASS; I12 runtime PASS; I13 runtime PASS.
-GUI INPUT/SCREEN: USER FIRST was paused before gesture validation because live fixture preparation had replaced the fitted manual baseline with repeatedly generated default Rigpeds and accumulated AWB Rigped.001-.008 residue. The verified fitted working baseline (~4.624 m, one AWB_Rigped, 79 bones) was promoted to immutable `baselines/golden/rigped_animate_manual_baseline_v1.blend`; its manifest pins SHA-256 `2d71e17f2849ec58dd5d7acaa946861fb89b99a7974406e049d78e5adefa4fe4`, and a second read-only bundle lives under `E:\AIProjects\Backups\Blender_Animation_Workbench\golden`. `build/rigped_animate_manual_baseline.blend` is now disposable working state recreated and verified by Named Task `awb-prepare-rigped-user-baseline`; `.blend1` is explicitly not baseline authority. End-to-end prepare task execution passed and reopened the fitted working copy. Gesture validation is still pending.
-UNDO/REDO: automated native single-Undo proof PASS; direct user Undo/Redo remains part of USER FIRST.
-AUTO OFF: verified in E9 runtime with both AWB Auto Key and Blender native Auto Key disabled and no additional animation keys.
-OPEN RISK: only direct user interaction/screen confirmation remains. Separate I19 continuous-contact broad-smoke residual remains debt.
-NEXT ITEM ALLOWED: NO — close E9 only after USER FIRST acceptance; do not start E10 yet.
+GUI INPUT/SCREEN: USER FIRST PASS. Accepted cases: both feet Sliding + COM Move; foot+hand mixed Sliding/Free + COM Move; both hands Sliding + Spine2 Rotate; all four Sliding body gesture; deliberate reach limit; four-limb ESC cancel; AUTO OFF; one Undo + one Redo.
+UNDO/REDO REGRESSION + FIX: initial manual undo_push bookkeeping made the first Ctrl+Z a same-pose no-op; start-only bookkeeping restored Undo but lost Redo. Final native-UNDO patch was installed/reloaded. One Ctrl+Z changed COM by 1.7055584037 m from captured pose B and changed all observed limbs with redo_poll=true; one Ctrl+Shift+Z restored COM/Hand.L/Hand.R/Foot.L/Foot.R to pose B with exact measured delta 0.
+BASELINE SAFETY: immutable authority is baselines/golden/rigped_animate_manual_baseline_v1.blend, manifest SHA-256 2d71e17f2849ec58dd5d7acaa946861fb89b99a7974406e049d78e5adefa4fe4. build/rigped_animate_manual_baseline.blend is disposable working state recreated by awb-prepare-rigped-user-baseline; .blend1 is never rollback authority.
+AUTO OFF: AWB Auto Key OFF and Blender native Auto Key OFF throughout accepted USER FIRST. DeepSeek's AUTO ON Undo/Redo suggestion is deferred follow-up, not an E9 blocker because the canonical E9 USER FIRST scope is AUTO OFF.
+FROZEN USER FINAL: debug/user_final_tests/current.json -> E9. Curated clean-baseline semantic replay PASS / 17 actions; native cancel and Undo/Redo remain preserved as live evidence because they are UI/history outcomes rather than semantic replay actions.
+OPEN RISK: no E9 blocker. Separate I19 continuous-contact broad-smoke residual remains debt.
+NEXT ITEM ALLOWED: YES — E10 may proceed.
 ```
 
 ## 6. Explicit non-goals until this plan closes
@@ -1135,18 +1137,8 @@ Do not start or redesign:
 
 ## 7. Immediate next action
 
-**E1 through E8 are USER PASS / CLOSED. E9 code/runtime evidence is green and USER FIRST is the only remaining gate.**
+**E1 through E9 are USER PASS / CLOSED.**
 
-Run the focused E9 manual sequence on the existing production build with AUTO OFF:
+Proceed to **E10 — Deterministic replay modes**.
 
-1. both feet Sliding -> COM Move down/side;
-2. one foot + one hand Sliding -> COM Move;
-3. both hands Sliding -> Spine/COM body Rotate;
-4. all four limbs Sliding -> COM Move;
-5. deliberately push one Sliding limb beyond reach and confirm only that limb saturates while the body gesture remains authoritative;
-6. ESC/RMB one four-limb body gesture and confirm exact visible return;
-7. complete one four-limb body gesture, then one Undo and one Redo.
-
-Pass criteria: every red cue remains on its own hidden target, limbs remain independent, no body compensation/full-body solve appears, no partial overlay residue remains after cancel/failure, AUTO OFF inserts no new keys, and one Undo/Redo covers the whole supported gesture.
-
-Do not start E10 until E9 USER FIRST is accepted. Do not reopen E1-E8 without new concrete regression evidence.
+Do not reopen E1-E9 without new concrete regression evidence. E9 frozen user-final authority is `debug/user_final_tests/current.json -> E9`.
