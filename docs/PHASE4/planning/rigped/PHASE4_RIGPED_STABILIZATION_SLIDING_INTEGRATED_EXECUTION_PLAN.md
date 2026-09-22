@@ -939,9 +939,28 @@ Questions:
 
 The user runs the focused AK4 debug matrix. Any defect is captured once, then Main uses log/replay loops until stable. Artificial fault injection is deferred to RC1 Hardening unless a current captured defect specifically requires it.
 
+## Closure evidence — 2026-09-22
+
+Status: **USER PASS / CLOSED**.
+
+- PRE: Qwen + DeepSeek completed. Both identified cross-writer Auto atomicity risk; DeepSeek additionally identified release-time AUTO OFF leakage.
+- Implementation: existing Contact/direct writers gained deferred journals; mixed gesture writers prepare while OPEN, then `MutationJournal.commit_group()` validates the full set before an assignment-only COMMITTED state transition. Release-time AUTO state is re-read before every relevant modal commit. No Auto-specific solver, key schema, C call, or second Sliding closure planner was added.
+- POST: the first DeepSeek POST correctly found a sequential-finalize hole. Main replaced per-journal final commit with `commit_group()`; blocker-fix re-review then passed **DeepSeek USER-FIRST READY + Gemini USER-FIRST READY**.
+- Static gate: **440 pytest PASS + Ruff PASS**.
+- USER FIRST / live Blender:
+  - direct Sliding W Auto: frame 10 stayed at the 29-row Sliding authored bundle, exact-frame duplicates = 0, body-row leakage = 0;
+  - direct Sliding E Auto: same 29-row authored bundle, exact-frame duplicates = 0, body-row leakage = 0;
+  - COM body-only Auto: frame 20 wrote only COM location XYZ + semantic marker (4 rows); no Foot.L Contact/IK/public-derived rows;
+  - Root body-only Auto: frame 30 wrote only Root location XYZ + semantic marker (4 rows); IK target/pole local basis stayed unchanged while their world translation followed Root once;
+  - live one Undo removed the Root pose/key bundle and one Redo restored it exactly;
+  - passive scrub 0↔30 preserved the exact animation signature: 37 FCurves / 51 keys before and after.
+- Isolated Blender 5.2.1 runtime: `P4_E11_MULTILIMB_GROUP_COMMIT_OK`, `P4_E11_AUTO_OFF_RELEASE_NO_WRITE_OK`, `P4_E11_ESC_NO_WRITE_RESTORE_OK`, `P4_E11_SCRUB_NO_WRITE_OK`, final `P4_E11_SLIDING_AUTO_RUNTIME_OK`.
+- E7 and E8 runtime regressions both passed after E11, including COM dependency authority and Root-relative target-follow-once behavior.
+- The first isolated-verifier invocation failed only in verifier code by passing a Rotate-only dataclass field to a Move plan; the verifier was corrected and rerun without product-code changes.
+
 ## Exit
 
-AK4 Sliding Auto is closed.
+AK4 Sliding Auto is **USER PASS / CLOSED**.
 
 ---
 
