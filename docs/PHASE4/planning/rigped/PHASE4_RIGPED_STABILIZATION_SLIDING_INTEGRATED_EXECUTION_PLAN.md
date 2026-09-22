@@ -10,7 +10,7 @@
 > Source plans merged here:
 > - `PHASE4_RIGPED_SLIDING_IMPLEMENTATION_PLAN.md` (2026-09-18 Astra Sliding/COM plan)
 > - `PHASE4_RIGPED_STABILIZATION_OWNERSHIP_PLAN.md` (2026-09-19 ownership gate)
-> - `docs/AGENT/ASTRA_REVIEW_RESPONSE_PHASE4_STABILIZATION_20260919.md` (2026-09-19 Astra architecture response)
+> - `docs/AGENT/archive/2026-09/ASTRA_REVIEW_RESPONSE_PHASE4_STABILIZATION_20260919.md` (2026-09-19 Astra architecture response)
 
 ## 2026-09-22 Astra full-audit reopen — A5 RE-CLOSED BEFORE A6
 
@@ -1193,7 +1193,7 @@ NEXT ITEM ALLOWED: YES — proceed to E9 only.
 ITEM: E9 — Multi-limb Sliding body dependency
 MAIN DIFF / SHA: multi-limb architecture remained the existing E7/E8 tuple/guard design. USER FIRST exposed one production Undo/Redo defect in BAW_OT_rigped_direct_move_axis; final rigped_transform.py SHA-256 is 059fbda3ed35f8e80ccd828e777742088d14bbe54594662259b02eaa57991d37. Direct Move now uses Blender native operator bl_options {REGISTER, UNDO, BLOCKING} with zero manual bpy.ops.ed.undo_push calls.
 PRE REVIEW: Qwen awb-e9-pre-qwen-20260922-01 + Gemini awb-e9-pre-gemini-20260922-01; GO after Main adjudication, with no new coordinator/body compensation/full-body solver accepted.
-POST REVIEW: corrected inline packet docs/AGENT/E9_POST_UNDO_INLINE_SOURCE_PACKET_20260922.md reviewed by DeepSeek awb-e9-post-deepseek-20260922-01-corrected and Qwen awb-e9-post-qwen-20260922-01-corrected; both CLEAR. An earlier POST transport used a stale challenger mirror, was consumed, and was explicitly not counted.
+POST REVIEW: corrected inline packet docs/AGENT/archive/2026-09/E9_POST_UNDO_INLINE_SOURCE_PACKET_20260922.md reviewed by DeepSeek awb-e9-post-deepseek-20260922-01-corrected and Qwen awb-e9-post-qwen-20260922-01-corrected; both CLEAR. An earlier POST transport used a stale challenger mirror, was consumed, and was explicitly not counted.
 MAIN VERDICT: USER PASS / CLOSED. Existing independent hidden native-IK domains remain the authority model; no body compensation, cross-limb solve, or full-body balance layer was added.
 CODE/STATIC: 410 pytest PASS; Ruff PASS. E9 source tests now also freeze the native operator UNDO boundary and absence of manual undo_push in direct Move.
 BLENDER API/STATE: Blender 5.2.1 E9 runtime FULL PASS after POST. Cases passed: left Sliding/right Free; both feet; foot+hand; both hands Rotate; all four; deliberate reach limit; injected one-limb authority drift whole-batch restore; AUTO OFF; native-UNDO source contract.
@@ -1212,8 +1212,8 @@ NEXT ITEM ALLOWED: YES — E10 may proceed.
 
 ```text
 SCOPE: A5 Sliding reopen only. A6 Planted was explicitly not started.
-AUDIT REQUEST: docs/AGENT/ASTRA_A5_FULL_AUDIT_REQUEST_20260922.md
-AUDIT RESPONSE: docs/AGENT/ASTRA_A5_FULL_AUDIT_RESPONSE_20260922.md
+AUDIT REQUEST: docs/AGENT/archive/2026-09/ASTRA_A5_FULL_AUDIT_REQUEST_20260922.md
+AUDIT RESPONSE: docs/AGENT/archive/2026-09/ASTRA_A5_FULL_AUDIT_RESPONSE_20260922.md
 
 MAIN B1 VERDICT: ACCEPTED BLOCKER.
 ROOT CAUSE: generic Track Bar per-FCurve replacement skipped Contact rows that existed only at the occupied destination. Free -> Sliding replacement could therefore leave destination pole_angle and create malformed Free.
