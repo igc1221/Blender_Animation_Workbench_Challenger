@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from .debug_trace import trace_event
 from .phase4_contact_authoring import (
     ContactAuthoringMode,
     ContactAuthoringResult,
@@ -11,6 +12,7 @@ from .phase4_contact_authoring import (
     build_contact_intent_plan,
     execute_contact_batch_intent_plan,
     execute_contact_intent_plan,
+    finalize_deferred_contact_authoring_result,
     snapshot_contact_transform_rows,
 )
 from .phase4_contact_model import ContactKeyType
@@ -21,7 +23,12 @@ from .phase4_verification import (
     DiagnosticSeverity,
     OperationStage,
 )
-from .phase4_writer import DirectWriterResult, WriterTrigger, execute_direct_key_plan
+from .phase4_writer import (
+    DirectWriterResult,
+    WriterTrigger,
+    execute_direct_key_plan,
+    finalize_deferred_direct_writer_result,
+)
 from .semantic_adapter import assigned_channelbag
 
 
@@ -67,6 +74,60 @@ class RigpedAutoDirectMovePlanResult:
     @property
     def ok(self) -> bool:
         return self.plan is not None and not self.diagnostics
+
+
+AutoWriterResult = DirectWriterResult | ContactAuthoringResult
+
+
+def rollback_rigped_auto_writer_results(
+    results: tuple[AutoWriterResult, ...],
+) -> None:
+    """Rollback every still-open deferred AUTO writer in reverse order."""
+
+    for result in reversed(results):
+        journal = result.pending_journal
+        if journal is None:
+            continue
+        if journal.state.value == "OPEN":
+            journal.rollback_or_raise()
+
+
+def commit_rigped_auto_writer_results(
+    results: tuple[AutoWriterResult, ...],
+) -> None:
+    """Finalize a verified set of deferred AUTO writers as one gesture."""
+
+    pending = tuple(result for result in results if result.pending_journal is not None)
+    for result in pending:
+        if (
+            not result.applied
+            or result.pending_journal is None
+            or result.operation_id is None
+        ):
+            raise RuntimeError("AUTO writer result is not commit-ready.")
+        if result.pending_journal.state.value != "OPEN":
+            raise RuntimeError(
+                "AUTO writer journal is not open: "
+                f"{result.pending_journal.state.value}."
+            )
+
+    for result in pending:
+        if isinstance(result, DirectWriterResult):
+            finalize_deferred_direct_writer_result(result)
+        else:
+            finalize_deferred_contact_authoring_result(result)
+
+    if pending:
+        trace_event(
+            "WRITER",
+            "AUTO_TRANSACTION_COMMIT",
+            operation_ids=tuple(
+                str(result.operation_id)
+                for result in pending
+                if result.operation_id is not None
+            ),
+            writer_count=len(pending),
+        )
 
 
 def _direct_plan_family_channels(
@@ -342,6 +403,7 @@ def commit_rigped_auto_direct_move(
     session: RigpedAutoDirectMovePlan,
     *,
     selector_character_id: str | None = None,
+    defer_commit: bool = False,
 ) -> DirectWriterResult:
     """Commit final direct position through the existing phase4 direct writer."""
 
@@ -367,6 +429,7 @@ def commit_rigped_auto_direct_move(
         auto_baseline_plan=session.baseline_plan,
         auto_baseline_time=session.baseline_time,
         selector_character_id=selector_character_id,
+        defer_commit=defer_commit,
     )
 
 
@@ -435,6 +498,7 @@ def commit_rigped_auto_direct_rotate(
     session: RigpedAutoDirectRotatePlan,
     *,
     selector_character_id: str | None = None,
+    defer_commit: bool = False,
 ) -> DirectWriterResult:
     """Commit final direct rotation through the existing phase4 direct writer."""
 
@@ -498,6 +562,7 @@ def commit_rigped_auto_direct_rotate(
         auto_baseline_plan=session.baseline_plan,
         auto_baseline_time=session.baseline_time,
         selector_character_id=selector_character_id,
+        defer_commit=defer_commit,
     )
 
 
@@ -646,6 +711,7 @@ def commit_rigped_auto_contact_batch(
     session: RigpedAutoContactBatchPlan,
     *,
     selector_character_id: str | None = None,
+    defer_commit: bool = False,
 ) -> ContactAuthoringResult:
     """Rebuild the final Contact batch after the transform, then persist it.
 
@@ -708,6 +774,7 @@ def commit_rigped_auto_contact_batch(
         auto_baseline_rows_by_mapping=session.baseline_rows_by_mapping,
         auto_baseline_time=session.baseline_time,
         selector_character_id=selector_character_id,
+        defer_commit=defer_commit,
     )
 
 
@@ -833,6 +900,7 @@ def commit_rigped_auto_anchor(
     session: RigpedAutoAnchorPlan,
     *,
     selector_character_id: str | None = None,
+    defer_commit: bool = False,
 ) -> ContactAuthoringResult:
     """Persist a single Contact Auto gesture from a fresh post-transform plan.
 
@@ -883,4 +951,5 @@ def commit_rigped_auto_anchor(
         auto_baseline_rows=session.baseline_rows,
         auto_baseline_time=session.baseline_time,
         selector_character_id=selector_character_id,
+        defer_commit=defer_commit,
     )

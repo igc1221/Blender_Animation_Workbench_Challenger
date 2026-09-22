@@ -63,10 +63,12 @@ from .rigped_auto_key import (
     commit_rigped_auto_contact_batch,
     commit_rigped_auto_direct_move,
     commit_rigped_auto_direct_rotate,
+    commit_rigped_auto_writer_results,
     plan_rigped_auto_anchor,
     plan_rigped_auto_contact_batch,
     plan_rigped_auto_direct_move,
     plan_rigped_auto_direct_rotate,
+    rollback_rigped_auto_writer_results,
 )
 from .rigped_contract import (
     RIGPED_SETUP_PROPERTY,
@@ -3409,6 +3411,17 @@ class BAW_OT_rigped_semantic_move_axis(bpy.types.Operator):
             success = True
             keyed = False
             diagnostics: tuple[Any, ...] = ()
+            auto_enabled_at_release = bool(
+                getattr(context.scene, "baw_auto_key_enabled", False)
+            )
+            auto_contact_batch_plan = (
+                self._auto_contact_batch_plan if auto_enabled_at_release else None
+            )
+            auto_plan = self._auto_plan if auto_enabled_at_release else None
+            auto_direct_plan = (
+                self._auto_direct_plan if auto_enabled_at_release else None
+            )
+            deferred_auto_results: list[Any] = []
             auto_context = control_context_for_context(context)
             auto_limb_context, auto_direct_context = _fk_move_auto_contexts(
                 context.scene,
@@ -3416,36 +3429,42 @@ class BAW_OT_rigped_semantic_move_axis(bpy.types.Operator):
                 fk_sessions,
             )
             try:
-                if self._auto_contact_batch_plan is not None:
+                if auto_contact_batch_plan is not None:
                     link_trace_operation(
-                        self._auto_contact_batch_plan.batch.operation_id,
+                        auto_contact_batch_plan.batch.operation_id,
                         self._trace_operation_id,
                     )
                     auto_result = commit_rigped_auto_contact_batch(
                         context.scene,
                         auto_limb_context,
-                        self._auto_contact_batch_plan,
+                        auto_contact_batch_plan,
+                        defer_commit=True,
                     )
                     success = bool(auto_result.applied)
                     keyed = bool(auto_result.applied)
                     diagnostics = tuple(auto_result.diagnostics)
-                elif self._auto_plan is not None:
+                    if auto_result.applied:
+                        deferred_auto_results.append(auto_result)
+                elif auto_plan is not None:
                     link_trace_operation(
-                        self._auto_plan.intent.operation_id,
+                        auto_plan.intent.operation_id,
                         self._trace_operation_id,
                     )
                     auto_result = commit_rigped_auto_anchor(
                         context.scene,
                         auto_limb_context,
-                        self._auto_plan,
+                        auto_plan,
+                        defer_commit=True,
                     )
                     success = bool(auto_result.applied)
                     keyed = bool(auto_result.applied)
                     diagnostics = tuple(auto_result.diagnostics)
+                    if auto_result.applied:
+                        deferred_auto_results.append(auto_result)
 
-                if success and self._auto_direct_plan is not None:
-                    direct_plan = self._auto_direct_plan
-                    if self._auto_plan is not None or self._auto_contact_batch_plan is not None:
+                if success and auto_direct_plan is not None:
+                    direct_plan = auto_direct_plan
+                    if auto_plan is not None or auto_contact_batch_plan is not None:
                         direct_plan = replace(direct_plan, allow_storage_rebind=True)
                     link_trace_operation(
                         direct_plan.begin_plan.operation_id,
@@ -3455,18 +3474,26 @@ class BAW_OT_rigped_semantic_move_axis(bpy.types.Operator):
                         context.scene,
                         auto_direct_context,
                         direct_plan,
+                        defer_commit=True,
                     )
                     success = bool(direct_result.applied)
                     keyed = keyed or bool(direct_result.applied)
                     diagnostics = diagnostics + tuple(direct_result.diagnostics)
+                    if direct_result.applied:
+                        deferred_auto_results.append(direct_result)
                     if success:
                         _refresh_current_sliding_public_overlays(context)
+
+                if success:
+                    commit_rigped_auto_writer_results(tuple(deferred_auto_results))
             except (ContactAuthoringError, RuntimeError, ValueError, ReferenceError) as exc:
+                rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                 cancel_semantic_move_domains(context, sessions, fk_sessions)
                 _report_operator_error(self, context, exc)
                 success = False
 
             if not success:
+                rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                 cancel_semantic_move_domains(context, sessions, fk_sessions)
 
             self._session = None
@@ -4137,9 +4164,22 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                     domains=reach_clamped,
                 )
 
-            auto_plan = self._auto_plan
-            auto_direct_plan = self._auto_direct_plan
-            auto_contact_batch_plan = self._auto_contact_batch_plan
+            auto_enabled_at_release = bool(
+                getattr(context.scene, "baw_auto_key_enabled", False)
+            )
+            auto_plan = self._auto_plan if auto_enabled_at_release else None
+            auto_direct_plan = (
+                self._auto_direct_plan if auto_enabled_at_release else None
+            )
+            auto_contact_batch_plan = (
+                self._auto_contact_batch_plan if auto_enabled_at_release else None
+            )
+            deferred_auto_contact_mapping_ids = (
+                self._deferred_auto_contact_mapping_ids
+                if auto_enabled_at_release
+                else ()
+            )
+            deferred_auto_results: list[Any] = []
             auto_context = control_context_for_context(context)
             auto_limb_context, auto_direct_context = _fk_move_auto_contexts(
                 context.scene,
@@ -4148,13 +4188,13 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
             )
             if (
                 auto_contact_batch_plan is None
-                and self._deferred_auto_contact_mapping_ids
+                and deferred_auto_contact_mapping_ids
             ):
                 batch = plan_rigped_auto_contact_batch(
                     context.scene,
                     auto_limb_context,
                     operation_id=f"ak3:fk-move-auto-release:{uuid4().hex}",
-                    mapping_ids=self._deferred_auto_contact_mapping_ids,
+                    mapping_ids=deferred_auto_contact_mapping_ids,
                 )
                 if not batch.ok or batch.plan is None:
                     cancel_fk_joint_moves(context, sessions)
@@ -4182,6 +4222,7 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                         context.scene,
                         auto_limb_context,
                         auto_plan,
+                        defer_commit=True,
                     )
                 except (ContactAuthoringError, RuntimeError, ValueError, ReferenceError) as exc:
                     cancel_fk_joint_moves(context, sessions)
@@ -4190,6 +4231,7 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                     self._auto_plan = None
                     self._auto_direct_plan = None
                     self._auto_contact_batch_plan = None
+                    self._deferred_auto_contact_mapping_ids = ()
                     _set_semantic_move_drag_active(context, False)
                     return {"CANCELLED"}
                 if not auto_result.applied:
@@ -4200,8 +4242,10 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                     self._auto_plan = None
                     self._auto_direct_plan = None
                     self._auto_contact_batch_plan = None
+                    self._deferred_auto_contact_mapping_ids = ()
                     _set_semantic_move_drag_active(context, False)
                     return {"CANCELLED"}
+                deferred_auto_results.append(auto_result)
 
                 frames = [
                     float(context.scene.frame_current)
@@ -4225,6 +4269,7 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                         context.scene,
                         auto_limb_context,
                         auto_contact_batch_plan,
+                        defer_commit=True,
                     )
                 except (ContactAuthoringError, RuntimeError, ValueError, ReferenceError) as exc:
                     cancel_fk_joint_moves(context, sessions)
@@ -4233,6 +4278,7 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                     self._auto_plan = None
                     self._auto_direct_plan = None
                     self._auto_contact_batch_plan = None
+                    self._deferred_auto_contact_mapping_ids = ()
                     _set_semantic_move_drag_active(context, False)
                     return {"CANCELLED"}
                 if not auto_result.applied:
@@ -4246,8 +4292,10 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                     self._auto_plan = None
                     self._auto_direct_plan = None
                     self._auto_contact_batch_plan = None
+                    self._deferred_auto_contact_mapping_ids = ()
                     _set_semantic_move_drag_active(context, False)
                     return {"CANCELLED"}
+                deferred_auto_results.append(auto_result)
                 from .trackbar_model import clear_key_selection_for_context
 
                 clear_key_selection_for_context(context)
@@ -4268,17 +4316,21 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                         context.scene,
                         auto_direct_context,
                         auto_direct_plan,
+                        defer_commit=True,
                     )
                 except (RuntimeError, ValueError, ReferenceError) as exc:
+                    rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                     cancel_fk_joint_moves(context, sessions)
                     _report_operator_error(self, context, exc, replay_action=replay_action)
                     self._sessions = ()
                     self._auto_plan = None
                     self._auto_direct_plan = None
                     self._auto_contact_batch_plan = None
+                    self._deferred_auto_contact_mapping_ids = ()
                     _set_semantic_move_drag_active(context, False)
                     return {"CANCELLED"}
                 if not auto_result.applied:
+                    rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                     cancel_fk_joint_moves(context, sessions)
                     detail = "; ".join(item.detail for item in auto_result.diagnostics)
                     self.report({"WARNING"}, detail or "Rigped direct FK Move Auto commit failed.")
@@ -4286,8 +4338,10 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                     self._auto_plan = None
                     self._auto_direct_plan = None
                     self._auto_contact_batch_plan = None
+                    self._deferred_auto_contact_mapping_ids = ()
                     _set_semantic_move_drag_active(context, False)
                     return {"CANCELLED"}
+                deferred_auto_results.append(auto_result)
                 _refresh_current_sliding_public_overlays(context)
                 from .trackbar_model import clear_key_selection_for_context
 
@@ -4297,21 +4351,20 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
             try:
                 result = commit_fk_joint_moves(context, sessions)
             except RigpedSemanticMoveError as exc:
+                rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                 cancel_fk_joint_moves(context, sessions)
                 _report_operator_error(self, context, exc, replay_action=replay_action)
                 self._sessions = ()
                 self._auto_plan = None
                 self._auto_direct_plan = None
                 self._auto_contact_batch_plan = None
+                self._deferred_auto_contact_mapping_ids = ()
                 _set_semantic_move_drag_active(context, False)
                 return {"CANCELLED"}
-            self._sessions = ()
-            self._auto_plan = None
-            self._auto_direct_plan = None
-            self._auto_contact_batch_plan = None
-            self._deferred_auto_contact_mapping_ids = ()
-            _set_semantic_move_drag_active(context, False)
+
             if not result.success:
+                rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
+                cancel_fk_joint_moves(context, sessions)
                 detail = "; ".join(item.detail for item in result.diagnostics)
                 trace_event(
                     "OPERATION",
@@ -4323,7 +4376,34 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                 )
                 self._trace_operation_id = None
                 self.report({"WARNING"}, detail or "Rigped FK Move commit failed")
+                self._sessions = ()
+                self._auto_plan = None
+                self._auto_direct_plan = None
+                self._auto_contact_batch_plan = None
+                self._deferred_auto_contact_mapping_ids = ()
+                _set_semantic_move_drag_active(context, False)
                 return {"CANCELLED"}
+
+            try:
+                commit_rigped_auto_writer_results(tuple(deferred_auto_results))
+            except (RuntimeError, ValueError, ReferenceError) as exc:
+                rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
+                cancel_fk_joint_moves(context, sessions)
+                _report_operator_error(self, context, exc, replay_action=replay_action)
+                self._sessions = ()
+                self._auto_plan = None
+                self._auto_direct_plan = None
+                self._auto_contact_batch_plan = None
+                self._deferred_auto_contact_mapping_ids = ()
+                _set_semantic_move_drag_active(context, False)
+                return {"CANCELLED"}
+
+            self._sessions = ()
+            self._auto_plan = None
+            self._auto_direct_plan = None
+            self._auto_contact_batch_plan = None
+            self._deferred_auto_contact_mapping_ids = ()
+            _set_semantic_move_drag_active(context, False)
             if context.area is not None:
                 context.area.tag_redraw()
             # One successful FK Move gesture owns one undo step, including all
@@ -5102,7 +5182,10 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                 operation_id=self._trace_operation_id,
             )
 
-            auto_plan = self._auto_plan
+            auto_enabled_at_release = bool(
+                getattr(context.scene, "baw_auto_key_enabled", False)
+            )
+            auto_plan = self._auto_plan if auto_enabled_at_release else None
             if auto_plan is not None:
                 link_trace_operation(auto_plan.begin_plan.operation_id, self._trace_operation_id)
                 try:
@@ -7919,9 +8002,22 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 self._trace_operation_id = None
                 return {"CANCELLED"}
 
-            auto_plan = self._auto_plan
-            auto_direct_plan = self._auto_direct_plan
-            auto_contact_batch_plan = self._auto_contact_batch_plan
+            auto_enabled_at_release = bool(
+                getattr(context.scene, "baw_auto_key_enabled", False)
+            )
+            auto_plan = self._auto_plan if auto_enabled_at_release else None
+            auto_direct_plan = (
+                self._auto_direct_plan if auto_enabled_at_release else None
+            )
+            auto_contact_batch_plan = (
+                self._auto_contact_batch_plan if auto_enabled_at_release else None
+            )
+            deferred_auto_contact_mapping_ids = (
+                self._deferred_auto_contact_mapping_ids
+                if auto_enabled_at_release
+                else ()
+            )
+            deferred_auto_results: list[Any] = []
             auto_context = control_context_for_context(context)
             auto_limb_context, auto_direct_context = _direct_rotate_auto_contexts(
                 context.scene,
@@ -7929,13 +8025,13 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             )
             if (
                 auto_contact_batch_plan is None
-                and self._deferred_auto_contact_mapping_ids
+                and deferred_auto_contact_mapping_ids
             ):
                 batch = plan_rigped_auto_contact_batch(
                     context.scene,
                     auto_limb_context,
                     operation_id=f"rigped-auto-rotate-release:{uuid4().hex}",
-                    mapping_ids=self._deferred_auto_contact_mapping_ids,
+                    mapping_ids=deferred_auto_contact_mapping_ids,
                 )
                 if not batch.ok or batch.plan is None:
                     self._restore_preview(context)
@@ -7958,6 +8054,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                         context.area.tag_redraw()
                     return {"CANCELLED"}
                 auto_contact_batch_plan = batch.plan
+
             if auto_plan is not None:
                 link_trace_operation(
                     auto_plan.intent.operation_id,
@@ -7968,8 +8065,10 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                         context.scene,
                         auto_limb_context,
                         auto_plan,
+                        defer_commit=True,
                     )
                 except (ContactAuthoringError, RuntimeError, ValueError, ReferenceError) as exc:
+                    rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                     self._restore_preview(context)
                     _report_operator_error(self, context, exc)
                     self._states = ()
@@ -7978,12 +8077,14 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     self._auto_plan = None
                     self._auto_direct_plan = None
                     self._auto_contact_batch_plan = None
+                    self._deferred_auto_contact_mapping_ids = ()
                     self._forearm_special_session = None
                     clear_rotation_angle(context)
                     if context.area is not None:
                         context.area.tag_redraw()
                     return {"CANCELLED"}
                 if not result.applied:
+                    rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                     self._restore_preview(context)
                     detail = "; ".join(item.detail for item in result.diagnostics)
                     self.report({"WARNING"}, detail or "Rigped semantic Rotate Auto commit failed.")
@@ -7993,11 +8094,13 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     self._auto_plan = None
                     self._auto_direct_plan = None
                     self._auto_contact_batch_plan = None
+                    self._deferred_auto_contact_mapping_ids = ()
                     self._forearm_special_session = None
                     clear_rotation_angle(context)
                     if context.area is not None:
                         context.area.tag_redraw()
                     return {"CANCELLED"}
+                deferred_auto_results.append(result)
 
                 frames = [
                     float(context.scene.frame_current)
@@ -8014,7 +8117,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 clear_key_selection_for_context(context)
                 context.scene.baw_has_selected_key = False
 
-            if auto_contact_batch_plan is not None:
+            elif auto_contact_batch_plan is not None:
                 link_trace_operation(
                     auto_contact_batch_plan.batch.operation_id,
                     self._trace_operation_id,
@@ -8024,8 +8127,10 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                         context.scene,
                         auto_limb_context,
                         auto_contact_batch_plan,
+                        defer_commit=True,
                     )
                 except (ContactAuthoringError, RuntimeError, ValueError, ReferenceError) as exc:
+                    rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                     self._restore_preview(context)
                     _report_operator_error(self, context, exc)
                     self._states = ()
@@ -8034,12 +8139,14 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     self._auto_plan = None
                     self._auto_direct_plan = None
                     self._auto_contact_batch_plan = None
+                    self._deferred_auto_contact_mapping_ids = ()
                     self._forearm_special_session = None
                     clear_rotation_angle(context)
                     if context.area is not None:
                         context.area.tag_redraw()
                     return {"CANCELLED"}
                 if not result.applied:
+                    rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                     self._restore_preview(context)
                     detail = "; ".join(item.detail for item in result.diagnostics)
                     self.report({"WARNING"}, detail or "Rigped multi-limb Rotate Auto commit failed.")
@@ -8049,11 +8156,13 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     self._auto_plan = None
                     self._auto_direct_plan = None
                     self._auto_contact_batch_plan = None
+                    self._deferred_auto_contact_mapping_ids = ()
                     self._forearm_special_session = None
                     clear_rotation_angle(context)
                     if context.area is not None:
                         context.area.tag_redraw()
                     return {"CANCELLED"}
+                deferred_auto_results.append(result)
 
                 from .trackbar_model import clear_key_selection_for_context
 
@@ -8061,6 +8170,11 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 context.scene.baw_has_selected_key = False
 
             if auto_direct_plan is not None:
+                if auto_plan is not None or auto_contact_batch_plan is not None:
+                    auto_direct_plan = replace(
+                        auto_direct_plan,
+                        allow_storage_rebind=True,
+                    )
                 link_trace_operation(
                     auto_direct_plan.begin_plan.operation_id,
                     self._trace_operation_id,
@@ -8070,8 +8184,10 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                         context.scene,
                         auto_direct_context,
                         auto_direct_plan,
+                        defer_commit=True,
                     )
                 except (RuntimeError, ValueError, ReferenceError) as exc:
+                    rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                     self._restore_preview(context)
                     _report_operator_error(self, context, exc)
                     self._states = ()
@@ -8080,12 +8196,14 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     self._auto_plan = None
                     self._auto_direct_plan = None
                     self._auto_contact_batch_plan = None
+                    self._deferred_auto_contact_mapping_ids = ()
                     self._forearm_special_session = None
                     clear_rotation_angle(context)
                     if context.area is not None:
                         context.area.tag_redraw()
                     return {"CANCELLED"}
                 if not result.applied:
+                    rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                     self._restore_preview(context)
                     detail = "; ".join(item.detail for item in result.diagnostics)
                     self.report(
@@ -8098,11 +8216,13 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     self._auto_plan = None
                     self._auto_direct_plan = None
                     self._auto_contact_batch_plan = None
+                    self._deferred_auto_contact_mapping_ids = ()
                     self._forearm_special_session = None
                     clear_rotation_angle(context)
                     if context.area is not None:
                         context.area.tag_redraw()
                     return {"CANCELLED"}
+                deferred_auto_results.append(result)
 
                 # A direct writer can trigger Action reevaluation across
                 # both actively selected Sliding limbs and passive guarded
@@ -8118,6 +8238,26 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
 
                 clear_key_selection_for_context(context)
                 context.scene.baw_has_selected_key = False
+
+            try:
+                commit_rigped_auto_writer_results(tuple(deferred_auto_results))
+            except (RuntimeError, ValueError, ReferenceError) as exc:
+                rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
+                self._restore_preview(context)
+                _report_operator_error(self, context, exc)
+                self._states = ()
+                self._sliding_syncs = ()
+                self._active = None
+                self._auto_plan = None
+                self._auto_direct_plan = None
+                self._auto_contact_batch_plan = None
+                self._deferred_auto_contact_mapping_ids = ()
+                self._forearm_special_session = None
+                clear_rotation_angle(context)
+                if context.area is not None:
+                    context.area.tag_redraw()
+                return {"CANCELLED"}
+
             self._states = ()
             self._sliding_syncs = ()
             self._sliding_guard_capabilities = ()

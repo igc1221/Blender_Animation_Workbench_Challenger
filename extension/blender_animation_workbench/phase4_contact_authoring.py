@@ -271,6 +271,33 @@ class ContactAuthoringResult:
     created_fcurves: int = 0
     diagnostics: tuple[Diagnostic, ...] = ()
     mapping_contact_types: tuple[tuple[str, ContactKeyType], ...] = ()
+    pending_journal: MutationJournal | None = None
+    operation_id: str | None = None
+
+
+def finalize_deferred_contact_authoring_result(result: ContactAuthoringResult) -> None:
+    """Finalize one already-verified deferred Contact writer transaction."""
+
+    journal = result.pending_journal
+    if not result.applied or journal is None or result.operation_id is None:
+        raise ContactAuthoringError("Deferred Contact writer result is not commit-ready.")
+    if journal.state.value != "OPEN":
+        raise ContactAuthoringError(
+            f"Deferred Contact writer journal is not open: {journal.state.value}."
+        )
+    journal.commit()
+    trace_event(
+        "WRITER",
+        "CONTACT_DEFERRED_COMMIT",
+        operation_id=result.operation_id,
+        context=bpy.context,
+        rows_written=result.rows_written,
+        created_fcurves=result.created_fcurves,
+        mappings=tuple(
+            (mapping_id, contact_type.value)
+            for mapping_id, contact_type in result.mapping_contact_types
+        ),
+    )
 
 
 def _diagnostic(operation_id: str, code: str, detail: str, *, character_id: str | None = None) -> Diagnostic:
@@ -3887,6 +3914,7 @@ def execute_contact_intent_plan(
     auto_baseline_time: float | None = None,
     selector_character_id: str | None = None,
     hook: StageHook | None = None,
+    defer_commit: bool = False,
 ) -> ContactAuthoringResult:
     hook = hook or NoopStageHook()
     trace_event(
@@ -4551,6 +4579,28 @@ def execute_contact_intent_plan(
             raise ContactAuthoringError(
                 "Contact feedback-authority transition changed the evaluated terminal pose."
             )
+        if defer_commit:
+            trace_event(
+                "WRITER",
+                "CONTACT_WRITE_PREPARED",
+                operation_id=contact_plan.operation_id,
+                context=bpy.context,
+                trigger=trigger.value,
+                mapping_id=intent.mapping_id,
+                target_type=intent.target_type.value,
+                rows_written=rows_written,
+                created_fcurves=created_fcurves,
+            )
+            return ContactAuthoringResult(
+                True,
+                intent.target_type,
+                rows_written,
+                created_fcurves,
+                mapping_contact_types=((intent.mapping_id, intent.target_type),),
+                pending_journal=journal,
+                operation_id=contact_plan.operation_id,
+            )
+
         journal.commit()
         hook.enter(OperationStage.COMMIT, operation=contact_plan.operation_id)
         trace_event(
@@ -4640,6 +4690,7 @@ def execute_contact_batch_intent_plan(
     auto_baseline_time: float | None = None,
     selector_character_id: str | None = None,
     hook: StageHook | None = None,
+    defer_commit: bool = False,
 ) -> ContactAuthoringResult:
     """Commit dependency-independent limb Contact bundles in one persistent journal."""
 
@@ -5215,8 +5266,6 @@ def execute_contact_batch_intent_plan(
                     f"I20 feedback-authority transition changed terminal pose for "
                     f"{item.intent.mapping_id}."
                 )
-        journal.commit()
-        hook.enter(OperationStage.COMMIT, operation=contact_plan.operation_id)
         mapping_types = tuple(
             (item.intent.mapping_id, item.intent.target_type)
             for item in prepared_tuple
@@ -5226,6 +5275,32 @@ def execute_contact_batch_intent_plan(
             if all(contact_type is mapping_types[0][1] for _mapping, contact_type in mapping_types)
             else None
         )
+        if defer_commit:
+            trace_event(
+                "WRITER",
+                "CONTACT_BATCH_WRITE_PREPARED",
+                operation_id=contact_plan.operation_id,
+                context=bpy.context,
+                trigger=trigger.value,
+                mappings=tuple(
+                    (mapping_id, contact_type.value)
+                    for mapping_id, contact_type in mapping_types
+                ),
+                rows_written=rows_written,
+                created_fcurves=created_fcurves,
+            )
+            return ContactAuthoringResult(
+                True,
+                common_type,
+                rows_written,
+                created_fcurves,
+                mapping_contact_types=mapping_types,
+                pending_journal=journal,
+                operation_id=contact_plan.operation_id,
+            )
+
+        journal.commit()
+        hook.enter(OperationStage.COMMIT, operation=contact_plan.operation_id)
         trace_event(
             "WRITER",
             "CONTACT_BATCH_WRITE_COMMIT",

@@ -58,6 +58,8 @@ class DirectWriterResult:
     rows_written: int
     created_fcurves: int
     diagnostics: tuple[Diagnostic, ...] = ()
+    pending_journal: MutationJournal | None = None
+    operation_id: str | None = None
 
 
 _COMMITTED_OPERATION_IDS: set[str] = set()
@@ -65,6 +67,29 @@ _COMMITTED_OPERATION_IDS: set[str] = set()
 
 def clear_committed_operation_ids_for_file_lifecycle() -> None:
     _COMMITTED_OPERATION_IDS.clear()
+
+
+def finalize_deferred_direct_writer_result(result: DirectWriterResult) -> None:
+    """Finalize one already-verified deferred direct writer transaction."""
+
+    journal = result.pending_journal
+    if not result.applied or journal is None or result.operation_id is None:
+        raise DirectWriterError("Deferred direct writer result is not commit-ready.")
+    if journal.state.value != "OPEN":
+        raise DirectWriterError(
+            f"Deferred direct writer journal is not open: {journal.state.value}."
+        )
+    journal.commit()
+    _COMMITTED_OPERATION_IDS.add(result.operation_id)
+    trace_event(
+        "WRITER",
+        "DIRECT_WRITE_COMMIT",
+        operation_id=result.operation_id,
+        context=bpy.context,
+        deferred=True,
+        rows_written=result.rows_written,
+        created_fcurves=result.created_fcurves,
+    )
 
 
 def _pointer(value: Any) -> int | None:
@@ -488,6 +513,7 @@ def execute_direct_key_plan(
     auto_baseline_time: float | None = None,
     selector_character_id: str | None = None,
     hook: StageHook | None = None,
+    defer_commit: bool = False,
 ) -> DirectWriterResult:
     if plan.operation_type not in {OperationType.DIRECT_KEY, OperationType.ALL_KEY}:
         raise DirectWriterError("I5/I8 P/R writer accepts only DIRECT_KEY or ALL_KEY plans.")
@@ -685,6 +711,24 @@ def execute_direct_key_plan(
             raise DirectWriterError(
                 f"Writer row count mismatch: wrote {rows_written}, planned {expected_rows}."
             )
+        if defer_commit:
+            trace_event(
+                "WRITER",
+                "DIRECT_WRITE_PREPARED",
+                operation_id=plan.operation_id,
+                context=bpy.context,
+                trigger=trigger.value,
+                rows_written=rows_written,
+                created_fcurves=created_fcurves,
+            )
+            return DirectWriterResult(
+                True,
+                rows_written,
+                created_fcurves,
+                pending_journal=journal,
+                operation_id=plan.operation_id,
+            )
+
         journal.commit()
         _COMMITTED_OPERATION_IDS.add(plan.operation_id)
         hook.enter(OperationStage.COMMIT, operation=plan.operation_id)
@@ -697,7 +741,12 @@ def execute_direct_key_plan(
             rows_written=rows_written,
             created_fcurves=created_fcurves,
         )
-        return DirectWriterResult(True, rows_written, created_fcurves)
+        return DirectWriterResult(
+            True,
+            rows_written,
+            created_fcurves,
+            operation_id=plan.operation_id,
+        )
     except Exception as exc:
         trace_exception(
             "WRITER",
