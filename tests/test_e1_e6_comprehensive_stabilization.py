@@ -93,12 +93,16 @@ def test_b2_batch_contact_feedback_authority_is_verified_before_commit() -> None
     assert configure < update < pose_verify < commit
 
 
-def test_n1_replay_rejects_missing_scalar_result_and_validates_mixed_mapping_results() -> None:
-    replay = _function(REPLAY_PATH, "_execute_contact_action")
-    assert "if actual is None:" in replay
-    assert 'expected_mappings = action.get("mapping_contact_types")' in replay
-    assert "if not actual_mappings:" in replay
-    assert "actual_mappings != normalized_expected" in replay
+def test_n1_replay_separates_command_execution_from_recorded_result_validation() -> None:
+    command = _function(REPLAY_PATH, "_execute_contact_command_action")
+    recorded = _function(REPLAY_PATH, "_execute_contact_recorded_result_action")
+    assert "execute_contact_command(" in command
+    assert 'payload["recorded_contact_type"]' in command
+    assert "RECORDED_RESULT_MISMATCH" not in command
+    assert "resolve_operation_domain(" in recorded
+    assert "INCOMPLETE_CONTEXT" in recorded
+    assert "MAPPING_COVERAGE_MISMATCH" in recorded
+    assert "execute_contact_command(" not in recorded
 
 
 def test_n1_contact_capture_includes_per_mapping_results_for_mixed_batch_replay() -> None:

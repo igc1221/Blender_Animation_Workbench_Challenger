@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -16,12 +17,18 @@ from .debug_trace import (
     trace_scrub_end,
 )
 from .phase4_contact_authoring import (
+    ContactAuthoringMode,
+    build_contact_batch_intent_plan,
+    build_contact_intent_plan,
+    execute_contact_batch_intent_plan,
     execute_contact_command,
+    execute_contact_intent_plan,
     selected_contact_mapping_ids,
 )
 from .phase4_contact_model import (
     AWB_CONTACT_STATE_PROPERTY,
     ContactKeyType,
+    ContactPlantSpace,
     type_for_state_value,
 )
 from .phase4_contact_ui import (
@@ -68,6 +75,14 @@ from .rigped_transform import (
 )
 from .semantic_adapter import control_context_for_context
 from .trackbar_keying import set_awb_auto_key
+
+
+class ReplayMode(StrEnum):
+    RECORDED_RESULT = "RECORDED_RESULT"
+    COMMAND = "COMMAND"
+
+
+_RECORDED_CONTACT_TYPES = tuple(ContactKeyType)
 
 
 def _load_replay_script(path: str | None = None) -> dict[str, Any]:
@@ -199,7 +214,10 @@ def _execute_auto_key_action(context, action: dict[str, Any]) -> dict[str, Any]:
     return {"kind": "AUTO_KEY", "enabled": bool(scene.baw_auto_key_enabled)}
 
 
-def _execute_contact_action(context, action: dict[str, Any]) -> dict[str, Any]:
+def _prepare_contact_action_context(
+    context,
+    action: dict[str, Any],
+) -> tuple[Any, int, tuple[str, ...]]:
     scene = context.scene
     frame = int(action.get("frame", scene.frame_current))
     subframe = float(action.get("subframe", 0.0))
@@ -207,67 +225,356 @@ def _execute_contact_action(context, action: dict[str, Any]) -> dict[str, Any]:
     controls = tuple(str(name) for name in tuple(action.get("controls") or ()) if str(name))
     if controls:
         _select_pose_controls(context, controls)
+    return scene, frame, controls
 
+
+def _recorded_contact_type(value: Any, *, field_name: str) -> ContactKeyType | None:
+    if value is None:
+        return None
+    try:
+        return ContactKeyType(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"AWB semantic replay Contact INVALID_RECORDED_RESULT: "
+            f"{field_name}={value!r} is not a valid Contact type."
+        ) from exc
+
+
+def _recorded_mapping_contact_types(
+    action: dict[str, Any],
+) -> tuple[tuple[str, ContactKeyType], ...] | None:
+    raw = action.get("mapping_contact_types")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        items = tuple(raw.items())
+    else:
+        try:
+            raw_items = tuple(raw)
+        except TypeError as exc:
+            raise RuntimeError(
+                "AWB semantic replay Contact INVALID_RECORDED_RESULT: "
+                "mapping_contact_types is not an iterable mapping result."
+            ) from exc
+        if any(
+            not isinstance(item, (list, tuple)) or len(item) != 2
+            for item in raw_items
+        ):
+            raise RuntimeError(
+                "AWB semantic replay Contact INVALID_RECORDED_RESULT: "
+                "mapping_contact_types must contain exact (mapping_id, contact_type) pairs."
+            )
+        items = tuple((item[0], item[1]) for item in raw_items)
+
+    normalized: list[tuple[str, ContactKeyType]] = []
+    seen: set[str] = set()
+    for mapping_id, contact_type in items:
+        normalized_id = str(mapping_id)
+        if not normalized_id or normalized_id in seen:
+            raise RuntimeError(
+                "AWB semantic replay Contact INVALID_RECORDED_RESULT: "
+                f"mapping_contact_types has a missing/duplicate mapping id {normalized_id!r}."
+            )
+        seen.add(normalized_id)
+        normalized.append(
+            (
+                normalized_id,
+                _recorded_contact_type(
+                    contact_type,
+                    field_name=f"mapping_contact_types[{normalized_id!r}]",
+                ),
+            )
+        )
+    return tuple(
+        (mapping_id, contact_type)
+        for mapping_id, contact_type in normalized
+        if contact_type is not None
+    )
+
+
+def _recorded_direct_binding_ids(action: dict[str, Any]) -> tuple[str, ...] | None:
+    raw = action.get("direct_binding_ids")
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raise TypeError(
+            "AWB semantic replay Contact INVALID_RECORDED_RESULT: "
+            "direct_binding_ids must be a sequence, not a string."
+        )
+    try:
+        values = tuple(str(value) for value in tuple(raw))
+    except TypeError as exc:
+        raise RuntimeError(
+            "AWB semantic replay Contact INVALID_RECORDED_RESULT: "
+            "direct_binding_ids must be an iterable sequence."
+        ) from exc
+    if any(not value for value in values) or len(set(values)) != len(values):
+        raise RuntimeError(
+            "AWB semantic replay Contact INVALID_RECORDED_RESULT: "
+            "direct_binding_ids contains an empty or duplicate binding id."
+        )
+    return values
+
+
+def _contact_result_payload(
+    *,
+    frame: int,
+    controls: tuple[str, ...],
+    replay_mode: ReplayMode,
+    result,
+) -> dict[str, Any]:
+    actual = result.contact_type.value if result.contact_type is not None else None
+    actual_mappings = tuple(
+        (str(mapping_id), getattr(contact_type, "value", str(contact_type)))
+        for mapping_id, contact_type in getattr(result, "mapping_contact_types", ())
+    )
+    payload: dict[str, Any] = {
+        "kind": "CONTACT",
+        "frame": frame,
+        "controls": controls,
+        "replay_mode": replay_mode.value,
+        "contact_type": actual,
+    }
+    if actual_mappings:
+        payload["mapping_contact_types"] = actual_mappings
+    return payload
+
+
+def _execute_contact_command_action(
+    context,
+    action: dict[str, Any],
+) -> dict[str, Any]:
+    scene, frame, controls = _prepare_contact_action_context(context, action)
     result = execute_contact_command(
         scene,
         control_context_for_context(context),
-        operation_id=f"replay-contact:{uuid4().hex}",
+        operation_id=f"replay-contact-command:{uuid4().hex}",
         enabled_types=contact_enabled_types(context),
         plant_space=contact_plant_space(context),
         contact_point_local=tuple(float(value) for value in scene.baw_contact_point_local),
     )
     if not result.applied:
         detail = "; ".join(item.detail for item in result.diagnostics)
-        raise RuntimeError(detail or "AWB semantic replay Contact action failed.")
+        raise RuntimeError(detail or "AWB semantic replay Contact command action failed.")
 
-    actual = result.contact_type.value if result.contact_type is not None else None
-    actual_mappings = tuple(
-        (str(mapping_id), getattr(contact_type, "value", str(contact_type)))
-        for mapping_id, contact_type in getattr(result, "mapping_contact_types", ())
+    payload = _contact_result_payload(
+        frame=frame,
+        controls=controls,
+        replay_mode=ReplayMode.COMMAND,
+        result=result,
     )
-    expected = action.get("contact_type")
-    expected_mappings = action.get("mapping_contact_types")
-    if expected is not None:
-        if actual is None:
-            raise RuntimeError(
-                "AWB semantic replay Contact mismatch: "
-                f"expected {expected}, got None (per-limb results={actual_mappings!r})."
-            )
-        if str(actual) != str(expected):
-            raise RuntimeError(
-                f"AWB semantic replay Contact mismatch: expected {expected}, got {actual}."
-            )
-    if expected_mappings is not None:
-        if not actual_mappings:
-            raise RuntimeError(
-                "AWB semantic replay Contact mapping mismatch: expected per-limb results, got none."
-            )
-        if isinstance(expected_mappings, dict):
-            expected_mapping_items = tuple(expected_mappings.items())
-        else:
-            expected_mapping_items = tuple(
-                (item[0], item[1])
-                for item in tuple(expected_mappings)
-                if isinstance(item, (list, tuple)) and len(item) == 2
-            )
-        normalized_expected = tuple(
-            (str(mapping_id), str(contact_type))
-            for mapping_id, contact_type in expected_mapping_items
+    if "contact_type" in action:
+        payload["recorded_contact_type"] = action.get("contact_type")
+    if "mapping_contact_types" in action:
+        payload["recorded_mapping_contact_types"] = action.get("mapping_contact_types")
+    if "direct_binding_ids" in action:
+        payload["recorded_direct_binding_ids"] = action.get("direct_binding_ids")
+    return payload
+
+
+def _execute_contact_recorded_result_action(
+    context,
+    action: dict[str, Any],
+) -> dict[str, Any]:
+    scene, frame, controls = _prepare_contact_action_context(context, action)
+    control_context = control_context_for_context(context)
+    operation_domain = resolve_operation_domain(scene, control_context)
+    snapshot = operation_domain.snapshot
+    if snapshot is None or operation_domain.issues:
+        detail = "; ".join(issue.detail for issue in operation_domain.issues)
+        raise RuntimeError(
+            "AWB semantic replay Contact INCOMPLETE_CONTEXT: "
+            + (detail or "the frozen Contact operation domain is unavailable.")
         )
-        if actual_mappings != normalized_expected:
+
+    mapping_ids = tuple(str(mapping_id) for mapping_id in snapshot.contact_mapping_ids)
+    if not mapping_ids:
+        raise RuntimeError(
+            "AWB semantic replay Contact INCOMPLETE_CONTEXT: "
+            "the recorded selection resolves no Contact mapping."
+        )
+
+    domain_direct_ids = tuple(str(binding_id) for binding_id in snapshot.supported_direct_binding_ids)
+    recorded_direct_ids = _recorded_direct_binding_ids(action)
+    if domain_direct_ids:
+        if recorded_direct_ids is None:
             raise RuntimeError(
-                "AWB semantic replay Contact mapping mismatch: "
-                f"expected {normalized_expected!r}, got {actual_mappings!r}."
+                "AWB semantic replay Contact INCOMPLETE_CONTEXT: "
+                "legacy broad-C history has direct controls but no recorded direct-key coverage."
             )
-    replay_result = {
-        "kind": "CONTACT",
-        "frame": frame,
-        "controls": controls,
-        "contact_type": actual,
-    }
-    if actual_mappings:
-        replay_result["mapping_contact_types"] = actual_mappings
-    return replay_result
+        if set(recorded_direct_ids) != set(domain_direct_ids):
+            raise RuntimeError(
+                "AWB semantic replay Contact DIRECT_COVERAGE_MISMATCH: "
+                f"recorded={recorded_direct_ids!r}, frozen={domain_direct_ids!r}."
+            )
+        raise RuntimeError(
+            "AWB semantic replay Contact UNSUPPORTED_DIRECT_REPLAY: "
+            "direct binding coverage is recorded, but deterministic direct transform payload "
+            "is not part of semantic replay v1; refusing to synthesize current broad-C keys."
+        )
+    if recorded_direct_ids:
+        raise RuntimeError(
+            "AWB semantic replay Contact DIRECT_COVERAGE_MISMATCH: "
+            f"recorded direct bindings {recorded_direct_ids!r} are outside the frozen operation domain."
+        )
+
+    scalar_type = _recorded_contact_type(
+        action.get("contact_type"),
+        field_name="contact_type",
+    )
+    mapping_types = _recorded_mapping_contact_types(action)
+
+    operation_id = f"replay-contact-recorded:{uuid4().hex}"
+    if len(mapping_ids) == 1:
+        mapping_id = mapping_ids[0]
+        if mapping_types is None:
+            if scalar_type is None:
+                raise RuntimeError(
+                    "AWB semantic replay Contact INCOMPLETE_CONTEXT: "
+                    "single-mapping recorded replay is missing contact_type."
+                )
+            target_type = scalar_type
+        else:
+            if len(mapping_types) != 1 or mapping_types[0][0] != mapping_id:
+                raise RuntimeError(
+                    "AWB semantic replay Contact MAPPING_COVERAGE_MISMATCH: "
+                    f"recorded={tuple(item[0] for item in mapping_types)!r}, frozen={mapping_ids!r}."
+                )
+            target_type = mapping_types[0][1]
+            if scalar_type is not None and scalar_type is not target_type:
+                raise RuntimeError(
+                    "AWB semantic replay Contact RECORDED_RESULT_MISMATCH: "
+                    f"contact_type={scalar_type.value!r} disagrees with mapping result "
+                    f"{target_type.value!r}."
+                )
+        if target_type is ContactKeyType.PLANTED:
+            raise RuntimeError(
+                "AWB semantic replay Contact INCOMPLETE_CONTEXT: "
+                "recorded Planted replay lacks a frozen plant-space/contact-point payload."
+            )
+        planned = build_contact_intent_plan(
+            scene,
+            control_context,
+            operation_id=operation_id,
+            mode=ContactAuthoringMode.CYCLE,
+            enabled_types=_RECORDED_CONTACT_TYPES,
+            plant_space=ContactPlantSpace.WORLD,
+            contact_point_local=(0.0, 0.0, 0.0),
+            mapping_id=mapping_id,
+            forced_cycle_type=target_type,
+        )
+        if not planned.ok or planned.plan is None:
+            detail = "; ".join(item.detail for item in planned.diagnostics)
+            raise RuntimeError(
+                detail or "AWB semantic replay Contact recorded-result planning failed."
+            )
+        result = execute_contact_intent_plan(
+            scene,
+            control_context,
+            planned.plan,
+            closure_plan=None,
+        )
+        if not result.applied:
+            detail = "; ".join(item.detail for item in result.diagnostics)
+            raise RuntimeError(
+                detail or "AWB semantic replay Contact recorded-result execution failed."
+            )
+        if result.contact_type is not target_type:
+            actual = result.contact_type.value if result.contact_type is not None else None
+            raise RuntimeError(
+                "AWB semantic replay Contact RECORDED_RESULT_MISMATCH: "
+                f"expected {target_type.value}, got {actual}."
+            )
+        return _contact_result_payload(
+            frame=frame,
+            controls=controls,
+            replay_mode=ReplayMode.RECORDED_RESULT,
+            result=result,
+        )
+
+    if mapping_types is None:
+        raise RuntimeError(
+            "AWB semantic replay Contact INCOMPLETE_CONTEXT: "
+            "multi-mapping recorded replay requires explicit mapping_contact_types coverage."
+        )
+    recorded_by_id = dict(mapping_types)
+    missing = tuple(mapping_id for mapping_id in mapping_ids if mapping_id not in recorded_by_id)
+    extra = tuple(mapping_id for mapping_id in recorded_by_id if mapping_id not in set(mapping_ids))
+    if missing or extra:
+        raise RuntimeError(
+            "AWB semantic replay Contact MAPPING_COVERAGE_MISMATCH: "
+            f"missing={missing!r}, extra={extra!r}, frozen={mapping_ids!r}."
+        )
+    ordered_targets = tuple((mapping_id, recorded_by_id[mapping_id]) for mapping_id in mapping_ids)
+    if any(contact_type is ContactKeyType.PLANTED for _mapping_id, contact_type in ordered_targets):
+        raise RuntimeError(
+            "AWB semantic replay Contact INCOMPLETE_CONTEXT: "
+            "recorded Planted replay lacks a frozen plant-space/contact-point payload."
+        )
+    common_type = (
+        ordered_targets[0][1]
+        if all(contact_type is ordered_targets[0][1] for _mapping_id, contact_type in ordered_targets)
+        else None
+    )
+    if scalar_type is not None and scalar_type is not common_type:
+        raise RuntimeError(
+            "AWB semantic replay Contact RECORDED_RESULT_MISMATCH: "
+            "scalar contact_type disagrees with explicit per-mapping results."
+        )
+
+    batch = build_contact_batch_intent_plan(
+        scene,
+        control_context,
+        operation_id=operation_id,
+        mode=ContactAuthoringMode.CYCLE,
+        enabled_types=_RECORDED_CONTACT_TYPES,
+        plant_space=ContactPlantSpace.WORLD,
+        contact_point_local=(0.0, 0.0, 0.0),
+        mapping_ids=mapping_ids,
+        forced_mapping_types=dict(ordered_targets),
+    )
+    if not batch.ok or batch.plan is None:
+        detail = "; ".join(item.detail for item in batch.diagnostics)
+        raise RuntimeError(
+            detail or "AWB semantic replay Contact recorded-result batch planning failed."
+        )
+    result = execute_contact_batch_intent_plan(
+        scene,
+        control_context,
+        batch.plan,
+        closure_plan=None,
+    )
+    if not result.applied:
+        detail = "; ".join(item.detail for item in result.diagnostics)
+        raise RuntimeError(
+            detail or "AWB semantic replay Contact recorded-result batch execution failed."
+        )
+    actual_mappings = tuple(
+        (str(mapping_id), contact_type)
+        for mapping_id, contact_type in result.mapping_contact_types
+    )
+    if actual_mappings != ordered_targets:
+        raise RuntimeError(
+            "AWB semantic replay Contact RECORDED_RESULT_MISMATCH: "
+            f"expected={ordered_targets!r}, actual={actual_mappings!r}."
+        )
+    return _contact_result_payload(
+        frame=frame,
+        controls=controls,
+        replay_mode=ReplayMode.RECORDED_RESULT,
+        result=result,
+    )
+
+
+def _execute_contact_action(
+    context,
+    action: dict[str, Any],
+    *,
+    replay_mode: ReplayMode,
+) -> dict[str, Any]:
+    if replay_mode is ReplayMode.COMMAND:
+        return _execute_contact_command_action(context, action)
+    return _execute_contact_recorded_result_action(context, action)
 
 
 def _execute_free_direct_rotate_action(context, action: dict[str, Any]) -> dict[str, Any]:
@@ -975,6 +1282,7 @@ def run_semantic_replay(
     *,
     replay_file: str | None = None,
     script: dict[str, Any] | None = None,
+    replay_mode: ReplayMode | str = ReplayMode.COMMAND,
     max_actions: int = 1000,
     max_frames: int = 12000,
 ) -> dict[str, Any]:
@@ -989,6 +1297,10 @@ def run_semantic_replay(
     if getattr(context, "scene", None) is None:
         raise RuntimeError("AWB semantic replay requires an active scene.")
     replay = dict(script) if script is not None else _load_replay_script(replay_file)
+    try:
+        resolved_replay_mode = ReplayMode(replay_mode)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"AWB semantic replay mode is unsupported: {replay_mode!r}.") from exc
     actions = tuple(replay.get("actions") or ())
     if len(actions) > int(max_actions):
         raise RuntimeError("AWB semantic replay exceeded its bounded action budget.")
@@ -1004,7 +1316,13 @@ def run_semantic_replay(
             if kind == "AUTO_KEY":
                 results.append(_execute_auto_key_action(context, action))
             elif kind == "CONTACT":
-                results.append(_execute_contact_action(context, action))
+                results.append(
+                    _execute_contact_action(
+                        context,
+                        action,
+                        replay_mode=resolved_replay_mode,
+                    )
+                )
             elif kind == "ROTATE":
                 results.append(_execute_free_direct_rotate_action(context, action))
             elif kind == "MOVE":
@@ -1034,6 +1352,7 @@ def run_semantic_replay(
     return {
         "schema": "awb-semantic-replay-result/v1",
         "source_session_id": replay.get("source_session_id"),
+        "replay_mode": resolved_replay_mode.value,
         "action_count": len(actions),
         "executed_frame_count": frame_budget[0],
         "results": results,

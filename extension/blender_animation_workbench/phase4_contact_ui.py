@@ -21,6 +21,7 @@ from .phase4_contact_authoring import (
     execute_contact_replant,
 )
 from .phase4_contact_model import ContactKeyType, ContactPlantSpace
+from .rigped_operation_domain import resolve_operation_domain
 from .semantic_adapter import control_context_for_context
 from .trackbar_model import clear_key_selection_for_context
 from .ui_language import text
@@ -738,6 +739,15 @@ class BAW_OT_contact(bpy.types.Operator):
             context.view_layer.update()
 
         control_context = control_context_for_context(context)
+        replay_domain = resolve_operation_domain(context.scene, control_context)
+        replay_direct_binding_ids = (
+            tuple(
+                str(binding_id)
+                for binding_id in replay_domain.snapshot.supported_direct_binding_ids
+            )
+            if replay_domain.snapshot is not None and not replay_domain.issues
+            else ()
+        )
         link_trace_operation("baw-contact", trace_operation_id)
         result = execute_contact_command(
             context.scene,
@@ -779,6 +789,8 @@ class BAW_OT_contact(bpy.types.Operator):
                 (mapping_id, contact_type.value)
                 for mapping_id, contact_type in result.mapping_contact_types
             )
+        if replay_direct_binding_ids:
+            replay_action["direct_binding_ids"] = replay_direct_binding_ids
         trace_event(
             "OPERATION",
             "CONTACT_COMMIT",
@@ -790,6 +802,7 @@ class BAW_OT_contact(bpy.types.Operator):
                 (mapping_id, contact_type.value)
                 for mapping_id, contact_type in result.mapping_contact_types
             ),
+            direct_binding_ids=replay_direct_binding_ids,
             rows_written=int(result.rows_written),
             created_fcurves=int(result.created_fcurves),
             replay_action=replay_action,

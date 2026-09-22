@@ -2619,6 +2619,7 @@ def build_contact_batch_intent_plan(
     contact_point_local: tuple[float, float, float] | None = None,
     selector_character_id: str | None = None,
     mapping_ids: tuple[str, ...] | None = None,
+    forced_mapping_types: dict[str, ContactKeyType] | None = None,
 ) -> ContactBatchPlanBuildResult:
     resolution = resolve_rigped_target(
         scene,
@@ -2689,8 +2690,64 @@ def build_contact_batch_intent_plan(
             ),
         )
 
+    forced_targets: dict[str, ContactKeyType] | None = None
+    if forced_mapping_types is not None:
+        if mode is not ContactAuthoringMode.CYCLE:
+            return ContactBatchPlanBuildResult(
+                None,
+                (
+                    _diagnostic(
+                        operation_id,
+                        "I20_FORCED_MAPPING_TYPES_REQUIRE_CYCLE",
+                        "Explicit per-mapping Contact targets are supported only for CYCLE planning.",
+                        character_id=target.character_id,
+                    ),
+                ),
+            )
+        try:
+            forced_targets = {
+                str(mapping_id): ContactKeyType(contact_type)
+                for mapping_id, contact_type in forced_mapping_types.items()
+            }
+        except (TypeError, ValueError) as exc:
+            return ContactBatchPlanBuildResult(
+                None,
+                (
+                    _diagnostic(
+                        operation_id,
+                        "I20_INVALID_FORCED_MAPPING_TYPE",
+                        f"Explicit per-mapping Contact target is invalid: {exc}",
+                        character_id=target.character_id,
+                    ),
+                ),
+            )
+        resolved_mapping_ids = tuple(str(mapping.mapping_id) for mapping, _capability in mappings)
+        missing = tuple(
+            mapping_id
+            for mapping_id in resolved_mapping_ids
+            if mapping_id not in forced_targets
+        )
+        extra = tuple(
+            mapping_id
+            for mapping_id in forced_targets
+            if mapping_id not in set(resolved_mapping_ids)
+        )
+        if missing or extra:
+            return ContactBatchPlanBuildResult(
+                None,
+                (
+                    _diagnostic(
+                        operation_id,
+                        "I20_FORCED_MAPPING_COVERAGE_MISMATCH",
+                        "Explicit per-mapping Contact targets must exactly cover the frozen batch "
+                        f"(missing={missing!r}, extra={extra!r}).",
+                        character_id=target.character_id,
+                    ),
+                ),
+            )
+
     shared_cycle_type: ContactKeyType | None = None
-    if mode is ContactAuthoringMode.CYCLE:
+    if mode is ContactAuthoringMode.CYCLE and forced_targets is None:
         active_binding_id = target.active_binding_id
         active_mapping = next(
             (
@@ -2728,7 +2785,11 @@ def build_contact_batch_intent_plan(
             contact_point_local=contact_point_local,
             mapping_id=mapping.mapping_id,
             selector_character_id=selector_character_id,
-            forced_cycle_type=shared_cycle_type,
+            forced_cycle_type=(
+                forced_targets[str(mapping.mapping_id)]
+                if forced_targets is not None
+                else shared_cycle_type
+            ),
         )
         if not built.ok or built.plan is None:
             diagnostics.extend(built.diagnostics)
