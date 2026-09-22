@@ -27,3 +27,18 @@ def test_character_operator_surface_has_one_bind_path_and_explicit_repair():
     assert 'bl_idname = "baw.bind_character_bone"' not in source
     assert 'bl_idname = "baw.rebind_character_bone"' not in source
     assert "\nCLASSES = (" not in source
+
+
+def test_user_final_recovery_blender_code_is_attached_session_fail_closed():
+    root = Path(__file__).parents[1]
+    dispatcher = (root / "scripts" / "replay_user_final_test_via_mcp.py").read_text(
+        encoding="utf-8-sig"
+    )
+    e11_replay = (
+        root / "debug" / "user_final_tests" / "E11" / "user_final_replay.json"
+    ).read_text(encoding="utf-8-sig")
+
+    assert '"schema": "awb-user-final-recovery/v1"' in e11_replay
+    assert '"recovery_kind":' in e11_replay
+    assert 'startswith("awb-user-final-recovery/")' in dispatcher
+    assert "Recovery blender_code runners are isolated/background-only" in dispatcher

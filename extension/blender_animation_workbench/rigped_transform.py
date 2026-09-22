@@ -68,7 +68,9 @@ from .rigped_auto_key import (
     plan_rigped_auto_contact_batch,
     plan_rigped_auto_direct_move,
     plan_rigped_auto_direct_rotate,
-    rollback_rigped_auto_writer_results,
+)
+from .rigped_auto_key import (
+    rollback_rigped_auto_writer_results as _rollback_rigped_auto_writer_results_or_raise,
 )
 from .rigped_contract import (
     RIGPED_SETUP_PROPERTY,
@@ -117,6 +119,36 @@ def _report_operator_error(operator, context, exc: BaseException, **data) -> Non
         **data,
     )
     operator.report({"ERROR"}, str(exc))
+
+
+def rollback_rigped_auto_writer_results(results) -> BaseException | None:
+    """Best-effort AUTO rollback wrapper that never skips gesture cleanup.
+
+    The rigped-auto helper raises only after every open journal has attempted
+    rollback. Transform failure paths still must restore pose/preview state even
+    when that aggregate rollback reports residue, so record it here and let the
+    caller continue its cleanup sequence.
+    """
+
+    try:
+        _rollback_rigped_auto_writer_results_or_raise(tuple(results))
+    except Exception as exc:  # noqa: BLE001 - cleanup must continue after aggregate rollback failure
+        operation_id = next(
+            (
+                str(result.operation_id)
+                for result in results
+                if getattr(result, "operation_id", None)
+            ),
+            None,
+        )
+        trace_exception(
+            "ERROR",
+            "AUTO_ROLLBACK_AGGREGATE_FAILURE",
+            exc,
+            operation_id=operation_id,
+        )
+        return exc
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -5187,14 +5219,24 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
             )
             auto_plan = self._auto_plan if auto_enabled_at_release else None
             if auto_plan is not None:
+                deferred_auto_results: list[Any] = []
                 link_trace_operation(auto_plan.begin_plan.operation_id, self._trace_operation_id)
                 try:
                     result = commit_rigped_auto_direct_move(
                         context.scene,
                         self._frozen_control_context,
                         auto_plan,
+                        defer_commit=True,
                     )
+                    if result.applied:
+                        deferred_auto_results.append(result)
+                        _refresh_current_sliding_public_overlays(
+                            context,
+                            capabilities=self._sliding_guard_capabilities,
+                        )
+                        commit_rigped_auto_writer_results(tuple(deferred_auto_results))
                 except (RuntimeError, ValueError, ReferenceError) as exc:
+                    rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                     _restore_direct_move_states(
                         context,
                         states,
@@ -5210,6 +5252,7 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                     _set_semantic_move_drag_active(context, False)
                     return {"CANCELLED"}
                 if not result.applied:
+                    rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                     _restore_direct_move_states(
                         context,
                         states,
@@ -5225,10 +5268,7 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                     self._auto_plan = None
                     _set_semantic_move_drag_active(context, False)
                     return {"CANCELLED"}
-                _refresh_current_sliding_public_overlays(
-                    context,
-                    capabilities=self._sliding_guard_capabilities,
-                )
+
                 from .trackbar_model import clear_key_selection_for_context
 
                 clear_key_selection_for_context(context)
@@ -8102,21 +8142,6 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     return {"CANCELLED"}
                 deferred_auto_results.append(result)
 
-                frames = [
-                    float(context.scene.frame_current)
-                    + float(getattr(context.scene, "frame_subframe", 0.0))
-                ]
-                if auto_plan.baseline_time is not None:
-                    frames.append(float(auto_plan.baseline_time))
-                clear_contact_bundle_key_selection_for_context(
-                    context,
-                    frames=tuple(frames),
-                )
-                from .trackbar_model import clear_key_selection_for_context
-
-                clear_key_selection_for_context(context)
-                context.scene.baw_has_selected_key = False
-
             elif auto_contact_batch_plan is not None:
                 link_trace_operation(
                     auto_contact_batch_plan.batch.operation_id,
@@ -8164,11 +8189,6 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     return {"CANCELLED"}
                 deferred_auto_results.append(result)
 
-                from .trackbar_model import clear_key_selection_for_context
-
-                clear_key_selection_for_context(context)
-                context.scene.baw_has_selected_key = False
-
             if auto_direct_plan is not None:
                 if auto_plan is not None or auto_contact_batch_plan is not None:
                     auto_direct_plan = replace(
@@ -8186,6 +8206,18 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                         auto_direct_plan,
                         defer_commit=True,
                     )
+                    if result.applied:
+                        deferred_auto_results.append(result)
+
+                        # A direct writer can trigger Action reevaluation across
+                        # both actively selected Sliding limbs and passive guarded
+                        # Sliding limbs. Final commit reconciliation therefore covers
+                        # the gesture-start frozen affected set inside the same
+                        # rollback-capable release boundary, before commit.
+                        _refresh_current_sliding_public_overlays(
+                            context,
+                            capabilities=self._sliding_affected_capabilities,
+                        )
                 except (RuntimeError, ValueError, ReferenceError) as exc:
                     rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                     self._restore_preview(context)
@@ -8222,22 +8254,6 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     if context.area is not None:
                         context.area.tag_redraw()
                     return {"CANCELLED"}
-                deferred_auto_results.append(result)
-
-                # A direct writer can trigger Action reevaluation across
-                # both actively selected Sliding limbs and passive guarded
-                # Sliding limbs. Final commit reconciliation therefore covers
-                # the gesture-start frozen affected set without re-scanning
-                # Sliding ownership after the write.
-                _refresh_current_sliding_public_overlays(
-                    context,
-                    capabilities=self._sliding_affected_capabilities,
-                )
-
-                from .trackbar_model import clear_key_selection_for_context
-
-                clear_key_selection_for_context(context)
-                context.scene.baw_has_selected_key = False
 
             try:
                 commit_rigped_auto_writer_results(tuple(deferred_auto_results))
@@ -8257,6 +8273,23 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 if context.area is not None:
                     context.area.tag_redraw()
                 return {"CANCELLED"}
+
+            if deferred_auto_results:
+                if auto_plan is not None:
+                    frames = [
+                        float(context.scene.frame_current)
+                        + float(getattr(context.scene, "frame_subframe", 0.0))
+                    ]
+                    if auto_plan.baseline_time is not None:
+                        frames.append(float(auto_plan.baseline_time))
+                    clear_contact_bundle_key_selection_for_context(
+                        context,
+                        frames=tuple(frames),
+                    )
+                from .trackbar_model import clear_key_selection_for_context
+
+                clear_key_selection_for_context(context)
+                context.scene.baw_has_selected_key = False
 
             self._states = ()
             self._sliding_syncs = ()

@@ -78,7 +78,66 @@ def test_e11_composite_auto_transaction_prevalidates_then_group_commits_or_rolls
     assert 'trace_event(' in commit and '"AUTO_TRANSACTION_COMMIT"' in commit
     assert "for result in reversed(results):" in rollback
     assert 'journal.state.value == "OPEN"' in rollback
-    assert "journal.rollback_or_raise()" in rollback
+    assert "journal.rollback()" in rollback
+    assert '"AUTO_WRITER_ROLLBACK_BEGIN"' in rollback
+    assert '"AUTO_WRITER_ROLLBACK_END"' in rollback
+    assert "ExceptionGroup" in rollback
+
+
+def test_e11_rollback_attempts_earlier_journal_after_later_failure() -> None:
+    rollback_source = _function(AUTO, "rollback_rigped_auto_writer_results")
+    calls: list[str] = []
+    traces: list[str] = []
+
+    class State:
+        value = "OPEN"
+
+    class ReportStatus:
+        value = "VERIFIED"
+
+    class Report:
+        status = ReportStatus()
+        residue_receipts = ()
+        quarantine_keys = ()
+
+    class Journal:
+        state = State()
+
+        def __init__(self, name: str, *, fail: bool = False) -> None:
+            self.name = name
+            self.fail = fail
+
+        def rollback(self):
+            calls.append(self.name)
+            if self.fail:
+                raise RuntimeError(f"{self.name} rollback failed")
+            return Report()
+
+    class Result:
+        applied = True
+        diagnostics = ()
+
+        def __init__(self, name: str, *, fail: bool = False) -> None:
+            self.operation_id = name
+            self.pending_journal = Journal(name, fail=fail)
+
+    namespace = {
+        "AutoWriterResult": object,
+        "trace_event": lambda _channel, event, **_data: traces.append(event),
+    }
+    exec(rollback_source, namespace)  # noqa: S102 - executes extracted local production source only
+    rollback = namespace["rollback_rigped_auto_writer_results"]
+
+    try:
+        rollback((Result("A"), Result("B", fail=True)))
+    except ExceptionGroup as exc:
+        assert len(exc.exceptions) == 1
+    else:
+        raise AssertionError("aggregate rollback failure was not surfaced")
+
+    assert calls == ["B", "A"]
+    assert traces.count("AUTO_WRITER_ROLLBACK_BEGIN") == 2
+    assert traces.count("AUTO_WRITER_ROLLBACK_END") == 2
 
 
 def test_e11_semantic_move_uses_one_deferred_auto_transaction_and_release_gate() -> None:
@@ -118,6 +177,35 @@ def test_e11_direct_move_rechecks_auto_at_release_before_keying() -> None:
     commit = modal.index("commit_rigped_auto_direct_move(", release_gate)
     assert release_gate < commit
     assert "self._auto_plan if auto_enabled_at_release else None" in modal
+
+
+def test_e11_direct_move_keeps_reconciliation_inside_deferred_commit_boundary() -> None:
+    modal = _method(TRANSFORM, "BAW_OT_rigped_direct_move_axis", "modal")
+    release = modal[modal.index('if event.type == "LEFTMOUSE" and event.value == "RELEASE":'):]
+    writer = release.index("commit_rigped_auto_direct_move(")
+    deferred = release.index("defer_commit=True", writer)
+    refresh = release.index("_refresh_current_sliding_public_overlays(", deferred)
+    group_commit = release.index(
+        "commit_rigped_auto_writer_results(tuple(deferred_auto_results))",
+        refresh,
+    )
+    selection_clear = release.index("clear_key_selection_for_context(context)", group_commit)
+    assert writer < deferred < refresh < group_commit < selection_clear
+
+
+def test_e11_direct_rotate_reconciles_frozen_set_before_group_commit_and_selection_cleanup() -> None:
+    modal = _method(TRANSFORM, "BAW_OT_rigped_direct_rotate_axis", "modal")
+    release = modal[modal.index('if event.type == "LEFTMOUSE" and event.value == "RELEASE":'):]
+    writer = release.index("commit_rigped_auto_direct_rotate(")
+    deferred = release.index("defer_commit=True", writer)
+    refresh = release.index("_refresh_current_sliding_public_overlays(", deferred)
+    frozen = release.index("capabilities=self._sliding_affected_capabilities", refresh)
+    group_commit = release.index(
+        "commit_rigped_auto_writer_results(tuple(deferred_auto_results))",
+        frozen,
+    )
+    selection_clear = release.index("clear_key_selection_for_context(context)", group_commit)
+    assert writer < deferred < refresh < frozen < group_commit < selection_clear
 
 
 def test_e11_same_frame_direct_writer_replaces_existing_key_in_place() -> None:

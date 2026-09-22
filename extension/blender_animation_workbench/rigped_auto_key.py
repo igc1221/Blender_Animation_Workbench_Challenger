@@ -83,14 +83,57 @@ AutoWriterResult = DirectWriterResult | ContactAuthoringResult
 def rollback_rigped_auto_writer_results(
     results: tuple[AutoWriterResult, ...],
 ) -> None:
-    """Rollback every still-open deferred AUTO writer in reverse order."""
+    """Rollback every still-open deferred AUTO writer in reverse order.
 
+    Every journal gets one best-effort rollback attempt. Outcome evidence is
+    emitted immediately after each rollback and before the transform layer
+    performs any pose/preview recovery, so rollback residue cannot be hidden by
+    a later recovery exception.
+    """
+
+    failures: list[Exception] = []
     for result in reversed(results):
         journal = result.pending_journal
         if journal is None:
             continue
         if journal.state.value == "OPEN":
-            journal.rollback_or_raise()
+            trace_event(
+                "WRITER",
+                "AUTO_WRITER_ROLLBACK_BEGIN",
+                operation_id=result.operation_id,
+            )
+            try:
+                report = journal.rollback()
+            except Exception as exc:  # noqa: BLE001 - every remaining journal must still be attempted
+                trace_event(
+                    "WRITER",
+                    "AUTO_WRITER_ROLLBACK_END",
+                    operation_id=result.operation_id,
+                    status="EXCEPTION",
+                    exception_type=type(exc).__name__,
+                    exception_message=str(exc),
+                )
+                failures.append(exc)
+                continue
+
+            trace_event(
+                "WRITER",
+                "AUTO_WRITER_ROLLBACK_END",
+                operation_id=result.operation_id,
+                status=report.status.value,
+                residue_count=len(report.residue_receipts),
+                quarantine_count=len(report.quarantine_keys),
+            )
+            if report.residue_receipts:
+                failures.append(
+                    RuntimeError(
+                        "AUTO writer rollback incomplete for "
+                        f"{result.operation_id}: {len(report.residue_receipts)} residue receipt(s)."
+                    )
+                )
+
+    if failures:
+        raise ExceptionGroup("AUTO writer rollback failed.", failures)
 
 
 def commit_rigped_auto_writer_results(

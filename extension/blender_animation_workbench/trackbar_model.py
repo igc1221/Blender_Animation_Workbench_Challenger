@@ -92,7 +92,13 @@ class ContextKeySnapshots:
 
 
 class ContextMultiKeyPreviewTransaction:
-    __slots__ = ("captured_fcurves", "items", "mode", "source_frames")
+    __slots__ = (
+        "captured_fcurves",
+        "guard_operation",
+        "items",
+        "mode",
+        "source_frames",
+    )
 
     def __init__(
         self,
@@ -100,11 +106,13 @@ class ContextMultiKeyPreviewTransaction:
         source_frames: tuple[float, ...],
         items,
         *,
+        guard_operation: str,
         captured_fcurves=(),
     ) -> None:
         self.mode = mode
         self.source_frames = source_frames
         self.items = items
+        self.guard_operation = str(guard_operation)
         self.captured_fcurves = tuple(captured_fcurves)
 
 
@@ -828,6 +836,7 @@ def snapshot_multi_key_preview_for_context(
         str(mode).upper(),
         sources,
         items,
+        guard_operation=operation,
         captured_fcurves=captured_fcurves,
     )
 
@@ -845,13 +854,56 @@ def update_multi_key_preview_for_context(
             return False
         resolved_items.append((target, owner_transaction, fcurves))
 
+    # Dynamic semantic guards must evaluate the original authored state, not the
+    # already-applied previous preview. Restore first, preflight the exact new
+    # destinations, and put the previous valid preview back if the new target is
+    # refused. This prevents a Contact collision from ever existing even
+    # transiently while preserving the last valid drag preview.
+    previous_deltas = tuple(
+        getattr(owner_transaction, "applied_delta", None)
+        for _target, owner_transaction, _fcurves in resolved_items
+    )
+    for (_target, owner_transaction, fcurves), previous_delta in zip(
+        resolved_items,
+        previous_deltas,
+        strict=True,
+    ):
+        if previous_delta is not None:
+            restore_multi_key_preview_transaction(
+                fcurves,
+                owner_transaction,
+                data_path_prefix=None,
+            )
+
+    delta = int(delta_frames)
+    target_frames = tuple(float(frame) + float(delta) for frame in transaction.source_frames)
+    if not _trackbar_edit_allowed(
+        context,
+        transaction.guard_operation,
+        transaction.source_frames,
+        target_frames,
+    ):
+        for (_target, owner_transaction, fcurves), previous_delta in zip(
+            resolved_items,
+            previous_deltas,
+            strict=True,
+        ):
+            if previous_delta is not None:
+                apply_multi_key_preview_transaction(
+                    fcurves,
+                    owner_transaction,
+                    int(previous_delta),
+                    data_path_prefix=None,
+                )
+        return False
+
     changed_any = False
     touched = []
     for target, owner_transaction, fcurves in resolved_items:
         changed = apply_multi_key_preview_transaction(
             fcurves,
             owner_transaction,
-            delta_frames,
+            delta,
             data_path_prefix=None,
         )
         if changed:
@@ -937,6 +989,23 @@ def snapshot_selection_range_scale_for_context(
     )
 
 
+def _selection_range_scaled_target_frames(
+    transaction: ContextSelectionRangeScalePreviewTransaction,
+    target_handle_frame: int,
+) -> tuple[float, ...]:
+    pivot = int(transaction.pivot_frame)
+    source = int(transaction.source_handle_frame)
+    if source == pivot:
+        return ()
+    target = int(target_handle_frame)
+    target = max(pivot + 1, target) if source > pivot else min(pivot - 1, target)
+    factor = (target - pivot) / (source - pivot)
+    return tuple(
+        float(round(pivot + (float(frame) - pivot) * factor))
+        for frame in transaction.source_frames
+    )
+
+
 def update_selection_range_scale_preview_for_context(
     context,
     transaction: ContextSelectionRangeScalePreviewTransaction,
@@ -949,6 +1018,46 @@ def update_selection_range_scale_preview_for_context(
         if not fcurves:
             return False
         resolved_items.append((target, owner_transaction, fcurves))
+
+    previous_targets = tuple(
+        getattr(owner_transaction, "applied_target_handle_frame", None)
+        for _target, owner_transaction, _fcurves in resolved_items
+    )
+    for (_target, owner_transaction, fcurves), previous_target in zip(
+        resolved_items,
+        previous_targets,
+        strict=True,
+    ):
+        if previous_target is not None:
+            restore_selection_range_scale_transaction(
+                fcurves,
+                owner_transaction,
+                data_path_prefix=None,
+            )
+
+    target_frames = _selection_range_scaled_target_frames(
+        transaction,
+        int(target_handle_frame),
+    )
+    if not _trackbar_edit_allowed(
+        context,
+        "SELECTION_RANGE_SCALE",
+        transaction.source_frames,
+        target_frames,
+    ):
+        for (_target, owner_transaction, fcurves), previous_target in zip(
+            resolved_items,
+            previous_targets,
+            strict=True,
+        ):
+            if previous_target is not None:
+                apply_selection_range_scale_transaction(
+                    fcurves,
+                    owner_transaction,
+                    int(previous_target),
+                    data_path_prefix=None,
+                )
+        return False
 
     changed_any = False
     touched = []

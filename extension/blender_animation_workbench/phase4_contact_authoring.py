@@ -2105,41 +2105,212 @@ def allow_generic_trackbar_edit_for_contact(
     source_frames: tuple[float, ...],
     target_frames: tuple[float, ...],
 ) -> bool:
-    """Protect Contact frames while allowing bundle-aware basic Track Bar edits.
+    """Fail closed before a generic Track Bar edit can split a Contact bundle.
 
-    Move/Clone/Delete are safe when the source frame owns an explicit Contact
-    state key because the registered Contact edit expander adds every generated
-    limb/IK/pole/hold curve from that ChannelBag to the same mutation target.
-    Selection Range move/scale use the same complete bundle expansion; unrelated
-    property edits remain fail-closed, and an ordinary source frame may not be
-    moved/cloned on top of an existing Contact frame.
+    Generic key editing remains domain-agnostic. This higher-layer guard proves
+    the existing Contact track is valid before mutation and rejects only schema
+    collisions that the per-FCurve edit primitives cannot replace atomically.
+    Same-schema collisions remain supported; cross-schema collisions refuse with
+    zero writes. Selection-range previews pass their exact dynamic destinations
+    through this guard before any FCurve mutation.
     """
 
-    source_rows = _contact_bundle_edit_rows_for_frames(
-        context,
-        tuple(float(frame) for frame in source_frames),
-    )
-    target_rows = _contact_bundle_edit_rows_for_frames(
-        context,
-        tuple(float(frame) for frame in target_frames),
-    )
-    if not source_rows and not target_rows:
+    sources = tuple(float(frame) for frame in source_frames)
+    targets = tuple(float(frame) for frame in target_frames)
+    operation = str(operation).upper()
+    supported = {
+        "MOVE",
+        "CLONE",
+        "DELETE",
+        "PREVIEW_MOVE",
+        "PREVIEW_CLONE",
+        "SELECTION_RANGE_MOVE",
+        "SELECTION_RANGE_SCALE",
+    }
+
+    scene = getattr(context, "scene", None)
+    if scene is None:
+        return True
+    control_context = control_context_for_context(context)
+    resolution = resolve_rigped_target(scene, control_context)
+    target = resolution.target
+    if target is None or not target.selected_binding_ids:
+        return True
+    view = resolve_character(scene, target.character_id)
+    mappings = _selected_contact_owner_mappings(view, target)
+    if not mappings:
+        mappings = _selected_mappings(view, target.selected_binding_ids)
+    if not mappings:
         return True
 
-    operation = str(operation).upper()
-    return bool(
-        operation
-        in {
-            "MOVE",
-            "CLONE",
-            "DELETE",
-            "PREVIEW_MOVE",
-            "PREVIEW_CLONE",
-            "SELECTION_RANGE_MOVE",
-            "SELECTION_RANGE_SCALE",
-        }
-        and source_rows
-    )
+    involved_frames = tuple(dict.fromkeys((*sources, *targets)))
+    if not involved_frames:
+        return True
+
+    source_set = set(sources)
+    paired = tuple(zip(sources, targets)) if targets else ()
+    any_contact_involved = False
+
+    for _mapping, capability in mappings:
+        try:
+            hold = _resolve_contact_hold(view, target, _mapping, capability)
+            (
+                state_path,
+                ik_path,
+                terminal_path,
+                pole_angle_path,
+                hold_influence_path,
+                pivot_influence_path,
+                external_influence_path,
+            ) = _contact_paths(capability, hold)
+            owner = capability.native_ik.solver_owner.owner_object
+            bag = assigned_channelbag(owner)
+            state_curve = _find_fcurve(bag, state_path, 0)
+            ik_curve = _find_fcurve(bag, ik_path, 0)
+            terminal_curve = _find_fcurve(bag, terminal_path, 0)
+            pole_curve = _find_fcurve(bag, pole_angle_path, 0)
+            hold_curve = _find_fcurve(bag, hold_influence_path, 0)
+            pivot_curve = _find_fcurve(bag, pivot_influence_path, 0)
+            external_curve = _find_fcurve(bag, external_influence_path, 0)
+            hold_location_path = control_property_path(hold.control.target, "location")
+            point_location_path = control_property_path(hold.point_control.target, "location")
+            anchor_curves = tuple(
+                _find_fcurve(bag, path, index)
+                for path in (hold_location_path, point_location_path)
+                for index in range(3)
+            )
+        except (ContactAuthoringError, ReferenceError):
+            # A generated Contact domain that cannot be resolved is not safe to
+            # mutate through the generic Track Bar.
+            return False
+
+        protected_curves = (
+            state_curve,
+            ik_curve,
+            terminal_curve,
+            pole_curve,
+            hold_curve,
+            pivot_curve,
+            external_curve,
+            *anchor_curves,
+        )
+        involved = any(
+            curve is not None
+            and any(_curve_key_at(curve, frame) is not None for frame in involved_frames)
+            for curve in protected_curves
+        )
+        if not involved:
+            continue
+        any_contact_involved = True
+
+        try:
+            _validate_existing_track(
+                scene,
+                target,
+                capability,
+                hold,
+                state_curve,
+                ik_curve,
+                terminal_curve,
+                pole_curve,
+                hold_curve,
+                pivot_curve,
+                external_curve,
+            )
+        except ContactAuthoringError:
+            return False
+
+        if operation not in supported:
+            return False
+        if not targets:
+            continue
+        if len(sources) != len(targets):
+            return False
+
+        def state_value_at(frame: float, state_curve=state_curve) -> int | None:
+            point = _curve_key_at(state_curve, frame)
+            return None if point is None else round(float(point.co.y))
+
+        if operation == "SELECTION_RANGE_SCALE":
+            destination_by_source = dict(paired)
+            candidates_by_target: dict[float, set[int]] = {}
+            for source_frame, target_frame in paired:
+                source_value = state_value_at(source_frame)
+                target_value = state_value_at(target_frame)
+                if source_value is None:
+                    contact_survives_target = (
+                        target_value is not None
+                        and (
+                            target_frame not in source_set
+                            or _same_float(
+                                destination_by_source.get(target_frame, target_frame),
+                                target_frame,
+                            )
+                        )
+                    )
+                    if contact_survives_target:
+                        return False
+                    continue
+                if (
+                    source_value == int(ContactStateValue.UNINITIALIZED)
+                    and not _same_float(source_frame, target_frame)
+                ):
+                    return False
+                candidates_by_target.setdefault(target_frame, set()).add(source_value)
+
+            for target_frame, candidate_values in candidates_by_target.items():
+                # Rounded range scaling can collapse two semantic states onto the
+                # same destination. Per-FCurve winner selection is then capable
+                # of choosing a state key and pole/anchor key from different
+                # sources, so mixed schemas must refuse before mutation.
+                if len(candidate_values) != 1:
+                    return False
+                source_value = next(iter(candidate_values))
+                target_value = state_value_at(target_frame)
+                contact_survives_target = (
+                    target_value is not None
+                    and (
+                        target_frame not in source_set
+                        or _same_float(
+                            destination_by_source.get(target_frame, target_frame),
+                            target_frame,
+                        )
+                    )
+                )
+                if contact_survives_target and target_value != source_value:
+                    return False
+            continue
+
+        is_clone = operation in {"CLONE", "PREVIEW_CLONE"}
+        for source_frame, target_frame in paired:
+            source_value = state_value_at(source_frame)
+            target_value = state_value_at(target_frame)
+            if source_value is None:
+                contact_survives_target = target_value is not None and (
+                    is_clone or target_frame not in source_set
+                )
+                if contact_survives_target:
+                    return False
+                continue
+            if (
+                source_value == int(ContactStateValue.UNINITIALIZED)
+                and not _same_float(source_frame, target_frame)
+            ):
+                return False
+
+            # Fixed-delta Move is injective and moves an occupied selected target
+            # away as part of the same transaction. Clone deliberately skips a
+            # destination that is itself one of the selected source frames.
+            if target_frame in source_set:
+                continue
+
+            target_value = state_value_at(target_frame)
+            if target_value is not None and target_value != source_value:
+                return False
+
+    if not any_contact_involved:
+        return True
+    return operation in supported
 
 
 def finalize_generic_trackbar_delete_for_contact(
