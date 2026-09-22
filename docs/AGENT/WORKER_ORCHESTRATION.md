@@ -74,9 +74,8 @@ Current routing priority:
 2. Luna High pool: implementation/coding only by default; 2 lanes normally, optional third High burst lane only for real low-overlap implementation work.
 3. External Web review pool: **DeepSeek / Qwen / Gemini are co-equal first-tier reviewers**; rotate pairs across PRE/POST gates for diversity. Use at least 2 independent providers per round. GLM is fallback because of latency.
 4. Luna Max: one exclusive deep-reasoning/implementation lane for genuinely difficult work. Drain High first; High and Max never overlap. Do not use it for routine PRE/POST review.
-5. Standalone Gemini API: MANUAL OPTIONAL ONLY. This does not limit **Gemini Web Bridge**, which is a first-tier normal review provider in the rotated DeepSeek / Qwen / Gemini pool.
-6. Antigravity: dormant capacity only; preserve integration, do not assign normal work.
-7. Astra: manual high-value architecture escalation.
+5. Antigravity: dormant capacity only; preserve integration, do not assign normal work.
+6. Astra: manual high-value architecture escalation.
 ```
 
 **External Web challenger invariant:** for every non-trivial AWB implementation/stabilization batch, Main sends at least one small decision-boundary review through the provider-agnostic External Web Bridge using the current frozen contract plus exact relevant source/diff; that reviewer may occupy one slot in the mandatory PRE/POST minimum of two independent reviewers. Select review providers from the first-tier pool **DeepSeek / Qwen / Gemini** with deliberate rotation across successive gates (for example D+Q, Q+G, G+D) so evidence is not repeatedly filtered through the same model pair. Use GLM only as fallback or when a fourth independent perspective is materially justified. Record concrete hits, false alarms, context failures, and Main repair burden in the worker ledger so routing can become evidence-driven later. Launcher auto-open/import behavior remains the dispatch mechanism. Reviewer conclusions are advisory, but once a request is sent **Main must consume and disposition it before that gate closes**. If a bridge/provider is unavailable, record that explicitly and fill the missing reviewer slot with another independent reviewer rather than lowering the minimum.
@@ -306,7 +305,7 @@ Read only the profile needed for the current dispatch:
 - `WORKER_PROFILES/LUNA.md`
 - `WORKER_PROFILES/DEEPSEEK_WEB.md`
 - `WORKER_PROFILES/QWEN_WEB.md`
-- `WORKER_PROFILES/GEMINI.md` — Gemini Web first-tier review plus separate API-sidecar notes
+- `WORKER_PROFILES/GEMINI_WEB.md`
 - `WORKER_PROFILES/GLM_WEB.md`
 - `WORKER_PROFILES/ANTIGRAVITY.md`
 - `WORKER_PROFILES/ASTRA.md`
