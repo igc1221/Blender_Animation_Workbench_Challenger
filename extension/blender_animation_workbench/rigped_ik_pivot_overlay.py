@@ -12,15 +12,15 @@ _POINT_SHADER = None
 _SLIDING_STATE_CACHE_KEY = None
 _SLIDING_STATE_CACHE_NAMES: tuple[str, ...] = ()
 
-# Generated Rigped naming is stable by contract. The red dot is an animator-facing
-# cue for the evaluated Hand/Foot pivot, not a second visible animation object.
-# Draw it from the solved result terminal so it stays welded to the limb even
-# though the hidden IK target owns the underlying Sliding solve.
+# Generated Rigped naming is stable by contract. The state owner remains the
+# solved MCH hinge, while the animator-facing red cue shows the authored hidden
+# IK target. Reach saturation may therefore make the red target diverge from
+# the solved Hand/Foot result without moving or stretching that target.
 _LIMB_TARGETS = (
-    ("MCH_ForeArm.L", "MCH_Hand.L"),
-    ("MCH_ForeArm.R", "MCH_Hand.R"),
-    ("MCH_Calf.L", "MCH_Foot.L"),
-    ("MCH_Calf.R", "MCH_Foot.R"),
+    ("MCH_ForeArm.L", "IK_Hand.L"),
+    ("MCH_ForeArm.R", "IK_Hand.R"),
+    ("MCH_Calf.L", "IK_Foot.L"),
+    ("MCH_Calf.R", "IK_Foot.R"),
 )
 
 
