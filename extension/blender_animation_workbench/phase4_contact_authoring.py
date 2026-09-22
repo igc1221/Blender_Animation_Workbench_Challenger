@@ -4564,7 +4564,13 @@ def execute_contact_intent_plan(
             rows_written=rows_written,
             created_fcurves=created_fcurves,
         )
-        return ContactAuthoringResult(True, intent.target_type, rows_written, created_fcurves)
+        return ContactAuthoringResult(
+            True,
+            intent.target_type,
+            rows_written,
+            created_fcurves,
+            mapping_contact_types=((intent.mapping_id, intent.target_type),),
+        )
     except Exception as original_exc:
         trace_exception(
             "WRITER",

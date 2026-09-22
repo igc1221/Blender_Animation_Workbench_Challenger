@@ -485,6 +485,16 @@ def _execute_contact_recorded_result_action(
                 "AWB semantic replay Contact RECORDED_RESULT_MISMATCH: "
                 f"expected {target_type.value}, got {actual}."
             )
+        actual_mappings = tuple(
+            (str(actual_mapping_id), actual_type)
+            for actual_mapping_id, actual_type in result.mapping_contact_types
+        )
+        expected_mapping_result = ((mapping_id, target_type),)
+        if actual_mappings != expected_mapping_result:
+            raise RuntimeError(
+                "AWB semantic replay Contact MAPPING_COVERAGE_MISMATCH: "
+                f"expected={expected_mapping_result!r}, actual={actual_mappings!r}."
+            )
         return _contact_result_payload(
             frame=frame,
             controls=controls,
@@ -1282,7 +1292,7 @@ def run_semantic_replay(
     *,
     replay_file: str | None = None,
     script: dict[str, Any] | None = None,
-    replay_mode: ReplayMode | str = ReplayMode.COMMAND,
+    replay_mode: ReplayMode | str,
     max_actions: int = 1000,
     max_frames: int = 12000,
 ) -> dict[str, Any]:

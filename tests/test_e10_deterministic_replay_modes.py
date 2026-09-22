@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +41,8 @@ def test_e10_replay_mode_is_explicit_and_reported() -> None:
     runner = _function(REPLAY_PATH, "run_semantic_replay")
     assert 'RECORDED_RESULT = "RECORDED_RESULT"' in replay_mode
     assert 'COMMAND = "COMMAND"' in replay_mode
-    assert "replay_mode: ReplayMode | str = ReplayMode.COMMAND" in runner
+    assert "replay_mode: ReplayMode | str," in runner
+    assert "replay_mode: ReplayMode | str =" not in runner
     assert "resolved_replay_mode = ReplayMode(replay_mode)" in runner
     assert '"replay_mode": resolved_replay_mode.value' in runner
 
@@ -74,6 +76,14 @@ def test_e10_recorded_result_fails_closed_on_incomplete_or_mismatched_coverage()
     assert "recorded Planted replay lacks a frozen plant-space/contact-point payload" in recorded
 
 
+def test_e10_single_recorded_result_validates_actual_mapping_coverage() -> None:
+    recorded = _function(REPLAY_PATH, "_execute_contact_recorded_result_action")
+    single_execute = _function(CONTACT_PATH, "execute_contact_intent_plan")
+    assert "expected_mapping_result = ((mapping_id, target_type),)" in recorded
+    assert "actual_mappings != expected_mapping_result" in recorded
+    assert "mapping_contact_types=((intent.mapping_id, intent.target_type),)" in single_execute
+
+
 def test_e10_batch_planner_accepts_explicit_per_mapping_targets_before_intent_build() -> None:
     batch = _function(CONTACT_PATH, "build_contact_batch_intent_plan")
     assert "forced_mapping_types: dict[str, ContactKeyType] | None = None" in batch
@@ -91,12 +101,32 @@ def test_e10_new_contact_capture_records_direct_binding_coverage() -> None:
     assert 'replay_action["direct_binding_ids"] = replay_direct_binding_ids' in operator
 
 
-def test_e10_user_final_runner_routes_explicit_mode_with_legacy_command_fallback() -> None:
+def test_e10_user_final_runner_requires_explicit_mode_without_hidden_fallback() -> None:
     source, _tree = _source(RUNNER_PATH)
     semantic = _function(RUNNER_PATH, "_semantic_code")
     main = _function(RUNNER_PATH, "main")
     assert 'replay_mode={replay_mode!r}' in semantic
     assert '"replay_mode": {replay_mode!r}' in semantic
-    assert 'manifest.get("replay_mode") or "COMMAND"' in main
+    assert 'manifest.get("replay_mode") or ""' in main
+    assert "Semantic replay requires an explicit replay_mode" in main
+    assert 'or "COMMAND"' not in main
     assert '"--replay-mode"' in main
     assert '"RECORDED_RESULT"' in source
+
+
+def test_e10_archived_semantic_replays_declare_mode_explicitly() -> None:
+    expected = {
+        "E2": "RECORDED_RESULT",
+        "E3": "COMMAND",
+        "E4": "COMMAND",
+        "E5": "COMMAND",
+        "E6": "COMMAND",
+        "E7": "RECORDED_RESULT",
+        "E8": "RECORDED_RESULT",
+        "E9": "RECORDED_RESULT",
+    }
+    for test_id, replay_mode in expected.items():
+        manifest_path = ROOT / "debug" / "user_final_tests" / test_id / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["runner"] == "semantic_replay"
+        assert manifest["replay_mode"] == replay_mode
