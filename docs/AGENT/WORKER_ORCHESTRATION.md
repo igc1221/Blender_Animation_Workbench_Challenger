@@ -1,6 +1,6 @@
 # Blender Animation Workbench — Worker Orchestration
 
-> Updated: **2026-09-21 17:04 KST**
+> Updated: **2026-09-22 21:27 KST**
 > Authority: **Main / Sol**
 > Purpose: turn model-specific strengths/weaknesses into better task packets and lower Main repair cost.
 
@@ -64,6 +64,8 @@ Choose the worker for the job rather than filling idle capacity.
 - risk if the worker over-expands scope or misses a frozen contract
 
 If the task does not benefit from parallelism, Main does it directly.
+
+Worker availability/quota is a live runtime condition, not a durable quality grade. Check current availability before dispatch; if a provider or Luna is quota-limited/unavailable, skip it without rewriting its quality profile.
 
 Current routing priority:
 
@@ -302,9 +304,11 @@ Do not keep a worker busy merely because quota is available.
 Read only the profile needed for the current dispatch:
 
 - `WORKER_PROFILES/LUNA.md`
-- `WORKER_PROFILES/ANTIGRAVITY.md`
-- `WORKER_PROFILES/GEMINI.md`
 - `WORKER_PROFILES/DEEPSEEK_WEB.md`
+- `WORKER_PROFILES/QWEN_WEB.md`
+- `WORKER_PROFILES/GEMINI.md` — Gemini Web first-tier review plus separate API-sidecar notes
+- `WORKER_PROFILES/GLM_WEB.md`
+- `WORKER_PROFILES/ANTIGRAVITY.md`
 - `WORKER_PROFILES/ASTRA.md`
 
 ## 8. Update discipline
