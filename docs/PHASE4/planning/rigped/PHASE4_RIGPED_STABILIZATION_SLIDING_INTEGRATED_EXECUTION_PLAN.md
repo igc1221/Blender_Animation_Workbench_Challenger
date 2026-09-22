@@ -1,7 +1,7 @@
 ﻿# Phase 4 Rigped — Stabilization + Sliding Integrated Execution Plan
 
 > Updated: **2026-09-22 KST**
-> Status: **ACTIVE EXECUTION PLAN / E1-E8 CLOSED / E9 USER FIRST PENDING**
+> Status: **A5 STABILIZATION CLOSED / E1-E12 USER PASS / CLOSED / A6 PLANTED NEXT**
 > Runtime target: **Blender 5.2.1 LTS**
 > Main authority: **Sol Main**
 > Mandatory challenger policy: **every implementation/stabilization item receives a narrow pre-implementation challenger review and a narrow post-implementation challenger review; challenger output is advisory evidence and Main decides whether a finding blocks, improves, defers, or is rejected**
@@ -972,7 +972,7 @@ Close the current A5 core stabilization before A6 Planted.
 
 ## Main regression
 
-At minimum:
+Required integrated coverage:
 
 - Free/Sliding C;
 - broad mixed C;
@@ -999,23 +999,40 @@ Question:
 
 > Given the final diff and proof ledger, is there any remaining contract boundary where selected authoring domain, dependency-maintenance domain, persistent write footprint, or replay authority are still conflated?
 
-This final challenger is not a substitute for user acceptance.
+Final corrected inline-source POST:
+- DeepSeek: CLEAR. One apparent `MutationJournal.commit_group` validation concern was rejected after direct source inspection showed a packet-rendering concatenation artifact rather than product code.
+- Qwen: CLEAR. Hypothetical unsupported journal states were rejected because the current enum has no such states. Mid-gesture AUTO toggle semantics were recorded as VALID BUT DEFERRED RC1 hardening; E11 intentionally freezes release-time AUTO authority and no E12 blocker remained.
 
-## Final Blender/user gate
+## Integrated closure evidence — 2026-09-22
 
-- fresh install;
-- close previous AWB Blender;
-- fresh launch of existing manual baseline;
-- no Main pre-run acceptance scenario;
-- leave Blender open;
-- user performs final manual acceptance.
+Status: **USER PASS / CLOSED**.
+
+- Static/regression gate before USER FIRST: `awb-check` **440 pytest PASS + Ruff PASS**.
+- Blender 5.2.1 regressions passed: E7, E8, I12, I13, I16, I8, fresh E9 + E11, plus E9 `RECORDED_RESULT` replay (17 actions).
+- I14 runtime verifier was stale against the already-frozen Contact Track Bar bundle contract. Main changed only `scripts/verify_phase4_i14_contact_integrity.py` to verify atomic Contact Move/Clone/Delete/Selection Range behavior; product extension source was unchanged. Corrected I14 runtime then FULL PASS.
+- Frozen E5 COMMAND replay passed 12 actions across Sliding Rotate orientations/active-passive ownership. Frozen E6 COMMAND replay passed 34 actions including multi-limb Sliding, COM Move/Rotate, max-extension/near-straight and nonidentity cases.
+- Fresh final handoff passed `awb-install-dev`, prior AWB Blender close, `awb-launch`, and `awb-prepare-rigped-user-baseline`; golden baseline SHA-256 remained `2d71e17f2849ec58dd5d7acaa946861fb89b99a7974406e049d78e5adefa4fe4`. Main did not pre-run the acceptance scenario.
+- USER FIRST fresh session `24d9e9484f7a4054a2e84fee98e6e477` passed:
+  - Foot.L C -> Free, then C -> Sliding;
+  - Sliding W and E;
+  - COM Move with fixed Sliding target dependency;
+  - Root Move with Root-relative Sliding target transport;
+  - AUTO ON -> Sliding Move `keyed:true`;
+  - one Ctrl+Z + one Ctrl+Shift+Z live Undo/Redo user confirmation;
+  - AUTO OFF -> Sliding Move `keyed:false`;
+  - Rigped K complete no-op;
+  - Root-only C fail-closed with zero persistent writes;
+  - Track Bar scrub completed without errors.
+- The first Track Bar scrub visibly returned Foot.L once. Investigation proved this was not a scrub regression: immediately before scrub, USER FIRST intentionally made an AUTO OFF `keyed:false` Foot.L pose edit, so the next frame evaluation returned the transient unkeyed pose to the existing frame-0 authored state. All relevant Thigh.L/Calf.L/Foot.L/IK_Foot.L curves contained frame-0 keys only; direct evaluation at frames 0/5/10/15/20/25 produced identical Foot.L/IK_Foot.L/MCH_Foot.L positions. A second 0↔25 scrub with no intervening pose edit completed normally and the user reported no repeated motion.
+- Final scrub trace: `SCRUB_BEGIN -> SCRUB_END`, `cancelled:false`, max frame 25; no new error-channel events.
 
 ## Exit
 
-Only after E12 user acceptance:
-- A5 stabilization is eligible to close;
+E12 USER acceptance is complete. **A5 stabilization is CLOSED.**
+
+Next:
 - proceed to A6 Planted;
-- after A6 acceptance, run the already-planned RC0 Core Feature Complete -> RC1 Hardening -> RC2 Refactor -> RC3 Core Freeze sequence before later roadmap work.
+- after A6 acceptance, run RC0 Core Feature Complete -> RC1 Hardening -> RC2 Refactor -> RC3 Core Freeze before later roadmap work.
 
 ---
 
@@ -1175,8 +1192,8 @@ Do not start or redesign:
 
 ## 7. Immediate next action
 
-**E1 through E9 are USER PASS / CLOSED.**
+**E1 through E12 are USER PASS / CLOSED. A5 stabilization is CLOSED.**
 
-Proceed to **E10 — Deterministic replay modes**.
+Proceed to **A6 — Planted** using the current Phase 4 product contracts and the next focused A6 implementation plan.
 
-Do not reopen E1-E9 without new concrete regression evidence. E9 frozen user-final authority is `debug/user_final_tests/current.json -> E9`.
+Do not reopen E1-E12 without new concrete regression evidence. The separate I19 continuous-contact broad-smoke residual remains debt and does not reopen A5.
