@@ -154,3 +154,102 @@ def test_e11_sliding_anchor_reuses_existing_transform_closure_not_a_second_auto_
     assert "_channels_for_state(ik_contract" in rows
     assert "_channels_for_state(pole_contract" in rows
     assert "auto_solver" not in (anchor + rows).lower()
+
+
+def test_e11_body_auto_covers_root_and_com_without_collapsing_dependency_semantics() -> None:
+    invoke = _method(TRANSFORM, "BAW_OT_rigped_direct_move_axis", "invoke")
+    move = _function(AUTO, "plan_rigped_auto_direct_move")
+
+    # E7/E8 dependency semantics remain intentionally distinct: COM guards keep
+    # Sliding target world authority fixed, while Root-relative targets follow Root.
+    assert '_resolved_control_role_name(state.control) == "COM"' in invoke
+    assert "_capture_sliding_dependency_guards(self._sliding_guard_capabilities)" in invoke
+
+    # AUTO itself is not COM-only: every supported direct Move goes through the
+    # selected direct-control planner, so Root and COM both key only their own
+    # authored direct authority.
+    assert "plan_rigped_auto_direct_move(" in invoke
+    assert "requested_families=(ChannelFamily.POSITION,)" in move
+    assert "active_only=active_only" in move
+
+
+def test_e11_multi_limb_auto_preserves_mapping_authority_and_defers_planted() -> None:
+    plan = _function(AUTO, "plan_rigped_auto_contact_batch")
+    commit = _function(AUTO, "commit_rigped_auto_contact_batch")
+
+    assert "mapping_ids=mapping_ids" in plan
+    assert "ContactKeyType.FREE" in plan
+    assert "ContactKeyType.SLIDING" in plan
+    assert "AK_AUTO_MULTI_PLANTED_DEFERRED" in plan
+    assert "begin_types" in commit and "final_types" in commit
+    assert "AK_AUTO_CONTACT_AUTHORITY_CHANGED" in commit
+
+
+def test_e11_escape_paths_restore_preview_without_auto_writer_commit() -> None:
+    for class_name in (
+        "BAW_OT_rigped_semantic_move_axis",
+        "BAW_OT_rigped_fk_joint_move_axis",
+        "BAW_OT_rigped_direct_move_axis",
+        "BAW_OT_rigped_direct_rotate_axis",
+    ):
+        modal = _method(TRANSFORM, class_name, "modal")
+        marker = 'if event.type in {"ESC", "RIGHTMOUSE"}:'
+        assert marker in modal
+        escape = modal[modal.index(marker):]
+        assert 'return {"CANCELLED"}' in escape
+        escape = escape[: escape.index('return {"CANCELLED"}') + len('return {"CANCELLED"}')]
+        assert "commit_rigped_auto_anchor(" not in escape
+        assert "commit_rigped_auto_contact_batch(" not in escape
+        assert "commit_rigped_auto_direct_move(" not in escape
+        assert "commit_rigped_auto_direct_rotate(" not in escape
+        assert "commit_rigped_auto_writer_results(" not in escape
+
+
+def test_e11_undo_ownership_remains_one_gesture_boundary() -> None:
+    source, tree = _source(TRANSFORM)
+
+    classes = {
+        node.name: ast.get_source_segment(source, node)
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name
+        in {
+            "BAW_OT_rigped_semantic_move_axis",
+            "BAW_OT_rigped_fk_joint_move_axis",
+            "BAW_OT_rigped_direct_move_axis",
+            "BAW_OT_rigped_direct_rotate_axis",
+        }
+    }
+    assert '{"REGISTER", "UNDO", "BLOCKING"}' in classes["BAW_OT_rigped_direct_move_axis"]
+    assert '{"REGISTER", "UNDO", "BLOCKING"}' in classes["BAW_OT_rigped_direct_rotate_axis"]
+    assert "bpy.ops.ed.undo_push(" in classes["BAW_OT_rigped_semantic_move_axis"]
+    assert 'bpy.ops.ed.undo_push(message="AWB Rigped FK Move")' in classes[
+        "BAW_OT_rigped_fk_joint_move_axis"
+    ]
+
+
+def test_e11_passive_scrub_replay_display_never_authors_animation() -> None:
+    sync = _function(TRANSFORM, "_sync_rigped_sliding_replay_display")
+    for forbidden in (
+        "commit_rigped_auto_",
+        "execute_contact_intent_plan(",
+        "execute_contact_batch_intent_plan(",
+        "execute_direct_key_plan(",
+        "keyframe_insert(",
+        "keyframe_points.insert(",
+    ):
+        assert forbidden not in sync
+    assert "_apply_pose_bone_rotation_from_matrix(" in sync
+    assert "view_layer.update()" in sync
+
+
+def test_e11_direct_first_key_baseline_stays_existing_direct_policy() -> None:
+    move = _function(AUTO, "plan_rigped_auto_direct_move")
+    rotate = _function(AUTO, "plan_rigped_auto_direct_rotate")
+    helper = _function(AUTO, "_direct_plan_baseline_rows_by_control")
+
+    assert "current_time > 0.0" in move
+    assert "current_time > 0.0" in rotate
+    assert "if channels and keyed_count == 0:" in helper
+    assert "AK_AUTO_PARTIAL_DIRECT_POSITION" in helper
+    assert "AK_AUTO_PARTIAL_DIRECT_ROTATION" in helper
