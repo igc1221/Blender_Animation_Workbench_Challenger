@@ -104,12 +104,13 @@ def test_e10_new_contact_capture_records_direct_binding_coverage() -> None:
 def test_e10_user_final_runner_requires_explicit_mode_without_hidden_fallback() -> None:
     source, _tree = _source(RUNNER_PATH)
     semantic = _function(RUNNER_PATH, "_semantic_code")
+    user_final = _function(RUNNER_PATH, "_resolve_user_final")
     main = _function(RUNNER_PATH, "main")
     assert 'replay_mode={replay_mode!r}' in semantic
     assert '"replay_mode": {replay_mode!r}' in semantic
-    assert 'manifest.get("replay_mode") or ""' in main
-    assert "Semantic replay requires an explicit replay_mode" in main
-    assert 'or "COMMAND"' not in main
+    assert 'manifest.get("replay_mode")' in user_final
+    assert "Semantic replay requires COMMAND or RECORDED_RESULT mode." in user_final
+    assert 'or "COMMAND"' not in user_final
     assert '"--replay-mode"' in main
     assert '"RECORDED_RESULT"' in source
 

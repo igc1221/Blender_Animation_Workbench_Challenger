@@ -89,6 +89,13 @@ def test_a6_planted_replay_reuses_straight_limb_stall_seed_without_new_authority
     assert "contact_type not in {ContactKeyType.SLIDING, ContactKeyType.PLANTED}" in replay
 
 
+def test_a6_live_body_overlay_membership_includes_planted() -> None:
+    collector = _function(TRANSFORM_PATH, "_sliding_capabilities_for_character")
+    assert "ContactKeyType.SLIDING" in collector
+    assert "ContactKeyType.PLANTED" in collector
+    assert "contact_type in {ContactKeyType.SLIDING, ContactKeyType.PLANTED}" in collector
+
+
 def test_a6_planted_move_remains_fail_closed() -> None:
     source = TRANSFORM_PATH.read_text(encoding="utf-8")
     assert "Planted semantic Move is fail-closed; release or slide the Contact first." in source

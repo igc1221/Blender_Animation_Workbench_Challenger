@@ -6391,7 +6391,7 @@ def _sliding_capabilities_for_character(
     scene,
     character_id: str,
 ) -> tuple[LimbRepresentationCapability, ...]:
-    """Freeze current Sliding membership from one already-resolved Character identity."""
+    """Freeze current IK-authoritative Contact membership for live body overlays."""
 
     view = resolve_character(scene, character_id)
     capabilities: list[LimbRepresentationCapability] = []
@@ -6408,7 +6408,7 @@ def _sliding_capabilities_for_character(
         contact_type = type_for_state_value(
             float(solver_owner[AWB_CONTACT_STATE_PROPERTY])
         )
-        if contact_type is ContactKeyType.SLIDING:
+        if contact_type in {ContactKeyType.SLIDING, ContactKeyType.PLANTED}:
             capabilities.append(capability)
     return tuple(capabilities)
 
