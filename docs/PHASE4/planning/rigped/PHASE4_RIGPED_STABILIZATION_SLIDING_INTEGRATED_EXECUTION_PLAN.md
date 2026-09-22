@@ -1,7 +1,7 @@
 ﻿# Phase 4 Rigped — Stabilization + Sliding Integrated Execution Plan
 
 > Updated: **2026-09-22 KST**
-> Status: **ACTIVE EXECUTION PLAN / E1-E7 CLOSED / E8 NEXT**
+> Status: **ACTIVE EXECUTION PLAN / E1-E8 CLOSED / E9 USER FIRST PENDING**
 > Runtime target: **Blender 5.2.1 LTS**
 > Main authority: **Sol Main**
 > Mandatory challenger policy: **every implementation/stabilization item receives a narrow pre-implementation challenger review and a narrow post-implementation challenger review; challenger output is advisory evidence and Main decides whether a finding blocks, improves, defers, or is rejected**
@@ -1099,6 +1099,25 @@ OPEN RISK: none blocking E8. E9 owns multi-limb Sliding body dependency; the sep
 NEXT ITEM ALLOWED: YES — proceed to E9 only.
 ```
 
+### E9 evidence ledger — 2026-09-22 USER FIRST PENDING
+
+```text
+ITEM: E9 — Multi-limb Sliding body dependency
+MAIN DIFF / SHA: production code unchanged; evidence-only expansion adds tests/test_rigped_transform_e9.py and scripts/verify_phase4_e9_multilimb_sliding.py.
+CHALLENGER REQUEST: Qwen PRE awb-e9-pre-qwen-20260922-01; Gemini PRE awb-e9-pre-gemini-20260922-01.
+CHALLENGER RESPONSE: both recommended GO with safeguards, but Main rejected unsupported architectural claims after direct source adjudication. Qwen incorrectly claimed no existing multi-limb atomic container and proposed a new transaction coordinator/body-delta aggregation; current rigped_transform.py already freezes character-wide Sliding capability tuples, captures/restores per-limb dependency guards and hidden seed snapshots inside one modal operation, batches public-overlay convergence, and restores the entire frozen set on error/cancel. Gemini correctly identified that the tuple-based E7/E8 structure is multi-limb-ready, but its claimed convergence and flat-diagnostic blockers were stale against current source: convergence requires every capability to remain stable, and SLIDING_BODY_DEPENDENCY_PREVIEW already emits per-limb records.
+MAIN VERDICT: EVIDENCE GREEN / USER FIRST PENDING. E9 requires no production-code redesign. Preserve the existing union of independent hidden native-IK domains; do not add a coordinator, body compensation, cross-limb solve, or full-body balance layer.
+CODE/STATIC: 410 pytest PASS; Ruff PASS. New E9 source-contract tests freeze character-wide Sliding collection ownership, all-limb guard capture/restore, batched convergence, per-limb diagnostics, active/passive Rotate partitioning, whole-operation Move restore, no body-compensation/full-body symbols, four-target red-cue enumeration, hidden-Rigped fixture cleanup that does not depend on viewport selection, and immutable golden-baseline SHA/working-copy preparation.
+BLENDER API/STATE: Blender 5.2.1 E9 runtime FULL PASS. Cases passed: left Sliding/right Free; both feet Sliding; foot+hand Sliding; both hands body Rotate; all four Sliding; one deliberately reach-limited Foot.L with independent Hand.R still solving; injected one-limb target drift fails closed then restores the whole four-limb batch; AUTO OFF creates zero additional keys; one native Undo restores the committed four-limb COM gesture.
+REACH-LIMIT EVIDENCE: deliberate Foot.L saturation produced target/result gap 1.357945 while Hand.R remained independently near target at 0.056574; no COM/body compensation or abort was introduced.
+REGRESSION: E7 runtime PASS; E8 runtime PASS; I12 runtime PASS; I13 runtime PASS.
+GUI INPUT/SCREEN: USER FIRST was paused before gesture validation because live fixture preparation had replaced the fitted manual baseline with repeatedly generated default Rigpeds and accumulated AWB Rigped.001-.008 residue. The verified fitted working baseline (~4.624 m, one AWB_Rigped, 79 bones) was promoted to immutable `baselines/golden/rigped_animate_manual_baseline_v1.blend`; its manifest pins SHA-256 `2d71e17f2849ec58dd5d7acaa946861fb89b99a7974406e049d78e5adefa4fe4`, and a second read-only bundle lives under `E:\AIProjects\Backups\Blender_Animation_Workbench\golden`. `build/rigped_animate_manual_baseline.blend` is now disposable working state recreated and verified by Named Task `awb-prepare-rigped-user-baseline`; `.blend1` is explicitly not baseline authority. End-to-end prepare task execution passed and reopened the fitted working copy. Gesture validation is still pending.
+UNDO/REDO: automated native single-Undo proof PASS; direct user Undo/Redo remains part of USER FIRST.
+AUTO OFF: verified in E9 runtime with both AWB Auto Key and Blender native Auto Key disabled and no additional animation keys.
+OPEN RISK: only direct user interaction/screen confirmation remains. Separate I19 continuous-contact broad-smoke residual remains debt.
+NEXT ITEM ALLOWED: NO — close E9 only after USER FIRST acceptance; do not start E10 yet.
+```
+
 ## 6. Explicit non-goals until this plan closes
 
 Do not start or redesign:
@@ -1116,15 +1135,18 @@ Do not start or redesign:
 
 ## 7. Immediate next action
 
-**E1 through E8 are USER PASS / CLOSED.**
+**E1 through E8 are USER PASS / CLOSED. E9 code/runtime evidence is green and USER FIRST is the only remaining gate.**
 
-Proceed to **E9 — Multi-limb Sliding body dependency**.
+Run the focused E9 manual sequence on the existing production build with AUTO OFF:
 
-E9 entry requirements:
-1. run exactly one PRE challenger round with two independent rotated first-tier Web Bridge providers;
-2. keep each Sliding limb as an independent hidden native-IK domain while one shared body gesture remains one operation;
-3. preserve the boundary between the selected edit domain and passive dependency-maintenance domains;
-4. prove both-feet, foot+hand, both-hands, and all-four-limb cases, including one deliberately reach-limited limb plus cancel/failure behavior;
-5. keep AUTO work in E11, deterministic replay work in E10, and Planted in A6.
+1. both feet Sliding -> COM Move down/side;
+2. one foot + one hand Sliding -> COM Move;
+3. both hands Sliding -> Spine/COM body Rotate;
+4. all four limbs Sliding -> COM Move;
+5. deliberately push one Sliding limb beyond reach and confirm only that limb saturates while the body gesture remains authoritative;
+6. ESC/RMB one four-limb body gesture and confirm exact visible return;
+7. complete one four-limb body gesture, then one Undo and one Redo.
 
-Do not reopen E1-E8 without new concrete regression evidence.
+Pass criteria: every red cue remains on its own hidden target, limbs remain independent, no body compensation/full-body solve appears, no partial overlay residue remains after cancel/failure, AUTO OFF inserts no new keys, and one Undo/Redo covers the whole supported gesture.
+
+Do not start E10 until E9 USER FIRST is accepted. Do not reopen E1-E8 without new concrete regression evidence.

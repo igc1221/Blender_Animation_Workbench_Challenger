@@ -4732,6 +4732,10 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
 
     bl_idname = "baw.rigped_direct_move_axis"
     bl_label = "Move Rigped Control"
+    # This modal modifies Blender pose data and must use Blender's native
+    # operator Undo contract. Manual ed.undo_push bookkeeping produced asymmetric
+    # history in live Blender (either first Undo was a no-op or Redo lost the
+    # committed pose), so keep one native operator boundary and no manual pushes.
     bl_options: ClassVar[set[str]] = {"REGISTER", "UNDO", "BLOCKING"}
 
     axis: EnumProperty(
@@ -5089,7 +5093,6 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                 dependency_guards=self._sliding_dependency_guards,
                 operation_id=self._trace_operation_id,
             )
-            bpy.ops.ed.undo_push(message="AWB Rigped Direct Move Start")
             _apply_direct_move_delta(
                 context,
                 states,
@@ -5152,7 +5155,6 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
             self._sliding_guard_capabilities = ()
             self._auto_plan = None
             _set_semantic_move_drag_active(context, False)
-            bpy.ops.ed.undo_push(message="AWB Rigped Direct Move")
             trace_event(
                 "OPERATION",
                 "TRANSFORM_COMMIT",
