@@ -83,22 +83,24 @@ def transform_orientation_cycle(context) -> tuple[str, ...]:
 
 
 def contact_enabled_types(context) -> tuple[ContactKeyType, ...]:
-    """Return the accepted A5 C-cycle states.
+    """Return the enabled A6 Free/Sliding/Planted C-cycle states."""
 
-    Planted remains reserved for A6. Keep the preference property for the
-    future UI contract, but never let it enter the live C cycle until A6 is
-    explicitly opened.
-    """
-
+    default_cycle = (
+        ContactKeyType.FREE,
+        ContactKeyType.SLIDING,
+        ContactKeyType.PLANTED,
+    )
     preferences = _addon_preferences(context)
     if preferences is None:
-        return (ContactKeyType.FREE, ContactKeyType.SLIDING)
+        return default_cycle
     enabled: list[ContactKeyType] = []
     if bool(preferences.contact_free_enabled):
         enabled.append(ContactKeyType.FREE)
     if bool(preferences.contact_sliding_enabled):
         enabled.append(ContactKeyType.SLIDING)
-    return tuple(enabled) or (ContactKeyType.FREE, ContactKeyType.SLIDING)
+    if bool(preferences.contact_planted_enabled):
+        enabled.append(ContactKeyType.PLANTED)
+    return tuple(enabled) or default_cycle
 
 
 def contact_shortcut_event_type(context) -> str:
@@ -165,8 +167,8 @@ class BAW_AP_preferences(bpy.types.AddonPreferences):
     )
     contact_planted_enabled: BoolProperty(
         name="Planted",
-        description="Reserved for A6; not included in the current A5 Contact cycle",
-        default=False,
+        description="Include Planted in the Contact cycle",
+        default=True,
     )
     orientation_global_enabled: BoolProperty(
         name="Global",
@@ -525,6 +527,7 @@ class BAW_AP_preferences(bpy.types.AddonPreferences):
         row = contact.row(align=True)
         row.prop(self, "contact_free_enabled", toggle=True)
         row.prop(self, "contact_sliding_enabled", toggle=True)
+        row.prop(self, "contact_planted_enabled", toggle=True)
 
         orientation = layout.box()
         orientation.label(text=text("rigped.orientation_cycle", context))

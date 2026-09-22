@@ -5548,7 +5548,11 @@ def execute_contact_command(
     control_context,
     *,
     operation_id: str,
-    enabled_types: tuple[ContactKeyType, ...] = (ContactKeyType.FREE, ContactKeyType.SLIDING),
+    enabled_types: tuple[ContactKeyType, ...] = (
+        ContactKeyType.FREE,
+        ContactKeyType.SLIDING,
+        ContactKeyType.PLANTED,
+    ),
     plant_space: ContactPlantSpace = ContactPlantSpace.WORLD,
     contact_point_local: tuple[float, float, float] = (0.0, 0.0, 0.0),
     selector_character_id: str | None = None,

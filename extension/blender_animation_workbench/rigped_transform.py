@@ -520,13 +520,41 @@ def _set_replay_limb_fk_feedback_muted(
     return changed
 
 
+def _replay_capabilities_by_solver_name(scene, rig) -> dict[str, LimbRepresentationCapability]:
+    """Resolve generated limb capabilities for one live Rigped replay owner."""
+
+    setup = rig.get(RIGPED_SETUP_PROPERTY) if hasattr(rig, "get") else None
+    getter = getattr(setup, "get", None)
+    if not callable(getter):
+        return {}
+    character_id = str(getter("character_id", "") or "")
+    if not character_id:
+        return {}
+    try:
+        view = resolve_character(scene, character_id)
+    except (KeyError, RuntimeError, TypeError, ValueError, ReferenceError):
+        return {}
+
+    capabilities: dict[str, LimbRepresentationCapability] = {}
+    for mapping in view.definition.kinematics:
+        capability = resolve_limb_representation_capability(
+            view,
+            mapping.mapping_id,
+        ).capability
+        if capability is None or capability.native_ik.solver_owner.owner_object is not rig:
+            continue
+        capabilities[str(capability.native_ik.solver_owner.target.name)] = capability
+    return capabilities
+
+
 @persistent
 def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
-    """Keep public Hand/Foot chains visually welded to the single Sliding IK solve.
+    """Keep public Contact chains visually welded to their hidden IK solve.
 
-    Sliding replay authority is the hidden IK target/pole plus Contact state.
-    Public FK curves remain transition/release data, but while Sliding is active
-    they must not present a second independently interpolated limb to the user.
+    Sliding and Planted replay authority is the hidden IK target/pole plus
+    Contact state. Public FK curves remain transition/release data, but while
+    either IK-authoritative state is active they must not present a second
+    independently interpolated limb to the user.
     """
 
     global _RIGPED_SLIDING_REPLAY_SYNC_ACTIVE
@@ -540,6 +568,7 @@ def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
             if getattr(rig, "type", None) != "ARMATURE" or getattr(rig, "pose", None) is None:
                 continue
             pose = rig.pose.bones
+            capabilities_by_solver = _replay_capabilities_by_solver_name(scene, rig)
             for state_name, public_names, result_names in _RIGPED_SLIDING_REPLAY_LIMBS:
                 state_bone = pose.get(state_name)
                 if state_bone is None or AWB_CONTACT_STATE_PROPERTY not in state_bone:
@@ -566,12 +595,28 @@ def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
                     result_names,
                     contact_type in {ContactKeyType.SLIDING, ContactKeyType.PLANTED},
                 )
-                if branch_changed or feedback_changed:
-                    view_layer = getattr(bpy.context, "view_layer", None)
-                    if view_layer is not None and getattr(bpy.context, "scene", None) is scene:
-                        view_layer.update()
-                touched = branch_changed or feedback_changed or touched
-                if contact_type is not ContactKeyType.SLIDING:
+                view_layer = getattr(bpy.context, "view_layer", None)
+                live_context = (
+                    view_layer is not None
+                    and getattr(bpy.context, "scene", None) is scene
+                )
+                if (branch_changed or feedback_changed) and live_context:
+                    view_layer.update()
+
+                # A reachable near-straight Planted leg can remain stuck at full
+                # extension after its Root moves even though the held IK target is
+                # now inside reach. Reuse the accepted Sliding singularity seed:
+                # it perturbs only the hidden result pose, never Contact authority.
+                seed_changed = False
+                if contact_type is ContactKeyType.PLANTED and live_context:
+                    capability = capabilities_by_solver.get(state_name)
+                    if capability is not None:
+                        seed_changed = _seed_stalled_sliding_native_ik(
+                            bpy.context,
+                            capability,
+                        )
+                touched = branch_changed or feedback_changed or seed_changed or touched
+                if contact_type not in {ContactKeyType.SLIDING, ContactKeyType.PLANTED}:
                     continue
 
                 public = tuple(pose.get(name) for name in public_names)
@@ -5760,16 +5805,15 @@ def apply_rigped_joint_limits_to_pose_bone(pose_bone) -> bool:
 
 
 def apply_rigped_joint_limits_to_rig(rig) -> int:
-    """Clamp constrained public FK joints without fighting active Sliding IK."""
+    """Clamp public FK joints without fighting IK-authoritative Contact replay."""
 
     pose = getattr(rig, "pose", None)
     if pose is None:
         return 0
 
-    # While a limb is Sliding, its visible public chain is only a replay shell
-    # for the hidden IK solve. Re-clamping that public shell after replay moves it
-    # away from MCH/IK and corrupts the semantic Move session. The IK chain and
-    # Sliding rotate path already own their anatomical limits.
+    # While a limb is Sliding or Planted, its visible public chain is only a
+    # replay shell for the hidden IK solve. Re-clamping that public shell after
+    # replay moves it away from MCH/IK and breaks the authoritative Contact pose.
     sliding_public_names: set[str] = set()
     for state_name, public_names, _result_names in _RIGPED_SLIDING_REPLAY_LIMBS:
         state_bone = pose.bones.get(state_name)
@@ -5781,7 +5825,7 @@ def apply_rigped_joint_limits_to_rig(rig) -> int:
             )
         except (TypeError, ValueError):
             continue
-        if contact_type is ContactKeyType.SLIDING:
+        if contact_type in {ContactKeyType.SLIDING, ContactKeyType.PLANTED}:
             sliding_public_names.update(str(name) for name in public_names)
 
     changed = 0

@@ -116,7 +116,10 @@ def _sliding_state_names_at_frame(rig, pose, frame: float) -> tuple[str, ...]:
             frame,
             curves_by_path,
         )
-        if state == int(ContactStateValue.SLIDING):
+        if state in {
+            int(ContactStateValue.SLIDING),
+            int(ContactStateValue.PLANTED),
+        }:
             names.append(state_name)
 
     _SLIDING_STATE_CACHE_KEY = cache_key
