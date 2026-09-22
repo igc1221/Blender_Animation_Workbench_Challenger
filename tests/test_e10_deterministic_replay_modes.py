@@ -108,6 +108,8 @@ def test_e10_user_final_runner_requires_explicit_mode_without_hidden_fallback() 
     main = _function(RUNNER_PATH, "main")
     assert 'replay_mode={replay_mode!r}' in semantic
     assert '"replay_mode": {replay_mode!r}' in semantic
+    assert 'bpy.ops.ed.undo_push(message=f"AWB Replay Resume {test_id}")' in semantic
+    assert '"FINISHED" not in undo_checkpoint' in semantic
     assert 'manifest.get("replay_mode")' in user_final
     assert "Semantic replay requires COMMAND or RECORDED_RESULT mode." in user_final
     assert 'or "COMMAND"' not in user_final
