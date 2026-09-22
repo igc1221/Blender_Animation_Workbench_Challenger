@@ -64,7 +64,14 @@ def test_a6_direct_only_c_executes_normal_free_direct_plan() -> None:
     assert "mapping_contact_types=()" in command
 
 
-def test_a6_same_frame_body_auto_refreshes_only_existing_planted_activation_fk_rows() -> None:
+def test_a6_contact_ui_uses_unique_writer_operation_id_per_press() -> None:
+    operator = _class(CONTACT_UI_PATH, "BAW_OT_contact")
+    assert 'writer_operation_id = f"baw-contact:{trace_operation_id}"' in operator
+    assert "operation_id=writer_operation_id" in operator
+    assert 'operation_id="baw-contact"' not in operator
+
+
+def test_a6_same_frame_body_auto_refreshes_only_existing_planted_activation_rotation_rows() -> None:
     helper = _function(
         AUTO_KEY_PATH,
         "_augment_direct_plan_with_planted_activation_fk_dependencies",
@@ -72,6 +79,7 @@ def test_a6_same_frame_body_auto_refreshes_only_existing_planted_activation_fk_r
     assert "previous_type is not ContactKeyType.FREE" in helper
     assert "exact_type is not ContactKeyType.PLANTED" in helper
     assert "capability.fk_binding_ids" in helper
+    assert "capability.authored_terminal_binding_id" in helper
     assert "AllocationIntent.EXISTING_FCURVE" in helper
     assert "_key_exists_at_time(curve, time)" in helper
     assert "dependency_footprint=replace(" in helper

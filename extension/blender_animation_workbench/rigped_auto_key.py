@@ -449,10 +449,10 @@ def _augment_direct_plan_with_planted_activation_fk_dependencies(
     """Extend one body Auto direct plan with existing dormant FK boundary rows only.
 
     This is intentionally narrow: only an exact Free->Planted activation at the
-    current write time qualifies, and every added FK row must already have both
-    its FCurve and exact Contact-authored key. The helper therefore refreshes
-    existing native transition dependency values without creating Contact,
-    anchor, solver, or new animation authority.
+    current write time qualifies, and every added FK/terminal rotation row must
+    already have both its FCurve and exact Contact-authored key. The helper
+    therefore refreshes existing native transition dependency values without
+    creating Contact, anchor, solver, or new animation authority.
     """
 
     mapping_ids = tuple(dict.fromkeys(str(item) for item in mapping_ids if str(item)))
@@ -500,7 +500,15 @@ def _augment_direct_plan_with_planted_activation_fk_dependencies(
         if previous_type is not ContactKeyType.FREE or exact_type is not ContactKeyType.PLANTED:
             continue
 
-        for binding_id in capability.fk_binding_ids:
+        activation_rotation_binding_ids = tuple(
+            dict.fromkeys(
+                (
+                    *capability.fk_binding_ids,
+                    capability.authored_terminal_binding_id,
+                )
+            )
+        )
+        for binding_id in activation_rotation_binding_ids:
             contract = by_binding.get(str(binding_id))
             if contract is None:
                 raise RuntimeError(

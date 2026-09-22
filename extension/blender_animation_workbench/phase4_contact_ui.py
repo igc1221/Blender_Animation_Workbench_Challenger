@@ -752,11 +752,12 @@ class BAW_OT_contact(bpy.types.Operator):
             if replay_domain.snapshot is not None and not replay_domain.issues
             else ()
         )
-        link_trace_operation("baw-contact", trace_operation_id)
+        writer_operation_id = f"baw-contact:{trace_operation_id}"
+        link_trace_operation(writer_operation_id, trace_operation_id)
         result = execute_contact_command(
             context.scene,
             control_context,
-            operation_id="baw-contact",
+            operation_id=writer_operation_id,
             enabled_types=contact_enabled_types(context),
             plant_space=contact_plant_space(context),
             contact_point_local=tuple(float(value) for value in context.scene.baw_contact_point_local),
@@ -768,7 +769,7 @@ class BAW_OT_contact(bpy.types.Operator):
                 "CONTACT_FAIL",
                 operation_id=trace_operation_id,
                 context=context,
-                writer_operation_id="baw-contact",
+                writer_operation_id=writer_operation_id,
                 diagnostics=tuple(
                     {"code": item.code, "detail": item.detail}
                     for item in result.diagnostics
@@ -800,7 +801,7 @@ class BAW_OT_contact(bpy.types.Operator):
             "CONTACT_COMMIT",
             operation_id=trace_operation_id,
             context=context,
-            writer_operation_id="baw-contact",
+            writer_operation_id=writer_operation_id,
             contact_type=replay_contact_type,
             mapping_contact_types=tuple(
                 (mapping_id, contact_type.value)
