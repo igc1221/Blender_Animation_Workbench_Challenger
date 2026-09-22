@@ -48,7 +48,46 @@ def test_e8_red_cue_never_uses_solved_terminal_as_target() -> None:
 
 def test_e8_overlay_uses_target_pose_position_in_world_space() -> None:
     function = _function("_ik_pivot_world_positions")
-    source = ast.get_source_segment(SOURCE, function)
-    assert source is not None
-    assert "target_bone = pose.get(target_name)" in source
-    assert "rig.matrix_world @ target_bone.matrix.translation" in source
+
+    target_assignment = next(
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "target_bone"
+            for target in node.targets
+        )
+    )
+    target_call = target_assignment.value
+    assert isinstance(target_call, ast.Call)
+    assert isinstance(target_call.func, ast.Attribute)
+    assert isinstance(target_call.func.value, ast.Name)
+    assert target_call.func.value.id == "pose"
+    assert target_call.func.attr == "get"
+    assert len(target_call.args) == 1
+    assert isinstance(target_call.args[0], ast.Name)
+    assert target_call.args[0].id == "target_name"
+
+    world_assignment = next(
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "world"
+            for target in node.targets
+        )
+    )
+    world_expr = world_assignment.value
+    assert isinstance(world_expr, ast.BinOp)
+    assert isinstance(world_expr.op, ast.MatMult)
+    assert isinstance(world_expr.left, ast.Attribute)
+    assert isinstance(world_expr.left.value, ast.Name)
+    assert world_expr.left.value.id == "rig"
+    assert world_expr.left.attr == "matrix_world"
+    assert isinstance(world_expr.right, ast.Attribute)
+    assert world_expr.right.attr == "translation"
+    pose_matrix = world_expr.right.value
+    assert isinstance(pose_matrix, ast.Attribute)
+    assert isinstance(pose_matrix.value, ast.Name)
+    assert pose_matrix.value.id == "target_bone"
+    assert pose_matrix.attr == "matrix"

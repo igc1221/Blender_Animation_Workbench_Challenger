@@ -1081,6 +1081,24 @@ OPEN RISK: none blocking E5. E6 still owns straight-limb singularity seed and in
 NEXT ITEM ALLOWED: YES — proceed to E6 only.
 ```
 
+### E8 evidence ledger — 2026-09-22 USER PASS / CLOSED
+
+```text
+ITEM: E8 — Root semantics + red target cue
+CHALLENGER REQUEST: DeepSeek PRE awb-e8-pre-deepseek-20260922-01; Qwen PRE awb-e8-pre-qwen-20260922-01; DeepSeek POST awb-e8-post-deepseek-20260922-01; Gemini POST awb-e8-post-gemini-20260922-01
+CHALLENGER RESPONSE: no reviewer produced a proven E8 blocker. Qwen's PRE matrix-space objection was rejected after source/API-semantics audit: PoseBone.matrix translation is already the evaluated bone origin in armature-object space before rig.matrix_world conversion. POST reviewers found no blocking contract violation.
+MAIN VERDICT: CLOSED. The red Sliding cue now reads the authored hidden IK target (IK_Hand/IK_Foot), while Root transport remains the existing hierarchy behavior with no world pin and no extra compensation delta.
+CODE/STATIC: 399 pytest PASS; Ruff PASS. tests/test_rigped_ik_pivot_e8.py freezes exact state-owner -> hidden-target mapping and evaluated target world-position use.
+BLENDER API/STATE: Blender 5.2.1 E8 runtime FULL PASS: reachable cue == target/result baseline; Root translation and rotation carry hidden target/pole exactly once while child matrix_basis remains unchanged; unreachable authored target remains unclamped, solver result may fall short, cue stays on the authored target; use_stretch remains false.
+REGRESSION: E7 runtime PASS; I12 runtime PASS; I13 runtime PASS.
+GUI INPUT/SCREEN: USER FIRST PASS. Foot.L Free -> Sliding showed the red cue. User then translated and rotated Root and reported the cue followed Root with no world-pinned residue, double motion, or visible anomaly.
+AUTO OFF: AWB Auto Key OFF and Blender native Auto Key OFF throughout the accepted user session.
+FROZEN REPLAY: debug/user_final_tests/E8/user_final_replay.json
+FROZEN REPLAY: clean-baseline awb-replay-user-final PASS / 24 committed semantic actions.
+OPEN RISK: none blocking E8. E9 owns multi-limb Sliding body dependency; the separate I19 continuous-contact broad-smoke residual remains debt.
+NEXT ITEM ALLOWED: YES — proceed to E9 only.
+```
+
 ## 6. Explicit non-goals until this plan closes
 
 Do not start or redesign:
@@ -1098,15 +1116,15 @@ Do not start or redesign:
 
 ## 7. Immediate next action
 
-**E1 through E7 are USER PASS / CLOSED.**
+**E1 through E8 are USER PASS / CLOSED.**
 
-Proceed to **E8 — Root semantics + red target cue**.
+Proceed to **E9 — Multi-limb Sliding body dependency**.
 
-E8 entry requirements:
+E9 entry requirements:
 1. run exactly one PRE challenger round with two independent rotated first-tier Web Bridge providers;
-2. preserve Root-relative hierarchy semantics: Root moves hidden target/pole exactly once and does not become world-locked Sliding;
-3. source the red Sliding cue from the actual hidden IK target/reference rather than only the solved result;
-4. prove reachable overlap and unreachable target/result divergence without stretch or full-body compensation;
-5. keep AUTO work in E11 and Planted in A6.
+2. keep each Sliding limb as an independent hidden native-IK domain while one shared body gesture remains one operation;
+3. preserve the boundary between the selected edit domain and passive dependency-maintenance domains;
+4. prove both-feet, foot+hand, both-hands, and all-four-limb cases, including one deliberately reach-limited limb plus cancel/failure behavior;
+5. keep AUTO work in E11, deterministic replay work in E10, and Planted in A6.
 
-Do not reopen E1-E7 without new concrete regression evidence.
+Do not reopen E1-E8 without new concrete regression evidence.
