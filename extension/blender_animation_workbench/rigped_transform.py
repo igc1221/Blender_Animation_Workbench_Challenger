@@ -5010,6 +5010,11 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                 control_context,
                 operation_id=f"rigped-auto-move:{uuid4().hex}",
                 active_only=len(states) == 1,
+                contact_activation_mapping_ids=(
+                    _sliding_capability_mapping_ids(self._sliding_guard_capabilities)
+                    if e7_body_move
+                    else ()
+                ),
             )
             if not planned.ok or planned.plan is None:
                 detail = (

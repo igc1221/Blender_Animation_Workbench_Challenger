@@ -84,6 +84,7 @@ from .phase4_writer import (
     _prepare_semantic_state_property,
     _scope,
     _write_channel_key,
+    execute_direct_key_plan,
 )
 from .rigped_contract import RigpedCapability, resolve_rigped_target
 from .rigped_operation_domain import resolve_operation_domain
@@ -5581,10 +5582,11 @@ def execute_contact_command(
 ) -> ContactAuthoringResult:
     """Coordinate one explicit C operation from one frozen selection domain.
 
-    E3 keeps Contact as the transaction owner.  Supported direct controls are
-    planned independently through the E2 subset API, then supplied as Contact
-    closure rows so one Contact journal owns every persistent mutation, rollback,
-    verification pass, and commit.  Direct-only C remains fail-closed.
+    E3 keeps Contact as the transaction owner for mapped limb selections.
+    Supported direct controls are planned independently through the E2 subset API,
+    then supplied as Contact closure rows for mixed selections. A direct-only
+    selection executes that same direct plan as the complete C transaction and
+    authors only the normal Free/direct key authority.
     """
 
     operation_domain = resolve_operation_domain(
@@ -5609,9 +5611,6 @@ def execute_contact_command(
         )
 
     mapping_ids = tuple(snapshot.contact_mapping_ids)
-    if not mapping_ids:
-        # Direct-only C is intentionally not part of this stabilization.
-        return ContactAuthoringResult(False)
 
     direct_plan: OperationPlan | None = None
     if snapshot.supported_direct_binding_ids:
@@ -5629,6 +5628,27 @@ def execute_contact_command(
         direct_plan = direct_built.plan
 
     try:
+        if not mapping_ids:
+            if direct_plan is None:
+                return ContactAuthoringResult(False)
+            direct_result = execute_direct_key_plan(
+                scene,
+                control_context,
+                direct_plan,
+                trigger=WriterTrigger.CONTACT_AUTHORING,
+                selector_character_id=selector_character_id,
+                hook=hook,
+            )
+            return ContactAuthoringResult(
+                direct_result.applied,
+                ContactKeyType.FREE if direct_result.applied else None,
+                direct_result.rows_written,
+                direct_result.created_fcurves,
+                diagnostics=direct_result.diagnostics,
+                mapping_contact_types=(),
+                operation_id=(operation_id if direct_result.applied else None),
+            )
+
         if len(mapping_ids) > 1:
             batch_build = build_contact_batch_intent_plan(
                 scene,

@@ -82,6 +82,8 @@ Current routing priority:
 
 **Luna concurrency is a fixed orchestration invariant:** normal operation may use **two High workers in parallel**; when a third genuinely independent/low-overlap slice exists, Main may use **three High workers in parallel** via burst. **Max is one worker only and must run alone with respect to Luna**: all High lanes must be drained before Max starts, and no High lane may launch while Max is active.
 
+**Luna High granularity is also a fixed orchestration invariant:** High lanes receive micro-slices, not an entire implementation slice. Target one concrete deliverable per lane, usually 2-5 minutes of worker wall time, with explicit `OWN / DO / PROVE / DO NOT / STOP` instructions. If a request combines investigation + production patch + multiple regressions + Blender verification + documentation/commit, Main must split it first. When three independent low-overlap micro-slices exist, use all three High lanes rather than serializing them behind one oversized request. A 10+ minute High task or repeated timeout is a decomposition signal; do not solve it by repeatedly extending the same timeout. See `WORKER_PROFILES/LUNA.md` for the mandatory detail.
+
 **Launcher worker-state invariant:** the Launcher `Workers` panel is the human-visible authority for the pinned project's Luna lane cleanliness (`작업중 / 클린 / 변경있음 / 사용불가`). Before handoff/session close, Main checks this state directly; the user does not need to separately tell Main “워커클린”.
 
 ### B. Context-sufficiency gate

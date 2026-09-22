@@ -64,10 +64,14 @@ def test_e3_mixed_direct_subset_is_planned_as_free_closure() -> None:
     assert free_marker.value is True
 
 
-def test_e3_coordinator_never_executes_independent_direct_transaction() -> None:
+def test_e3_coordinator_executes_direct_only_transaction_but_keeps_mixed_closure_owned_by_contact() -> None:
     function = _function("execute_contact_command")
 
-    assert not _calls(function, "execute_direct_key_plan")
+    direct_writes = _calls(function, "execute_direct_key_plan")
+    assert len(direct_writes) == 1
+    trigger = _keyword(direct_writes[0], "trigger")
+    assert isinstance(trigger, ast.Attribute)
+    assert trigger.attr == "CONTACT_AUTHORING"
 
     for name in ("execute_contact_intent_plan", "execute_contact_batch_intent_plan"):
         calls = _calls(function, name)
@@ -89,7 +93,8 @@ def test_e3_batch_uses_frozen_operation_domain_mapping_ids() -> None:
     source = ast.get_source_segment(SOURCE_PATH.read_text(encoding="utf-8"), function)
     assert source is not None
     assert "if not mapping_ids:" in source
-    assert "Direct-only C is intentionally not part of this stabilization." in source
+    assert "execute_direct_key_plan(" in source
+    assert "mapping_contact_types=()" in source
 
 
 def test_e3_contact_transactions_prepare_direct_semantic_backing_property() -> None:

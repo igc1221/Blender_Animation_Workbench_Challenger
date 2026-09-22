@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from .character_metadata import resolve_character
 from .debug_trace import trace_event
 from .phase4_contact_authoring import (
     ContactAuthoringMode,
@@ -15,10 +16,22 @@ from .phase4_contact_authoring import (
     finalize_deferred_contact_authoring_result,
     snapshot_contact_transform_rows,
 )
-from .phase4_contact_model import ContactKeyType
+from .phase4_contact_model import (
+    AWB_CONTACT_STATE_PROPERTY,
+    ContactKeyType,
+    type_for_state_value,
+)
 from .phase4_mutation_journal import MutationJournal
-from .phase4_operation_plan import ChannelFamily, OperationPlan, PlannedChannel
-from .phase4_preflight import build_direct_key_plan
+from .phase4_operation_plan import (
+    AllocationIntent,
+    ChannelFamily,
+    OperationPlan,
+    PlannedChannel,
+    channel_sort_key,
+    validate_plan_structure,
+)
+from .phase4_preflight import _build_channel, _rotation_descriptor, build_direct_key_plan
+from .phase4_representation_snap import resolve_limb_representation_capability
 from .phase4_verification import (
     Diagnostic,
     DiagnosticSeverity,
@@ -30,7 +43,8 @@ from .phase4_writer import (
     execute_direct_key_plan,
     finalize_deferred_direct_writer_result,
 )
-from .semantic_adapter import assigned_channelbag
+from .rigped_contract import resolve_rigped_target
+from .semantic_adapter import assigned_channelbag, runtime_control_key
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +78,7 @@ class RigpedAutoDirectMovePlan:
     baseline_plan: OperationPlan | None = None
     baseline_time: float | None = None
     active_only: bool = True
+    contact_activation_mapping_ids: tuple[str, ...] = ()
     trigger: WriterTrigger = WriterTrigger.AUTO_TRANSFORM
 
 
@@ -386,6 +401,206 @@ def _direct_plan_baseline_rows_by_control(
     return tuple(baseline_rows), ()
 
 
+def _curve_for_row(bag, channel: PlannedChannel):
+    if bag is None:
+        return None
+    return next(
+        (
+            curve
+            for curve in bag.fcurves
+            if str(curve.data_path) == channel.row_key.data_path
+            and int(curve.array_index) == channel.row_key.array_index
+        ),
+        None,
+    )
+
+
+def _key_exists_at_time(curve, time: float, *, epsilon: float = 1e-8) -> bool:
+    if curve is None:
+        return False
+    return any(
+        abs(float(point.co.x) - float(time)) <= epsilon
+        for point in curve.keyframe_points
+    )
+
+
+def _contact_state_activation_pair(state_curve, time: float) -> tuple[ContactKeyType | None, ContactKeyType | None]:
+    exact_type: ContactKeyType | None = None
+    previous_type: ContactKeyType | None = None
+    for point in sorted(state_curve.keyframe_points, key=lambda item: float(item.co.x)):
+        point_time = float(point.co.x)
+        if point_time < float(time) - 1e-8:
+            previous_type = type_for_state_value(float(point.co.y))
+            continue
+        if abs(point_time - float(time)) <= 1e-8:
+            exact_type = type_for_state_value(float(point.co.y))
+        break
+    return previous_type, exact_type
+
+
+def _augment_direct_plan_with_planted_activation_fk_dependencies(
+    scene,
+    control_context,
+    plan: OperationPlan,
+    mapping_ids: tuple[str, ...],
+    *,
+    selector_character_id: str | None = None,
+) -> OperationPlan:
+    """Extend one body Auto direct plan with existing dormant FK boundary rows only.
+
+    This is intentionally narrow: only an exact Free->Planted activation at the
+    current write time qualifies, and every added FK row must already have both
+    its FCurve and exact Contact-authored key. The helper therefore refreshes
+    existing native transition dependency values without creating Contact,
+    anchor, solver, or new animation authority.
+    """
+
+    mapping_ids = tuple(dict.fromkeys(str(item) for item in mapping_ids if str(item)))
+    if not mapping_ids:
+        return plan
+
+    resolution = resolve_rigped_target(
+        scene,
+        control_context,
+        selector_character_id=selector_character_id,
+    )
+    target = resolution.target
+    if target is None or target.character_id != plan.character_id:
+        raise RuntimeError("Planted activation FK dependency refresh lost the current Rigped target.")
+
+    view = resolve_character(scene, target.character_id)
+    by_binding = {str(contract.binding_id): contract for contract in target.controls}
+    time = float(plan.frame) + float(plan.subframe)
+    dependency_channels: list[PlannedChannel] = []
+    dependency_binding_ids: list[str] = []
+
+    for mapping_id in mapping_ids:
+        capability = resolve_limb_representation_capability(view, mapping_id).capability
+        if capability is None:
+            raise RuntimeError(
+                f"Planted activation FK dependency refresh lost mapping {mapping_id!r}."
+            )
+        owner = capability.native_ik.solver_owner.owner_object
+        bag = assigned_channelbag(owner)
+        if bag is None:
+            continue
+        solver_bone = capability.native_ik.solver_owner.target
+        state_path = solver_bone.path_from_id(f'["{AWB_CONTACT_STATE_PROPERTY}"]')
+        state_curve = next(
+            (
+                curve
+                for curve in bag.fcurves
+                if str(curve.data_path) == state_path and int(curve.array_index) == 0
+            ),
+            None,
+        )
+        if state_curve is None:
+            continue
+        previous_type, exact_type = _contact_state_activation_pair(state_curve, time)
+        if previous_type is not ContactKeyType.FREE or exact_type is not ContactKeyType.PLANTED:
+            continue
+
+        for binding_id in capability.fk_binding_ids:
+            contract = by_binding.get(str(binding_id))
+            if contract is None:
+                raise RuntimeError(
+                    f"Planted activation FK dependency binding disappeared: {binding_id!r}."
+                )
+            property_name, representation, indices, values, mode = _rotation_descriptor(
+                contract.target.target
+            )
+            for index in indices:
+                channel = _build_channel(
+                    contract,
+                    ChannelFamily.ROTATION,
+                    property_name,
+                    index,
+                    values[index],
+                    rotation_mode=mode,
+                    rotation_representation=representation,
+                )
+                curve = _curve_for_row(bag, channel)
+                if (
+                    channel.allocation_intent is not AllocationIntent.EXISTING_FCURVE
+                    or not _key_exists_at_time(curve, time)
+                ):
+                    raise RuntimeError(
+                        "Planted activation FK dependency refresh found a missing "
+                        f"Contact-authored boundary row: {channel.row_key!r}."
+                    )
+                dependency_channels.append(channel)
+            dependency_binding_ids.append(str(binding_id))
+
+    if not dependency_channels:
+        return plan
+
+    groups_by_owner = {group.owner_runtime_key: group for group in plan.owner_groups}
+    for channel in dependency_channels:
+        group = groups_by_owner.get(channel.owner_runtime_key)
+        if group is None:
+            raise RuntimeError(
+                "Planted activation FK dependency refresh would require a new animation owner."
+            )
+        if group.owner_binding_token != channel.owner_binding_token:
+            raise RuntimeError(
+                "Planted activation FK dependency refresh detected an owner binding change."
+            )
+
+    updated_groups = []
+    for group in plan.owner_groups:
+        merged = {channel.row_key: channel for channel in group.channels}
+        for channel in dependency_channels:
+            if channel.owner_runtime_key == group.owner_runtime_key:
+                merged[channel.row_key] = channel
+        updated_groups.append(
+            replace(
+                group,
+                channels=tuple(sorted(merged.values(), key=channel_sort_key)),
+            )
+        )
+
+    semantic_binding_ids = list(plan.dependency_footprint.semantic_binding_ids)
+    control_runtime_keys = list(plan.read_footprint.control_runtime_keys)
+    for binding_id in dependency_binding_ids:
+        if binding_id in semantic_binding_ids:
+            continue
+        contract = by_binding[binding_id]
+        semantic_binding_ids.append(binding_id)
+        control_runtime_keys.append(runtime_control_key(contract.target))
+
+    row_keys = tuple(
+        sorted(
+            {
+                *plan.write_footprint.row_keys,
+                *(channel.row_key for channel in dependency_channels),
+            }
+        )
+    )
+    augmented = replace(
+        plan,
+        owner_groups=tuple(updated_groups),
+        read_footprint=replace(
+            plan.read_footprint,
+            control_runtime_keys=tuple(control_runtime_keys),
+        ),
+        dependency_footprint=replace(
+            plan.dependency_footprint,
+            semantic_binding_ids=tuple(semantic_binding_ids),
+        ),
+        write_footprint=replace(
+            plan.write_footprint,
+            row_keys=row_keys,
+        ),
+    )
+    issues = validate_plan_structure(augmented)
+    if issues:
+        detail = " | ".join(item.detail for item in issues)
+        raise RuntimeError(
+            f"Planted activation FK dependency refresh produced an invalid direct plan: {detail}"
+        )
+    return augmented
+
+
 def _direct_rotate_requires_position(control_context, *, active_only: bool) -> bool:
     controls = tuple(getattr(control_context, "controls", ()) or ())
     active = getattr(control_context, "active", None)
@@ -405,6 +620,7 @@ def plan_rigped_auto_direct_move(
     operation_id: str,
     selector_character_id: str | None = None,
     active_only: bool = True,
+    contact_activation_mapping_ids: tuple[str, ...] = (),
 ) -> RigpedAutoDirectMovePlanResult:
     """Plan one non-Contact direct Rigped Move using existing direct authority."""
 
@@ -442,12 +658,36 @@ def plan_rigped_auto_direct_move(
         baseline_plan = _filter_direct_plan_row_keys(built.plan, baseline_rows)
         baseline_time = 0.0
 
+    try:
+        begin_plan = _augment_direct_plan_with_planted_activation_fk_dependencies(
+            scene,
+            control_context,
+            built.plan,
+            contact_activation_mapping_ids,
+            selector_character_id=selector_character_id,
+        )
+    except RuntimeError as exc:
+        return RigpedAutoDirectMovePlanResult(
+            None,
+            (
+                Diagnostic(
+                    code="A6_PLANTED_ACTIVATION_DEPENDENCY_PREFLIGHT",
+                    severity=DiagnosticSeverity.ERROR,
+                    stage=OperationStage.PREFLIGHT,
+                    operation=operation_id,
+                    detail=str(exc),
+                    character_id=built.plan.character_id,
+                ),
+            ),
+        )
+
     return RigpedAutoDirectMovePlanResult(
         RigpedAutoDirectMovePlan(
-            begin_plan=built.plan,
+            begin_plan=begin_plan,
             baseline_plan=baseline_plan,
             baseline_time=baseline_time,
             active_only=active_only,
+            contact_activation_mapping_ids=tuple(contact_activation_mapping_ids),
         ),
     )
 
@@ -474,10 +714,35 @@ def commit_rigped_auto_direct_move(
     if not built.ok or built.plan is None:
         return DirectWriterResult(False, 0, 0, built.diagnostics)
 
+    try:
+        final_plan = _augment_direct_plan_with_planted_activation_fk_dependencies(
+            scene,
+            control_context,
+            built.plan,
+            session.contact_activation_mapping_ids,
+            selector_character_id=selector_character_id,
+        )
+    except RuntimeError as exc:
+        return DirectWriterResult(
+            False,
+            0,
+            0,
+            (
+                Diagnostic(
+                    code="A6_PLANTED_ACTIVATION_DEPENDENCY_STALE",
+                    severity=DiagnosticSeverity.ERROR,
+                    stage=OperationStage.PREFLIGHT,
+                    operation=session.begin_plan.operation_id,
+                    detail=str(exc),
+                    character_id=built.plan.character_id,
+                ),
+            ),
+        )
+
     return execute_direct_key_plan(
         scene,
         control_context,
-        built.plan,
+        final_plan,
         trigger=session.trigger,
         auto_enabled=True,
         auto_begin_plan=session.begin_plan,

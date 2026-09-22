@@ -8,6 +8,7 @@ CONTACT_UI_PATH = ROOT / "extension" / "blender_animation_workbench" / "phase4_c
 CONTACT_PATH = ROOT / "extension" / "blender_animation_workbench" / "phase4_contact_authoring.py"
 PIVOT_PATH = ROOT / "extension" / "blender_animation_workbench" / "rigped_ik_pivot_overlay.py"
 TRANSFORM_PATH = ROOT / "extension" / "blender_animation_workbench" / "rigped_transform.py"
+AUTO_KEY_PATH = ROOT / "extension" / "blender_animation_workbench" / "rigped_auto_key.py"
 DRAWING_PATH = ROOT / "extension" / "blender_animation_workbench" / "trackbar_drawing.py"
 
 
@@ -51,6 +52,42 @@ def test_a6_public_contact_cycle_defaults_to_free_sliding_planted() -> None:
     assert "ContactKeyType.FREE" in signature
     assert "ContactKeyType.SLIDING" in signature
     assert "ContactKeyType.PLANTED" in signature
+
+
+def test_a6_direct_only_c_executes_normal_free_direct_plan() -> None:
+    command = _function(CONTACT_PATH, "execute_contact_command")
+    assert "Direct-only C is intentionally not part of this stabilization." not in command
+    assert "if not mapping_ids:" in command
+    assert "execute_direct_key_plan(" in command
+    assert "trigger=WriterTrigger.CONTACT_AUTHORING" in command
+    assert "ContactKeyType.FREE if direct_result.applied else None" in command
+    assert "mapping_contact_types=()" in command
+
+
+def test_a6_same_frame_body_auto_refreshes_only_existing_planted_activation_fk_rows() -> None:
+    helper = _function(
+        AUTO_KEY_PATH,
+        "_augment_direct_plan_with_planted_activation_fk_dependencies",
+    )
+    assert "previous_type is not ContactKeyType.FREE" in helper
+    assert "exact_type is not ContactKeyType.PLANTED" in helper
+    assert "capability.fk_binding_ids" in helper
+    assert "AllocationIntent.EXISTING_FCURVE" in helper
+    assert "_key_exists_at_time(curve, time)" in helper
+    assert "dependency_footprint=replace(" in helper
+    assert "write_footprint=replace(" in helper
+    assert "AWB_CONTACT_STATE_PROPERTY" in helper
+    assert "hold" not in helper.lower()
+    assert "ik_target" not in helper.lower()
+
+    planner = _function(AUTO_KEY_PATH, "plan_rigped_auto_direct_move")
+    committer = _function(AUTO_KEY_PATH, "commit_rigped_auto_direct_move")
+    for source in (planner, committer):
+        assert "_augment_direct_plan_with_planted_activation_fk_dependencies(" in source
+
+    direct_move = _class(TRANSFORM_PATH, "BAW_OT_rigped_direct_move_axis")
+    assert "contact_activation_mapping_ids=(" in direct_move
+    assert "_sliding_capability_mapping_ids(self._sliding_guard_capabilities)" in direct_move
 
 
 def test_a6_planted_preference_is_exposed_and_default_on() -> None:
