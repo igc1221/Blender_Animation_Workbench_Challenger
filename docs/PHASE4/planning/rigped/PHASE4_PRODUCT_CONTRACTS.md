@@ -1,6 +1,6 @@
 # AWB Phase 4 — Product Contracts
 
-> Updated: **2026-09-23 04:49 KST**
+> Updated: **2026-09-23 12:46 KST**
 > Role: **authoritative Phase 4 product-behavior contract**. This file owns user-visible Rigped semantics. Historical reviews, milestone proofs, and implementation experiments must not override it.
 
 ## 1. Authority and layering
@@ -191,7 +191,7 @@ AUTO의 상세 구현 이력은 `PHASE4_RIGPED_AUTO_KEY_IMPLEMENTATION_PLAN.md`�
 - Contact state interpolation is discrete/constant.
 - incomplete Contact bundles fail closed; playback/scrubbing never repairs them through frame handlers.
 
-## 8. Frozen practical core baseline entering RC0
+## 8. RC0 frozen practical core baseline
 
 The first complete Rigped animator core is USER-accepted:
 
@@ -205,7 +205,7 @@ The first complete Rigped animator core is USER-accepted:
 - direct native IK constraints on visible ForeArm/Calf remain rejected/reverted.
 - Blender Action/FCurve remains authored replay authority.
 
-There is no A7 feature currently defined. The mandatory next sequence is RC0 -> RC1 -> RC2 -> RC3 before unrelated feature expansion.
+RC0 is CLOSED and this section is the frozen animator-facing baseline. There is no A7 feature currently defined. RC1 practical-use hardening is active, followed by RC2 -> RC3 before unrelated feature expansion. The evidence map is `docs/PHASE4/verification/PHASE4_RC0_CORE_FREEZE_EVIDENCE.md`.
 
 ## 9. Multi-selection and solver-domain boundary
 
@@ -232,6 +232,8 @@ Execution/dependency status: `docs/PHASE4/PHASE4_INTEGRATED_IMPLEMENTATION_ROADM
 Current blocker/next action: `docs/PHASE4/PHASE4_CURRENT_SESSION.md`
 
 Manual acceptance: `docs/PHASE4/verification/PHASE4_USER_TEST_SCOPE.md`
+
+RC0 frozen evidence map: `docs/PHASE4/verification/PHASE4_RC0_CORE_FREEZE_EVIDENCE.md`
 
 Verification rules: `docs/PHASE4/verification/PHASE4_VERIFICATION_STRATEGY.md`
 
