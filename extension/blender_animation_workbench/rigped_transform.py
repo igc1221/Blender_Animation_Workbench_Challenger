@@ -717,12 +717,29 @@ def _sync_rigped_joint_limits(scene, _depsgraph=None) -> None:
         _RIGPED_JOINT_LIMIT_SYNC_ACTIVE = False
 
 
+@persistent
+def _sync_rigped_replay_load_post(*_args: object) -> None:
+    """Reconcile derived Rigped replay display immediately after a .blend load."""
+
+    scene = getattr(bpy.context, "scene", None)
+    if scene is None:
+        scenes = tuple(getattr(bpy.data, "scenes", ()) or ())
+        scene = scenes[0] if scenes else None
+    if scene is None:
+        return
+    _sync_rigped_sliding_replay_display(scene)
+    _sync_rigped_joint_limits(scene)
+
+
 def register_rigped_sliding_replay_handler() -> None:
     frame_handlers = bpy.app.handlers.frame_change_post
     if _sync_rigped_sliding_replay_display not in frame_handlers:
         frame_handlers.append(_sync_rigped_sliding_replay_display)
     if _sync_rigped_joint_limits not in frame_handlers:
         frame_handlers.append(_sync_rigped_joint_limits)
+    load_handlers = bpy.app.handlers.load_post
+    if _sync_rigped_replay_load_post not in load_handlers:
+        load_handlers.append(_sync_rigped_replay_load_post)
 
     # Do not run the public FK clamp from depsgraph_update_post. That handler
     # fires during modal Sliding/IK edits and can mutate the visible chain while
@@ -740,6 +757,9 @@ def unregister_rigped_sliding_replay_handler() -> None:
         frame_handlers.remove(_sync_rigped_sliding_replay_display)
     if _sync_rigped_joint_limits in frame_handlers:
         frame_handlers.remove(_sync_rigped_joint_limits)
+    load_handlers = bpy.app.handlers.load_post
+    if _sync_rigped_replay_load_post in load_handlers:
+        load_handlers.remove(_sync_rigped_replay_load_post)
 
 
 
