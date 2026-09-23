@@ -493,15 +493,25 @@ def _sync_generated_sliding_hinge_branch_from_public_pose(
     return bool(configure_generated_rigped_ik_hinge_branch(solver_owner, branch_sign))
 
 
-def _sync_generated_sliding_forearm_roll_from_public_pose(
+def _sync_generated_sliding_lower_roll_from_public_pose(
     solver_owner,
     public_lower,
 ) -> bool:
-    """Restore keyed ForeArm axial roll as a native Sliding IK input."""
+    """Restore keyed ForeArm/Calf axial roll as a native Sliding IK input."""
 
-    if str(getattr(solver_owner, "name", "")) not in {"MCH_ForeArm.L", "MCH_ForeArm.R"}:
+    if str(getattr(solver_owner, "name", "")) not in {
+        "MCH_ForeArm.L",
+        "MCH_ForeArm.R",
+        "MCH_Calf.L",
+        "MCH_Calf.R",
+    }:
         return False
-    if str(getattr(public_lower, "name", "")) not in {"ForeArm.L", "ForeArm.R"}:
+    if str(getattr(public_lower, "name", "")) not in {
+        "ForeArm.L",
+        "ForeArm.R",
+        "Calf.L",
+        "Calf.R",
+    }:
         return False
     if solver_owner.rotation_mode != "QUATERNION":
         return False
@@ -617,7 +627,7 @@ def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
                             state_bone,
                             public_lower,
                         )
-                        roll_changed = _sync_generated_sliding_forearm_roll_from_public_pose(
+                        roll_changed = _sync_generated_sliding_lower_roll_from_public_pose(
                             state_bone,
                             public_lower,
                         )
@@ -1442,17 +1452,18 @@ def cancel_fk_single_link_move(context, session: FkSingleLinkMoveSession) -> Non
 def _begin_fk_two_bone_move_for_resolution(
     resolved: SemanticMoveResolution,
     *,
-    allow_sliding_forearm_swivel: bool = False,
+    allow_sliding_lower_swivel: bool = False,
 ) -> FkTwoBoneMoveSession:
-    sliding_forearm_swivel = (
-        allow_sliding_forearm_swivel
+    sliding_lower_swivel = (
+        allow_sliding_lower_swivel
         and resolved.contact_type is ContactKeyType.SLIDING
         and len(resolved.capability.fk_controls) == 2
-        and str(resolved.active_control.target.name) in {"ForeArm.L", "ForeArm.R"}
+        and str(resolved.active_control.target.name)
+        in {"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}
         and runtime_control_key(resolved.active_control)
         == runtime_control_key(resolved.capability.fk_controls[1])
     )
-    if _fk_joint_move_kind(resolved) != "CHAIN_END" and not sliding_forearm_swivel:
+    if _fk_joint_move_kind(resolved) != "CHAIN_END" and not sliding_lower_swivel:
         raise RigpedSemanticMoveError("Current selection is not a supported two-bone FK Move control.")
     capability = resolved.capability
     if len(capability.fk_controls) != 2:
@@ -7354,16 +7365,16 @@ def _apply_direct_rotate_sliding_sync(context, session: SlidingRotateSyncSession
         raise RigpedSemanticMoveError(str(exc)) from exc
 
 
-def _apply_sliding_forearm_long_roll(
+def _apply_sliding_lower_long_roll(
     context,
     session: SlidingRotateSyncSession,
     angle: float,
 ) -> None:
-    """Roll the native lower IK link while keeping the Hand target orientation."""
+    """Roll the native lower IK link while keeping the terminal world transform fixed."""
 
     solver_control = session.capability.native_ik.solver_owner
     if session.start_solver_state.rotation_property != "rotation_quaternion":
-        raise RigpedSemanticMoveError("Sliding ForeArm roll requires quaternion solver rotation.")
+        raise RigpedSemanticMoveError("Sliding lower-link roll requires quaternion solver rotation.")
     start_rotation = Quaternion(session.start_solver_state.rotation).normalized()
     desired_rotation = (
         start_rotation @ Quaternion(_RIGPED_LOCAL_AXES["Y"], float(angle))
@@ -7398,11 +7409,11 @@ def _restore_direct_rotate_sliding_syncs(
     context.view_layer.update()
 
 
-def _forearm_special_z_session(context, active: ResolvedControl, axis_world: Vector) -> FkTwoBoneMoveSession | None:
+def _lower_limb_special_z_session(context, active: ResolvedControl, axis_world: Vector) -> FkTwoBoneMoveSession | None:
     pose_bone = active.target
     if not isinstance(pose_bone, bpy.types.PoseBone):
         return None
-    if str(pose_bone.name) not in {"ForeArm.L", "ForeArm.R"}:
+    if str(pose_bone.name) not in {"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}:
         return None
     local_basis = (active.owner_object.matrix_world @ pose_bone.matrix).to_3x3().normalized()
     local_z = Vector(local_basis.col[2])
@@ -7425,14 +7436,16 @@ def _forearm_special_z_session(context, active: ResolvedControl, axis_world: Vec
         return None
     return _begin_fk_two_bone_move_for_resolution(
         resolved,
-        allow_sliding_forearm_swivel=(resolved.contact_type is ContactKeyType.SLIDING),
+        allow_sliding_lower_swivel=(resolved.contact_type is ContactKeyType.SLIDING),
     )
 
 
-def _apply_forearm_special_z_rotation(
+def _apply_lower_limb_special_z_rotation(
     context,
     session: FkTwoBoneMoveSession,
     angle: float,
+    *,
+    terminal_follows_second: bool,
 ) -> bool:
     root = Vector(session.root_world)
     end = Vector(session.end_world)
@@ -7447,7 +7460,7 @@ def _apply_forearm_special_z_rotation(
         session,
         desired_joint,
         end,
-        terminal_follows_second=True,
+        terminal_follows_second=terminal_follows_second,
     )
     if applied:
         context.view_layer.update()
@@ -7611,7 +7624,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         self._states = tuple(states)
         self._forearm_special_session = None
         try:
-            self._forearm_special_session = _forearm_special_z_session(
+            self._forearm_special_session = _lower_limb_special_z_session(
                 context,
                 active,
                 Vector(axis),
@@ -7940,13 +7953,14 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 return
 
         if self._forearm_special_session is not None:
-            if not _apply_forearm_special_z_rotation(
+            if not _apply_lower_limb_special_z_rotation(
                 context,
                 self._forearm_special_session,
                 self._current_angle,
+                terminal_follows_second=not bool(self._sliding_syncs),
             ):
                 raise RigpedSemanticMoveError(
-                    "ForeArm Z swivel could not preserve the shoulder-wrist chain."
+                    "Lower-limb Z swivel could not preserve the terminal chain."
                 )
             for session in self._sliding_syncs:
                 _apply_direct_rotate_sliding_sync(context, session)
@@ -7970,7 +7984,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             and len(self._states) == 1
             and len(self._sliding_syncs) == 1
             and self._states[0].hinge_state is not None
-            and str(active.target.name) in {"ForeArm.L", "ForeArm.R"}
+            and str(active.target.name) in {"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}
             and runtime_control_key(active)
             == runtime_control_key(self._sliding_syncs[0].capability.fk_controls[1])
         ):
@@ -7981,7 +7995,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 self._current_angle,
             )
             if abs(self._current_angle) > 1e-9:
-                _apply_sliding_forearm_long_roll(
+                _apply_sliding_lower_long_roll(
                     context,
                     self._sliding_syncs[0],
                     self._current_angle,

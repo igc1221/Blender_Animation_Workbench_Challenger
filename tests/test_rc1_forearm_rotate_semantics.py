@@ -41,9 +41,10 @@ def _source(node: ast.AST) -> str:
     return segment
 
 
-def test_rc1_forearm_axis_contract_is_native_local_x_hinge_y_roll_z_swivel() -> None:
+def test_rc1_lower_limb_axis_contract_is_x_hinge_y_roll_z_swivel() -> None:
     axes = _source(_function("direct_transform_axes"))
     assert "ForeArm" not in axes
+    assert "Calf" not in axes
     assert "return _orientation_axes_for_control(context, selected.active_control)" in axes
 
     assert '"ForeArm.L": ("X",' in SOURCE
@@ -51,9 +52,12 @@ def test_rc1_forearm_axis_contract_is_native_local_x_hinge_y_roll_z_swivel() -> 
     assert '"Calf.L": ("X",' in SOURCE
     assert '"Calf.R": ("X",' in SOURCE
 
-    session = _source(_function("_forearm_special_z_session"))
+    session = _source(_function("_lower_limb_special_z_session"))
     assert "local_basis.col[2]" in session
     assert "ContactKeyType.FREE" in session
+    assert "ContactKeyType.SLIDING" in session
+    assert '"ForeArm.L"' in session
+    assert '"Calf.L"' in session
 
     assert "owner.lock_ik_z = True" in BUILDER_SOURCE
     assert "owner.use_ik_limit_x = True" in BUILDER_SOURCE
@@ -62,7 +66,7 @@ def test_rc1_forearm_axis_contract_is_native_local_x_hinge_y_roll_z_swivel() -> 
     assert "fallback = -1" in SNAP_SOURCE
 
 
-def test_rc1_forearm_swivel_keeps_wrist_position_and_hand_follows_forearm() -> None:
+def test_rc1_lower_limb_swivel_free_follows_terminal_sliding_pins_terminal() -> None:
     solved = _source(_function("_apply_solved_two_bone_fk_pose"))
     assert "terminal_follows_second: bool = False" in solved
     assert "session.second_start_matrix.inverted_safe()" in solved
@@ -70,8 +74,28 @@ def test_rc1_forearm_swivel_keeps_wrist_position_and_hand_follows_forearm() -> N
     assert "terminal_matrix = second_matrix @ terminal_relative" in solved
     assert "terminal_matrix.translation = desired_end" in solved
 
-    swivel = _source(_function("_apply_forearm_special_z_rotation"))
-    assert "terminal_follows_second=True" in swivel
+    swivel = _source(_function("_apply_lower_limb_special_z_rotation"))
+    assert "terminal_follows_second: bool" in swivel
+    assert "terminal_follows_second=terminal_follows_second" in swivel
+
+    preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
+    assert "terminal_follows_second=not bool(self._sliding_syncs)" in preview
+
+
+def test_rc1_sliding_lower_long_roll_is_shared_by_forearm_and_calf() -> None:
+    replay = _source(_function("_sync_generated_sliding_lower_roll_from_public_pose"))
+    assert '"MCH_ForeArm.L"' in replay
+    assert '"MCH_Calf.L"' in replay
+    assert '"ForeArm.L"' in replay
+    assert '"Calf.L"' in replay
+
+    live = _source(_function("_apply_sliding_lower_long_roll"))
+    assert "terminal world transform fixed" in live
+    assert '_RIGPED_LOCAL_AXES["Y"]' in live
+
+    preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
+    assert '{"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}' in preview
+    assert "_apply_sliding_lower_long_roll(" in preview
 
 
 def test_rc1_forbidden_hinge_axis_bounds_to_zero_instead_of_preserving_requested_angle() -> None:
