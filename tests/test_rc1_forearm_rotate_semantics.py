@@ -4,13 +4,11 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TRANSFORM_PATH = (
-    ROOT
-    / "extension"
-    / "blender_animation_workbench"
-    / "rigped_transform.py"
-)
+EXT = ROOT / "extension" / "blender_animation_workbench"
+TRANSFORM_PATH = EXT / "rigped_transform.py"
 SOURCE = TRANSFORM_PATH.read_text(encoding="utf-8")
+BUILDER_SOURCE = (EXT / "rigped_humanoid_builder.py").read_text(encoding="utf-8")
+SNAP_SOURCE = (EXT / "phase4_representation_snap.py").read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
 
 
@@ -42,21 +40,25 @@ def _source(node: ast.AST) -> str:
     return segment
 
 
-def test_rc1_forearm_local_rotate_gizmo_maps_x_bend_z_swivel_without_storage_axis_migration() -> None:
-    source = _source(_function("direct_transform_axes"))
-    assert '"DIRECT_ROTATE"' in source
-    assert '"LOCAL"' in source
-    assert '{"ForeArm.L", "ForeArm.R"}' in source
-    assert '"X": Vector(axes["Z"]).normalized()' in source
-    assert '"Y": Vector(axes["Y"]).normalized()' in source
-    assert '"Z": (-Vector(axes["X"])).normalized()' in source
+def test_rc1_forearm_axis_contract_is_native_local_x_hinge_y_roll_z_swivel() -> None:
+    axes = _source(_function("direct_transform_axes"))
+    assert "ForeArm" not in axes
+    assert "return _orientation_axes_for_control(context, selected.active_control)" in axes
 
-    # Internal generated/public storage remains on the accepted solver basis.
-    # Only the animator-facing LOCAL Rotate gizmo is remapped.
-    assert '"ForeArm.L": ("Z",' in SOURCE
-    assert '"ForeArm.R": ("Z",' in SOURCE
+    assert '"ForeArm.L": ("X",' in SOURCE
+    assert '"ForeArm.R": ("X",' in SOURCE
     assert '"Calf.L": ("X",' in SOURCE
     assert '"Calf.R": ("X",' in SOURCE
+
+    session = _source(_function("_forearm_special_z_session"))
+    assert "local_basis.col[2]" in session
+    assert "ContactKeyType.FREE" in session
+
+    assert "owner.lock_ik_z = True" in BUILDER_SOURCE
+    assert "owner.use_ik_limit_x = True" in BUILDER_SOURCE
+    assert 'return -1 if str(owner_role) in {"MCH_FOREARM.L", "MCH_FOREARM.R"} else 1' in BUILDER_SOURCE
+    assert "axis_index = 0" in SNAP_SOURCE
+    assert "fallback = -1" in SNAP_SOURCE
 
 
 def test_rc1_forearm_swivel_keeps_wrist_position_and_hand_follows_forearm() -> None:
@@ -67,7 +69,7 @@ def test_rc1_forearm_swivel_keeps_wrist_position_and_hand_follows_forearm() -> N
     assert "terminal_matrix = second_matrix @ terminal_relative" in solved
     assert "terminal_matrix.translation = desired_end" in solved
 
-    swivel = _source(_function("_apply_forearm_special_x_rotation"))
+    swivel = _source(_function("_apply_forearm_special_z_rotation"))
     assert "terminal_follows_second=True" in swivel
 
 

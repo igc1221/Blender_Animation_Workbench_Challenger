@@ -331,7 +331,7 @@ _RIGPED_THIGH_TWIST_RADIANS = math.radians(110.0)
 
 
 def _default_generated_rigped_hinge_branch(owner_role: str) -> int:
-    return -1 if str(owner_role) == "MCH_FOREARM.R" else 1
+    return -1 if str(owner_role) in {"MCH_FOREARM.L", "MCH_FOREARM.R"} else 1
 
 
 def configure_generated_rigped_ik_hinge_branch(
@@ -386,14 +386,14 @@ def configure_generated_rigped_ik_hinge_branch(
     # Sliding. Keep Y available for authored long-axis roll and lock only the
     # truly non-anatomical solver axis.
     if role in {"MCH_FOREARM.L", "MCH_FOREARM.R"}:
-        owner.lock_ik_x = True
-        owner.use_ik_limit_z = True
+        owner.lock_ik_z = True
+        owner.use_ik_limit_x = True
         if sign > 0:
-            owner.ik_min_z = 0.0
-            owner.ik_max_z = _RIGPED_HINGE_MAX_RADIANS
+            owner.ik_min_x = 0.0
+            owner.ik_max_x = _RIGPED_HINGE_MAX_RADIANS
         else:
-            owner.ik_min_z = -_RIGPED_HINGE_MAX_RADIANS
-            owner.ik_max_z = 0.0
+            owner.ik_min_x = -_RIGPED_HINGE_MAX_RADIANS
+            owner.ik_max_x = 0.0
     else:
         owner.lock_ik_z = True
         owner.use_ik_limit_x = True

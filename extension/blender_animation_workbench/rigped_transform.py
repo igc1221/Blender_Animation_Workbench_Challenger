@@ -481,9 +481,9 @@ def _sync_generated_sliding_hinge_branch_from_public_pose(
     name = str(getattr(solver_owner, "name", ""))
     if name in {"MCH_ForeArm.L", "MCH_ForeArm.R"}:
         quaternion = public_lower.matrix_basis.to_quaternion().normalized()
-        angle = 2.0 * atan2(float(quaternion.z), float(quaternion.w))
+        angle = 2.0 * atan2(float(quaternion.x), float(quaternion.w))
         angle = ((angle + pi) % (2.0 * pi)) - pi
-        fallback = -1 if name.endswith(".R") else 1
+        fallback = -1
         branch_sign = fallback if abs(angle) <= radians(0.25) else (1 if angle > 0.0 else -1)
     elif name in {"MCH_Calf.L", "MCH_Calf.R"}:
         branch_sign = 1
@@ -957,28 +957,7 @@ def direct_transform_axes(context) -> dict[str, Vector] | None:
     selected = _selected_direct_transform(context)
     if selected is None:
         return None
-    axes = _orientation_axes_for_control(context, selected.active_control)
-    if axes is None:
-        return None
-    active = selected.active_control
-    pose_bone = active.target
-    if (
-        str(getattr(context.scene, "baw_rigped_semantic_transform_mode", "NONE"))
-        == "DIRECT_ROTATE"
-        and str(context.scene.transform_orientation_slots[0].type) == "LOCAL"
-        and isinstance(pose_bone, bpy.types.PoseBone)
-        and str(pose_bone.name) in {"ForeArm.L", "ForeArm.R"}
-    ):
-        # Blender-facing ForeArm rotate convention:
-        # X = elbow bend, Y = long-axis roll, Z = shoulder-wrist swivel.
-        # Keep internal generated hinge/IK storage unchanged and only swap the
-        # animator-facing rotate basis so visible ring and motion agree.
-        return {
-            "X": Vector(axes["Z"]).normalized(),
-            "Y": Vector(axes["Y"]).normalized(),
-            "Z": (-Vector(axes["X"])).normalized(),
-        }
-    return axes
+    return _orientation_axes_for_control(context, selected.active_control)
 
 
 def direct_move_available(context) -> bool:
@@ -5685,14 +5664,15 @@ _RIGPED_TERMINAL_SWING_TWIST_LIMITS = {
     "Foot.R": (radians(80.0), radians(70.0)),
 }
 _RIGPED_HINGE_JOINT_LIMITS = {
-    # Generated local Z is the elbow hinge; local Y remains the long-axis
-    # forearm roll. Public FK authoring is branch-neutral around local zero.
+    # Fitted Blender ForeArm local X is the elbow bend-plane normal; local Y
+    # remains the long-axis forearm roll. Local Z is reserved for shoulder-wrist
+    # swivel in the animator-facing Rotate contract.
     # Public FK hinge controls are branch-neutral. The generated hidden IK/MCH
     # solver owns the active bend branch, and a valid authored FK pose may cross
     # the generated local hinge zero. Limit magnitude and off-axis twist here,
     # but never hard-code left/right bend sign on the public controls.
-    "ForeArm.L": ("Z", -radians(155.0), radians(155.0), radians(100.0)),
-    "ForeArm.R": ("Z", -radians(155.0), radians(155.0), radians(100.0)),
+    "ForeArm.L": ("X", -radians(155.0), radians(155.0), radians(100.0)),
+    "ForeArm.R": ("X", -radians(155.0), radians(155.0), radians(100.0)),
     # Generated calf local X is the knee hinge on both sides. Keep only a small
     # long-axis allowance so the lower leg cannot corkscrew around the knee.
     "Calf.L": ("X", -radians(155.0), radians(155.0), radians(20.0)),
@@ -6808,12 +6788,7 @@ def _sliding_capability_mapping_ids(
 
 def _configured_generated_hinge_branch_sign(solver_owner) -> int | None:
     name = str(getattr(solver_owner, "name", ""))
-    if name.startswith("MCH_ForeArm"):
-        if not bool(solver_owner.use_ik_limit_z):
-            return None
-        minimum = float(solver_owner.ik_min_z)
-        maximum = float(solver_owner.ik_max_z)
-    elif name.startswith("MCH_Calf"):
+    if name.startswith(("MCH_ForeArm", "MCH_Calf")):
         if not bool(solver_owner.use_ik_limit_x):
             return None
         minimum = float(solver_owner.ik_min_x)
@@ -6887,9 +6862,7 @@ def _transient_solver_seed_branch_sign(
     solver_name = str(
         getattr(capability.native_ik.solver_owner.target, "name", "")
     )
-    if solver_name.startswith("MCH_ForeArm"):
-        component = float(quaternion.z)
-    elif solver_name.startswith("MCH_Calf"):
+    if solver_name.startswith(("MCH_ForeArm", "MCH_Calf")):
         component = float(quaternion.x)
     else:
         return None
@@ -7344,22 +7317,22 @@ def _restore_direct_rotate_sliding_syncs(
     context.view_layer.update()
 
 
-def _forearm_special_x_session(context, active: ResolvedControl, axis_world: Vector) -> FkTwoBoneMoveSession | None:
+def _forearm_special_z_session(context, active: ResolvedControl, axis_world: Vector) -> FkTwoBoneMoveSession | None:
     pose_bone = active.target
     if not isinstance(pose_bone, bpy.types.PoseBone):
         return None
     if str(pose_bone.name) not in {"ForeArm.L", "ForeArm.R"}:
         return None
     local_basis = (active.owner_object.matrix_world @ pose_bone.matrix).to_3x3().normalized()
-    local_x = Vector(local_basis.col[0])
-    if local_x.length <= 1e-9:
+    local_z = Vector(local_basis.col[2])
+    if local_z.length <= 1e-9:
         return None
-    local_x.normalize()
+    local_z.normalize()
     requested = Vector(axis_world)
     if requested.length <= 1e-9:
         return None
     requested.normalize()
-    if abs(float(requested.dot(local_x))) < 0.999:
+    if abs(float(requested.dot(local_z))) < 0.999:
         return None
     resolved = _selected_semantic_mapping(context)
     if resolved is None or resolved.contact_type is not ContactKeyType.FREE:
@@ -7369,7 +7342,7 @@ def _forearm_special_x_session(context, active: ResolvedControl, axis_world: Vec
     return _begin_fk_two_bone_move_for_resolution(resolved)
 
 
-def _apply_forearm_special_x_rotation(
+def _apply_forearm_special_z_rotation(
     context,
     session: FkTwoBoneMoveSession,
     angle: float,
@@ -7551,7 +7524,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         self._states = tuple(states)
         self._forearm_special_session = None
         try:
-            self._forearm_special_session = _forearm_special_x_session(
+            self._forearm_special_session = _forearm_special_z_session(
                 context,
                 active,
                 Vector(axis),
@@ -7872,13 +7845,13 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             return
 
         if self._forearm_special_session is not None:
-            if not _apply_forearm_special_x_rotation(
+            if not _apply_forearm_special_z_rotation(
                 context,
                 self._forearm_special_session,
                 self._current_angle,
             ):
                 raise RigpedSemanticMoveError(
-                    "ForeArm X special rotation could not preserve the shoulder-wrist chain."
+                    "ForeArm Z swivel could not preserve the shoulder-wrist chain."
                 )
             for session in self._sliding_syncs:
                 _apply_direct_rotate_sliding_sync(context, session)

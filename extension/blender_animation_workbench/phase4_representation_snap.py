@@ -659,8 +659,8 @@ def _generated_rigped_hinge_branch(capability: LimbRepresentationCapability) -> 
 
     solver_name = str(getattr(capability.native_ik.solver_owner.target, "name", ""))
     if solver_name in {"MCH_ForeArm.L", "MCH_ForeArm.R"}:
-        axis_index = 2
-        fallback = -1 if solver_name.endswith(".R") else 1
+        axis_index = 0
+        fallback = -1
     elif solver_name in {"MCH_Calf.L", "MCH_Calf.R"}:
         return 1
     else:
