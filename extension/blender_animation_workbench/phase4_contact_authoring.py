@@ -3269,25 +3269,95 @@ def _build_transform_rows(
         )
         return tuple(rows)
 
-    for binding_id in capability.fk_binding_ids:
-        contract = by_binding[binding_id]
-        rows.extend(_channels_for_state(contract, _current_state(contract), location=False, rotation=True))
-
-    if target_type is ContactKeyType.SLIDING:
-        # Sliding is IK-authoritative during playback, but the authored terminal
-        # FK curve is still the release/transition authority on the immediately
-        # adjacent Free frame. Persist the public terminal rotation produced by
-        # the solved Sliding preview so the Contact boundary does not fall back
-        # to a stale pre-Sliding Hand/Foot key.
+    if target_type is ContactKeyType.PLANTED:
+        # Planted replay is IK-authoritative, so persist the public overlay from
+        # the evaluated hidden result rather than from transient/stale public
+        # channels. This keeps the authored FK/terminal representation stable
+        # across the next ordinary Action/depsgraph evaluation without changing
+        # hidden IK/hold authority.
+        result_matrices = tuple(
+            control.target.matrix.copy() for control in capability.result_controls
+        )
+        if len(result_matrices) != len(capability.fk_binding_ids) or not result_matrices:
+            raise ContactAuthoringError(
+                "Planted Contact cannot derive a complete solved public FK overlay."
+            )
+        fk_states: list[SnapControlState] = []
+        for index, (binding_id, desired_matrix) in enumerate(
+            zip(capability.fk_binding_ids, result_matrices, strict=True)
+        ):
+            contract = by_binding[binding_id]
+            state = _state_for_pose_matrix(
+                contract,
+                desired_matrix,
+                parent_pose_matrix=(result_matrices[index - 1] if index else None),
+            )
+            fk_states.append(
+                _quaternion_state_compatible_with_existing_keys(
+                    contract,
+                    state,
+                    time=write_time,
+                )
+            )
         terminal_contract = by_binding[capability.authored_terminal_binding_id]
+        terminal_state = _state_for_pose_matrix(
+            terminal_contract,
+            capability.result_terminal.target.matrix.copy(),
+            parent_pose_matrix=result_matrices[-1],
+        )
+        terminal_state = _quaternion_state_compatible_with_existing_keys(
+            terminal_contract,
+            terminal_state,
+            time=write_time,
+        )
+        for binding_id, state in zip(
+            capability.fk_binding_ids,
+            fk_states,
+            strict=True,
+        ):
+            rows.extend(
+                _channels_for_state(
+                    by_binding[binding_id],
+                    state,
+                    location=False,
+                    rotation=True,
+                )
+            )
         rows.extend(
             _channels_for_state(
                 terminal_contract,
-                _current_state(terminal_contract),
+                terminal_state,
                 location=False,
                 rotation=True,
             )
         )
+    else:
+        for binding_id in capability.fk_binding_ids:
+            contract = by_binding[binding_id]
+            rows.extend(
+                _channels_for_state(
+                    contract,
+                    _current_state(contract),
+                    location=False,
+                    rotation=True,
+                )
+            )
+
+        if target_type is ContactKeyType.SLIDING:
+            # Sliding is IK-authoritative during playback, but the authored terminal
+            # FK curve is still the release/transition authority on the immediately
+            # adjacent Free frame. Persist the public terminal rotation produced by
+            # the solved Sliding preview so the Contact boundary does not fall back
+            # to a stale pre-Sliding Hand/Foot key.
+            terminal_contract = by_binding[capability.authored_terminal_binding_id]
+            rows.extend(
+                _channels_for_state(
+                    terminal_contract,
+                    _current_state(terminal_contract),
+                    location=False,
+                    rotation=True,
+                )
+            )
 
     ik_binding_id = capability.native_ik.mapping.ik_target_binding_id if hasattr(capability.native_ik, "mapping") else None
     if not ik_binding_id:
