@@ -8,6 +8,7 @@ EXT = ROOT / "extension" / "blender_animation_workbench"
 TRANSFORM_PATH = EXT / "rigped_transform.py"
 SOURCE = TRANSFORM_PATH.read_text(encoding="utf-8")
 BUILDER_SOURCE = (EXT / "rigped_humanoid_builder.py").read_text(encoding="utf-8")
+FIT_COMMIT_SOURCE = (EXT / "rigped_fit_commit.py").read_text(encoding="utf-8")
 SNAP_SOURCE = (EXT / "phase4_representation_snap.py").read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
 
@@ -93,3 +94,29 @@ def test_rc1_forbidden_hinge_axis_skips_sliding_fk_to_ik_sync_preview() -> None:
     )
     assert guard < early_return < sliding_sync
     assert "self._current_angle = 0.0" in preview[early_return:sliding_sync]
+
+
+def test_rc1_builder_forearm_roll_comes_from_chain_geometry_with_safe_fallback() -> None:
+    assert 'str(entry.semantic_key) == "awb.forearm"' in BUILDER_SOURCE
+    assert "bend_normal = upper.cross(lower)" in BUILDER_SOURCE
+    assert "bend_normal.length > 1e-5" in BUILDER_SOURCE
+    assert "local_x = -bend_normal.normalized()" in BUILDER_SOURCE
+    assert "local_x = local_x - direction * float(local_x.dot(direction))" in BUILDER_SOURCE
+    assert "local_z = local_x.cross(direction)" in BUILDER_SOURCE
+    assert "bone.align_roll(local_z)" in BUILDER_SOURCE
+    assert "bone.align_roll(reference)" in BUILDER_SOURCE
+
+
+def test_rc1_fit_commit_canonicalizes_forearm_targets_as_column_basis() -> None:
+    assert "def _canonical_forearm_target_orientation(" in FIT_COMMIT_SOURCE
+    assert "if bend_normal.length <= 1e-5:" in FIT_COMMIT_SOURCE
+    assert "return forearm_target.orientation" in FIT_COMMIT_SOURCE
+    assert "local_x = -bend_normal.normalized()" in FIT_COMMIT_SOURCE
+    assert "local_x = local_x - local_y * float(local_x.dot(local_y))" in FIT_COMMIT_SOURCE
+    assert "local_z = local_x.cross(local_y)" in FIT_COMMIT_SOURCE
+    assert "(local_x.x, local_y.x, local_z.x)" in FIT_COMMIT_SOURCE
+    assert "(local_x.y, local_y.y, local_z.y)" in FIT_COMMIT_SOURCE
+    assert "(local_x.z, local_y.z, local_z.z)" in FIT_COMMIT_SOURCE
+    assert 'if semantic_key == "awb.forearm":' in FIT_COMMIT_SOURCE
+    assert "forearm_target_names.add(str(bone.name))" in FIT_COMMIT_SOURCE
+    assert "FIT_F4_FOREARM_FRAME_PARENT_MISSING" in FIT_COMMIT_SOURCE

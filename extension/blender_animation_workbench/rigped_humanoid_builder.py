@@ -184,20 +184,48 @@ def _create_container(scene, spec: RigpedHumanoidSpec, journal: _BuildJournal):
     return armature_object
 
 
-def _align_generated_bone_roll(bone) -> None:
+def _align_generated_bone_roll(
+    bone,
+    entry: HumanoidBoneSpec,
+    definition_by_role: dict[str, HumanoidBoneSpec],
+) -> None:
     """Give generated bones one deterministic anatomical local-axis convention.
 
     Blender fixes local Y to head->tail and derives X/Z from EditBone.roll.
-    Generated Rigped bones mostly lie in the character X/Z plane, so keeping
-    local Z pointed toward character +Y gives authored/MCH/DEF counterparts a
-    stable shared basis. Pole controls that run almost parallel to +Y use +Z as
-    the fallback roll reference to avoid a degenerate projection.
+    ForeArm authored/MCH/DEF rows use chain geometry so local X is the elbow
+    hinge normal and a negative X rotation increases the existing bend. Other
+    generated bones keep the historical stable character-reference convention.
     """
 
     direction = Vector(bone.tail) - Vector(bone.head)
     if direction.length <= 1e-9:
         return
     direction.normalize()
+
+    if str(entry.semantic_key) == "awb.forearm" and entry.parent_role is not None:
+        parent = definition_by_role.get(str(entry.parent_role))
+        if parent is not None:
+            upper = Vector(entry.head) - Vector(parent.head)
+            lower = Vector(entry.tail) - Vector(entry.head)
+            bend_normal = upper.cross(lower)
+            if (
+                upper.length > 1e-6
+                and lower.length > 1e-6
+                and bend_normal.length > 1e-5
+            ):
+                # local X = -bend normal means negative-X hinge rotation moves
+                # the lower link farther into the already-authored bend on both
+                # mirrored sides. Gram-Schmidt against local Y avoids drift.
+                local_x = -bend_normal.normalized()
+                local_x = local_x - direction * float(local_x.dot(direction))
+                if local_x.length > 1e-5:
+                    local_x.normalize()
+                    local_z = local_x.cross(direction)
+                    if local_z.length > 1e-5:
+                        local_z.normalize()
+                        bone.align_roll(local_z)
+                        return
+
     reference = Vector((0.0, 1.0, 0.0))
     if abs(float(direction.dot(reference))) >= 0.999:
         reference = Vector((0.0, 0.0, 1.0))
@@ -217,11 +245,12 @@ def _create_bones(
     bpy.ops.object.mode_set(mode="EDIT")
     try:
         created: dict[str, Any] = {}
+        definition_by_role = {str(entry.role): entry for entry in bones}
         for entry in bones:
             bone = armature_object.data.edit_bones.new(entry.name)
             bone.head = entry.head
             bone.tail = entry.tail
-            _align_generated_bone_roll(bone)
+            _align_generated_bone_roll(bone, entry, definition_by_role)
             bone.use_deform = bool(entry.deform)
             created[entry.role] = bone
         for entry in bones:

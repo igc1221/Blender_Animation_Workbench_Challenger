@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import bpy
-from mathutils import Quaternion, Vector
+from mathutils import Matrix, Quaternion, Vector
 
 from .character_metadata import resolve_character
 from .debug_trace import trace_event, trace_exception
@@ -318,6 +318,46 @@ def _bone_rest_orientation(bone) -> Quaternion:
     return bone.matrix_local.to_quaternion().normalized()
 
 
+def _canonical_forearm_target_orientation(
+    parent_target: FitBoneTarget,
+    forearm_target: FitBoneTarget,
+) -> tuple[float, float, float, float]:
+    """Return the fitted ForeArm X-hinge frame, or preserve input near singularity."""
+
+    upper = Vector(forearm_target.head) - Vector(parent_target.head)
+    lower = Vector(forearm_target.tail) - Vector(forearm_target.head)
+    if upper.length <= 1e-6 or lower.length <= 1e-6:
+        return forearm_target.orientation
+
+    bend_normal = upper.cross(lower)
+    if bend_normal.length <= 1e-5:
+        return forearm_target.orientation
+
+    local_y = lower.normalized()
+    # Geometry sign is deliberate: local X = -N makes negative-X rotation
+    # increase the already-authored elbow bend on both mirrored sides.
+    local_x = -bend_normal.normalized()
+    local_x = local_x - local_y * float(local_x.dot(local_y))
+    if local_x.length <= 1e-5:
+        return forearm_target.orientation
+    local_x.normalize()
+
+    local_z = local_x.cross(local_y)
+    if local_z.length <= 1e-5:
+        return forearm_target.orientation
+    local_z.normalize()
+
+    # mathutils.Matrix consumes rows; write local basis axes as columns.
+    basis = Matrix(
+        (
+            (local_x.x, local_y.x, local_z.x),
+            (local_x.y, local_y.y, local_z.y),
+            (local_x.z, local_y.z, local_z.z),
+        )
+    )
+    return _quat(basis.to_quaternion().normalized())
+
+
 def _length(part: DerivedRestPart) -> float:
     return (Vector(part.tail) - Vector(part.head)).length
 
@@ -373,6 +413,7 @@ def compute_fit_commit_manifest(scene, semantic_session) -> FitCommitManifest:
     )
     resolved = dict(view.resolved_bindings)
     targets: dict[str, FitBoneTarget] = {}
+    forearm_target_names: set[str] = set()
 
     for binding in view.definition.bindings:
         resolved_binding = resolved.get(binding.binding_id)
@@ -384,6 +425,8 @@ def compute_fit_commit_manifest(scene, semantic_session) -> FitCommitManifest:
         usage = str(getattr(binding.usage, "value", binding.usage))
         side = str(getattr(binding.side, "value", binding.side))
         semantic_key = str(binding.semantic_key)
+        if semantic_key == "awb.forearm":
+            forearm_target_names.add(str(bone.name))
 
         if usage == "PRIMARY":
             source = current_by_id.get(str(binding.binding_id))
@@ -451,6 +494,30 @@ def compute_fit_commit_manifest(scene, semantic_session) -> FitCommitManifest:
     if missing_primary:
         raise FitCommitTransactionError(
             "FIT_F4_PRIMARY_TARGET_MISSING:" + ",".join(missing_primary)
+        )
+
+    rig_bones = semantic_session.rig_object.data.bones
+    for forearm_name in sorted(forearm_target_names):
+        forearm_target = targets.get(forearm_name)
+        rest_bone = rig_bones.get(forearm_name)
+        parent_name = (
+            str(rest_bone.parent.name)
+            if rest_bone is not None and rest_bone.parent is not None
+            else ""
+        )
+        parent_target = targets.get(parent_name)
+        if forearm_target is None or parent_target is None:
+            raise FitCommitTransactionError(
+                f"FIT_F4_FOREARM_FRAME_PARENT_MISSING:{forearm_name}"
+            )
+        targets[forearm_name] = FitBoneTarget(
+            forearm_target.name,
+            forearm_target.head,
+            forearm_target.tail,
+            _canonical_forearm_target_orientation(parent_target, forearm_target),
+            forearm_target.width,
+            forearm_target.depth,
+            forearm_target.use_connect,
         )
 
     return FitCommitManifest(
