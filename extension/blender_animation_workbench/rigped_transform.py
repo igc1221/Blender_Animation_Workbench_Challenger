@@ -957,7 +957,28 @@ def direct_transform_axes(context) -> dict[str, Vector] | None:
     selected = _selected_direct_transform(context)
     if selected is None:
         return None
-    return _orientation_axes_for_control(context, selected.active_control)
+    axes = _orientation_axes_for_control(context, selected.active_control)
+    if axes is None:
+        return None
+    active = selected.active_control
+    pose_bone = active.target
+    if (
+        str(getattr(context.scene, "baw_rigped_semantic_transform_mode", "NONE"))
+        == "DIRECT_ROTATE"
+        and str(context.scene.transform_orientation_slots[0].type) == "LOCAL"
+        and isinstance(pose_bone, bpy.types.PoseBone)
+        and str(pose_bone.name) in {"ForeArm.L", "ForeArm.R"}
+    ):
+        # Blender-facing ForeArm rotate convention:
+        # X = elbow bend, Y = long-axis roll, Z = shoulder-wrist swivel.
+        # Keep internal generated hinge/IK storage unchanged and only swap the
+        # animator-facing rotate basis so visible ring and motion agree.
+        return {
+            "X": Vector(axes["Z"]).normalized(),
+            "Y": Vector(axes["Y"]).normalized(),
+            "Z": (-Vector(axes["X"])).normalized(),
+        }
+    return axes
 
 
 def direct_move_available(context) -> bool:
@@ -1606,6 +1627,8 @@ def _apply_solved_two_bone_fk_pose(
     session: FkTwoBoneMoveSession,
     desired_joint_world: Vector,
     desired_end_world: Vector,
+    *,
+    terminal_follows_second: bool = False,
 ) -> bool:
     """Apply one already-solved two-bone pose to a two-bone control chain.
 
@@ -1658,10 +1681,18 @@ def _apply_solved_two_bone_fk_pose(
     if first_matrix is None or second_matrix is None:
         return False
 
-    # Biped keeps Hand/Foot orientation independent from upper/lower limb
-    # orientation while positioning the limb. Preserve the mouse-down terminal
-    # orientation and only move its solved pivot with the chain.
-    terminal_matrix = session.terminal_start_matrix.copy()
+    # Ordinary FK Move keeps terminal world orientation independent while the
+    # endpoint is repositioned. ForeArm swivel is the narrow exception: wrist
+    # position stays fixed, but Hand orientation follows the ForeArm by keeping
+    # the mouse-down terminal transform local to the second link.
+    if terminal_follows_second:
+        terminal_relative = (
+            session.second_start_matrix.inverted_safe()
+            @ session.terminal_start_matrix
+        )
+        terminal_matrix = second_matrix @ terminal_relative
+    else:
+        terminal_matrix = session.terminal_start_matrix.copy()
     terminal_matrix.translation = desired_end
 
     # Reconstruct rotation channels from the absolute desired matrices. Direct
@@ -6175,6 +6206,7 @@ def _bounded_hinge_direct_rotate_angle(
     lower = -float("inf")
     upper = float("inf")
     found = False
+    effective = False
     for state in states:
         pose_bone = state.control.target
         hinge_state = state.hinge_state
@@ -6196,12 +6228,15 @@ def _bounded_hinge_direct_rotate_angle(
         ):
             if abs(weight) <= 1e-7:
                 continue
+            effective = True
             a = (minimum - float(start)) / weight
             b = (maximum - float(start)) / weight
             lower = max(lower, min(a, b))
             upper = min(upper, max(a, b))
     if not found:
         return float(requested_angle)
+    if not effective:
+        return 0.0
     if lower > upper:
         return 0.0
     return _clamp_scalar(float(requested_angle), lower, upper)
@@ -7352,6 +7387,7 @@ def _apply_forearm_special_x_rotation(
         session,
         desired_joint,
         end,
+        terminal_follows_second=True,
     )
     if applied:
         context.view_layer.update()
@@ -7866,6 +7902,23 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         # receives the same visible/world rotation direction. LOCAL retains the
         # anatomical opposite-side mirror behavior for paired controls.
         mirror_opposites = self._orientation == "LOCAL" and self.axis != "FREE"
+        hinge_axis_effective = any(
+            abs(weight) > 1e-7
+            for state in hinge_states
+            for weight in _hinge_axis_weights(
+                active,
+                state,
+                self._axis_world,
+                mirror_opposites=mirror_opposites,
+            )
+        )
+        if hinge_states and not generic_states and not hinge_axis_effective:
+            # A forbidden hinge axis is a true no-op. In particular, do not run
+            # Sliding FK->IK synchronization for an axis that cannot change the
+            # authored hinge/roll state; re-solving an unchanged pose can move
+            # the pole/branch numerically and produce a visible direction jump.
+            self._current_angle = 0.0
+            return
 
         # ForeArm/Calf are true Biped-style hinge + axial-roll joints in every
         # gizmo orientation. Hand/Foot and broad ball joints follow the actual
