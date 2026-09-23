@@ -5349,6 +5349,7 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                             capabilities=self._sliding_guard_capabilities,
                         )
                         commit_rigped_auto_writer_results(tuple(deferred_auto_results))
+                        context.view_layer.update()
                         # Committing the direct AUTO writer can immediately
                         # reevaluate the Action at this same frame. Re-project
                         # the IK-authoritative public chains after that commit
