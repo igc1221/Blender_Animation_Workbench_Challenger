@@ -182,3 +182,43 @@ def test_e4_mixed_contact_failure_traces_rollback_result_and_residue() -> None:
         assert source.index(f'\"{begin_event}\"') < rollback_index
         assert rollback_index < end_index
         assert end_index < reevaluate_index
+
+
+def test_contact_reevaluation_preserves_unrelated_hidden_contact_authority() -> None:
+    helper = _function("_unrelated_contact_hidden_pose_bones")
+    helper_source = ast.get_source_segment(
+        SOURCE_PATH.read_text(encoding="utf-8"),
+        helper,
+    )
+    assert helper_source is not None
+    assert "excluded_mapping_ids" in helper_source
+    assert "ContactKeyType.SLIDING" in helper_source
+    assert "ContactKeyType.PLANTED" in helper_source
+    assert "capability.native_ik.ik_target" in helper_source
+    assert "capability.native_ik.pole_target" in helper_source
+
+    reevaluate = _function("_reevaluate_contact_frame_preserving_public_pose")
+    reevaluate_source = ast.get_source_segment(
+        SOURCE_PATH.read_text(encoding="utf-8"),
+        reevaluate,
+    )
+    assert reevaluate_source is not None
+    assert "preserve_pose_bones" in reevaluate_source
+    assert "pose_bone.matrix_basis.copy()" in reevaluate_source
+
+    single = _function("execute_contact_intent_plan")
+    batch = _function("execute_contact_batch_intent_plan")
+    single_source = ast.get_source_segment(
+        SOURCE_PATH.read_text(encoding="utf-8"),
+        single,
+    )
+    batch_source = ast.get_source_segment(
+        SOURCE_PATH.read_text(encoding="utf-8"),
+        batch,
+    )
+    assert single_source is not None
+    assert batch_source is not None
+    assert "preserve_pose_bones=_unrelated_contact_hidden_pose_bones(" in single_source
+    assert "excluded_mapping_ids=(intent.mapping_id,)" in single_source
+    assert "preserve_pose_bones=_unrelated_contact_hidden_pose_bones(" in batch_source
+    assert "item.intent.mapping_id for item in prepared_tuple" in batch_source

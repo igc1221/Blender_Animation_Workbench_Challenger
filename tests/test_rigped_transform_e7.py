@@ -87,7 +87,7 @@ def test_e7_rotate_guard_is_passive_only_and_scoped_to_body_roles() -> None:
     assert "active_ids | passive_ids != affected_ids" in invoke
 
     preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
-    assert "_apply_direct_rotate_sliding_sync(context, session)" in preview
+    assert "_apply_direct_rotate_sliding_syncs(context, self._sliding_syncs)" in preview
     assert "_refresh_frozen_sliding_dependency_overlays(" in preview
     assert "capabilities=self._sliding_guard_capabilities" in preview
 

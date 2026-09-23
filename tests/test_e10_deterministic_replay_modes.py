@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REPLAY_PATH = ROOT / "extension" / "blender_animation_workbench" / "debug_replay.py"
+TRACE_PATH = ROOT / "extension" / "blender_animation_workbench" / "debug_trace.py"
 CONTACT_PATH = ROOT / "extension" / "blender_animation_workbench" / "phase4_contact_authoring.py"
 CONTACT_UI_PATH = ROOT / "extension" / "blender_animation_workbench" / "phase4_contact_ui.py"
 RUNNER_PATH = ROOT / "scripts" / "replay_user_final_test_via_mcp.py"
@@ -115,6 +116,18 @@ def test_e10_user_final_runner_requires_explicit_mode_without_hidden_fallback() 
     assert 'or "COMMAND"' not in user_final
     assert '"--replay-mode"' in main
     assert '"RECORDED_RESULT"' in source
+
+
+def test_e10_latest_replay_retains_three_distinct_sessions() -> None:
+    source, _tree = _source(TRACE_PATH)
+    rotate = _function(TRACE_PATH, "_rotate_replay_history_for_new_session")
+    persist = _function(TRACE_PATH, "persist_latest_replay_script")
+    assert '_REPLAY_PREVIOUS_FILENAME = "awb_replay_previous.json"' in source
+    assert '_REPLAY_PREVIOUS2_FILENAME = "awb_replay_previous2.json"' in source
+    assert 'incoming_session == current_session' in rotate
+    assert '_write_replay_script_file(previous2_path, previous)' in rotate
+    assert '_write_replay_script_file(previous_path, current)' in rotate
+    assert "_rotate_replay_history_for_new_session(script)" in persist
 
 
 def test_e10_archived_semantic_replays_declare_mode_explicitly() -> None:

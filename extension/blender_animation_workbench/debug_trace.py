@@ -14,6 +14,8 @@ from bpy.app.handlers import persistent
 _TRACE_FILENAME = "awb_interaction_trace.jsonl"
 _PRECISION_TRACE_FILENAME = "awb_precision_trace.jsonl"
 _REPLAY_FILENAME = "awb_replay_latest.json"
+_REPLAY_PREVIOUS_FILENAME = "awb_replay_previous.json"
+_REPLAY_PREVIOUS2_FILENAME = "awb_replay_previous2.json"
 _TRACE_MAX_BYTES = 4 * 1024 * 1024
 _PRECISION_TRACE_MAX_BYTES = 2 * 1024 * 1024
 _TAIL_READ_CHUNK_BYTES = 64 * 1024
@@ -143,6 +145,53 @@ def _replay_path() -> Path:
 
 def replay_path() -> str:
     return str(_replay_path())
+
+
+def _replay_previous_path() -> Path:
+    return _replay_path().with_name(_REPLAY_PREVIOUS_FILENAME)
+
+
+def _replay_previous2_path() -> Path:
+    return _replay_path().with_name(_REPLAY_PREVIOUS2_FILENAME)
+
+
+def _read_replay_script_file(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_replay_script_file(path: Path, script: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.tmp")
+    temp_path.write_text(
+        json.dumps(script, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+
+
+def _rotate_replay_history_for_new_session(script: dict[str, Any]) -> None:
+    current_path = _replay_path()
+    current = _read_replay_script_file(current_path)
+    if current is None:
+        return
+
+    current_session = str(current.get("source_session_id") or "")
+    incoming_session = str(script.get("source_session_id") or "")
+    if not incoming_session or incoming_session == current_session:
+        return
+
+    previous_path = _replay_previous_path()
+    previous2_path = _replay_previous2_path()
+    previous = _read_replay_script_file(previous_path)
+    if previous is not None:
+        _write_replay_script_file(previous2_path, previous)
+    _write_replay_script_file(previous_path, current)
 
 
 def _archive_existing_session_file(path: Path) -> None:
@@ -402,13 +451,8 @@ def persist_latest_replay_script() -> str:
     if int(script.get("action_count", 0)) <= 0 and path.exists():
         return str(path)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = path.with_name(f"{path.name}.tmp")
-        temp_path.write_text(
-            json.dumps(script, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temp_path.replace(path)
+        _rotate_replay_history_for_new_session(script)
+        _write_replay_script_file(path, script)
     except OSError:
         return str(path)
     return str(path)

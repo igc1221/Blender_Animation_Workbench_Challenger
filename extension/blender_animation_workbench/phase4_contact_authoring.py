@@ -114,12 +114,70 @@ def _authored_public_pose_snapshot(scene) -> tuple[tuple[Any, Matrix], ...]:
     return tuple(snapshots)
 
 
+def _unrelated_contact_hidden_pose_bones(
+    view,
+    target,
+    *,
+    excluded_mapping_ids: tuple[str, ...],
+) -> tuple[Any, ...]:
+    preserved: list[Any] = []
+    seen: set[int] = set()
+    excluded = {str(mapping_id) for mapping_id in excluded_mapping_ids}
+    for mapping in view.definition.kinematics:
+        if str(mapping.mapping_id) in excluded:
+            continue
+        capability = resolve_limb_representation_capability(
+            view,
+            mapping.mapping_id,
+        ).capability
+        if capability is None:
+            continue
+        solver_bone = capability.native_ik.solver_owner.target
+        raw_state = float(
+            solver_bone.get(
+                AWB_CONTACT_STATE_PROPERTY,
+                float(ContactStateValue.UNINITIALIZED),
+            )
+        )
+        if type_for_state_value(raw_state) not in {
+            ContactKeyType.SLIDING,
+            ContactKeyType.PLANTED,
+        }:
+            continue
+        try:
+            hold = _resolve_contact_hold(view, target, mapping, capability)
+        except ContactAuthoringError:
+            hold = None
+        controls = [
+            capability.native_ik.solver_owner,
+            capability.native_ik.ik_target,
+            capability.native_ik.pole_target,
+            *capability.result_controls,
+            capability.result_terminal,
+        ]
+        if hold is not None:
+            controls.extend((hold.control, hold.point_control))
+        for resolved in controls:
+            if resolved is None:
+                continue
+            pose_bone = resolved.target
+            if not isinstance(pose_bone, bpy.types.PoseBone):
+                continue
+            pointer = int(pose_bone.as_pointer())
+            if pointer in seen:
+                continue
+            seen.add(pointer)
+            preserved.append(pose_bone)
+    return tuple(preserved)
+
+
 def _reevaluate_contact_frame_preserving_public_pose(
     scene,
     frame: int,
     subframe: float,
     *,
     feedback_constraints: tuple[Any, ...] = (),
+    preserve_pose_bones: tuple[Any, ...] = (),
 ) -> None:
     # Contact C authors semantic/IK authority. It must not visibly re-pose an
     # unrelated Sliding limb merely because Blender re-evaluates the same frame.
@@ -130,7 +188,18 @@ def _reevaluate_contact_frame_preserving_public_pose(
     # state. During an authoring transaction that derived representation change
     # must not escape ahead of the journal-owned final authority step, so freeze
     # and restore only the affected feedback constraints across frame_set().
-    snapshots = _authored_public_pose_snapshot(scene)
+    snapshots_by_pointer: dict[int, tuple[Any, Matrix]] = {
+        int(pose_bone.as_pointer()): (pose_bone, matrix_basis)
+        for pose_bone, matrix_basis in _authored_public_pose_snapshot(scene)
+    }
+    for pose_bone in preserve_pose_bones:
+        if not isinstance(pose_bone, bpy.types.PoseBone):
+            continue
+        snapshots_by_pointer.setdefault(
+            int(pose_bone.as_pointer()),
+            (pose_bone, pose_bone.matrix_basis.copy()),
+        )
+    snapshots = tuple(snapshots_by_pointer.values())
     feedback_mutes = tuple(bool(constraint.mute) for constraint in feedback_constraints)
     scene.frame_set(frame, subframe=subframe)
     view_layer = getattr(bpy.context, "view_layer", None)
@@ -3269,95 +3338,25 @@ def _build_transform_rows(
         )
         return tuple(rows)
 
-    if target_type is ContactKeyType.PLANTED:
-        # Planted replay is IK-authoritative, so persist the public overlay from
-        # the evaluated hidden result rather than from transient/stale public
-        # channels. This keeps the authored FK/terminal representation stable
-        # across the next ordinary Action/depsgraph evaluation without changing
-        # hidden IK/hold authority.
-        result_matrices = tuple(
-            control.target.matrix.copy() for control in capability.result_controls
-        )
-        if len(result_matrices) != len(capability.fk_binding_ids) or not result_matrices:
-            raise ContactAuthoringError(
-                "Planted Contact cannot derive a complete solved public FK overlay."
-            )
-        fk_states: list[SnapControlState] = []
-        for index, (binding_id, desired_matrix) in enumerate(
-            zip(capability.fk_binding_ids, result_matrices, strict=True)
-        ):
-            contract = by_binding[binding_id]
-            state = _state_for_pose_matrix(
-                contract,
-                desired_matrix,
-                parent_pose_matrix=(result_matrices[index - 1] if index else None),
-            )
-            fk_states.append(
-                _quaternion_state_compatible_with_existing_keys(
-                    contract,
-                    state,
-                    time=write_time,
-                )
-            )
+    for binding_id in capability.fk_binding_ids:
+        contract = by_binding[binding_id]
+        rows.extend(_channels_for_state(contract, _current_state(contract), location=False, rotation=True))
+
+    if target_type is ContactKeyType.SLIDING:
+        # Sliding is IK-authoritative during playback, but the authored terminal
+        # FK curve is still the release/transition authority on the immediately
+        # adjacent Free frame. Persist the public terminal rotation produced by
+        # the solved Sliding preview so the Contact boundary does not fall back
+        # to a stale pre-Sliding Hand/Foot key.
         terminal_contract = by_binding[capability.authored_terminal_binding_id]
-        terminal_state = _state_for_pose_matrix(
-            terminal_contract,
-            capability.result_terminal.target.matrix.copy(),
-            parent_pose_matrix=result_matrices[-1],
-        )
-        terminal_state = _quaternion_state_compatible_with_existing_keys(
-            terminal_contract,
-            terminal_state,
-            time=write_time,
-        )
-        for binding_id, state in zip(
-            capability.fk_binding_ids,
-            fk_states,
-            strict=True,
-        ):
-            rows.extend(
-                _channels_for_state(
-                    by_binding[binding_id],
-                    state,
-                    location=False,
-                    rotation=True,
-                )
-            )
         rows.extend(
             _channels_for_state(
                 terminal_contract,
-                terminal_state,
+                _current_state(terminal_contract),
                 location=False,
                 rotation=True,
             )
         )
-    else:
-        for binding_id in capability.fk_binding_ids:
-            contract = by_binding[binding_id]
-            rows.extend(
-                _channels_for_state(
-                    contract,
-                    _current_state(contract),
-                    location=False,
-                    rotation=True,
-                )
-            )
-
-        if target_type is ContactKeyType.SLIDING:
-            # Sliding is IK-authoritative during playback, but the authored terminal
-            # FK curve is still the release/transition authority on the immediately
-            # adjacent Free frame. Persist the public terminal rotation produced by
-            # the solved Sliding preview so the Contact boundary does not fall back
-            # to a stale pre-Sliding Hand/Foot key.
-            terminal_contract = by_binding[capability.authored_terminal_binding_id]
-            rows.extend(
-                _channels_for_state(
-                    terminal_contract,
-                    _current_state(terminal_contract),
-                    location=False,
-                    rotation=True,
-                )
-            )
 
     ik_binding_id = capability.native_ik.mapping.ik_target_binding_id if hasattr(capability.native_ik, "mapping") else None
     if not ik_binding_id:
@@ -4712,6 +4711,11 @@ def execute_contact_intent_plan(
             contact_plan.frame,
             contact_plan.subframe,
             feedback_constraints=feedback_constraints,
+            preserve_pose_bones=_unrelated_contact_hidden_pose_bones(
+                view,
+                target,
+                excluded_mapping_ids=(intent.mapping_id,),
+            ),
         )
         hook.enter(OperationStage.VERIFY, operation=contact_plan.operation_id)
 
@@ -4931,6 +4935,11 @@ def execute_contact_intent_plan(
             scene,
             contact_plan.frame,
             contact_plan.subframe,
+            preserve_pose_bones=_unrelated_contact_hidden_pose_bones(
+                view,
+                target,
+                excluded_mapping_ids=(intent.mapping_id,),
+            ),
         )
         hook.enter(OperationStage.ROLLBACK_VERIFY, operation=contact_plan.operation_id)
         if rollback.residue_receipts:
@@ -5075,6 +5084,7 @@ def execute_contact_batch_intent_plan(
         )
     target = resolution.target
     try:
+        view = resolve_character(scene, target.character_id)
         contact_plan = _contact_batch_operation_plan(
             batch,
             target,
@@ -5398,6 +5408,13 @@ def execute_contact_batch_intent_plan(
             contact_plan.frame,
             contact_plan.subframe,
             feedback_constraints=reevaluate_feedback_constraints,
+            preserve_pose_bones=_unrelated_contact_hidden_pose_bones(
+                view,
+                target,
+                excluded_mapping_ids=tuple(
+                    item.intent.mapping_id for item in prepared_tuple
+                ),
+            ),
         )
         hook.enter(OperationStage.VERIFY, operation=contact_plan.operation_id)
 
@@ -5625,6 +5642,13 @@ def execute_contact_batch_intent_plan(
             scene,
             contact_plan.frame,
             contact_plan.subframe,
+            preserve_pose_bones=_unrelated_contact_hidden_pose_bones(
+                view,
+                target,
+                excluded_mapping_ids=tuple(
+                    item.intent.mapping_id for item in prepared_tuple
+                ),
+            ),
         )
         hook.enter(OperationStage.ROLLBACK_VERIFY, operation=contact_plan.operation_id)
         if rollback.residue_receipts:

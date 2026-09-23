@@ -98,6 +98,12 @@ def test_rc1_sliding_lower_long_roll_is_shared_by_forearm_and_calf() -> None:
     assert "_apply_sliding_lower_long_roll(" in preview
 
 
+def test_rc1_sliding_rotate_keeps_terminal_target_pinned_unless_terminal_is_selected() -> None:
+    source = _source(_function("_apply_direct_rotate_sliding_syncs"))
+    assert "if session.terminal_selected" in source
+    assert "else session.start_ik_state" in source
+
+
 def test_rc1_forbidden_hinge_axis_bounds_to_zero_instead_of_preserving_requested_angle() -> None:
     source = _source(_function("_bounded_hinge_direct_rotate_angle"))
     assert "effective = False" in source
@@ -113,7 +119,7 @@ def test_rc1_forbidden_hinge_axis_skips_sliding_fk_to_ik_sync_preview() -> None:
         "if hinge_states and not generic_states and not hinge_axis_effective:"
     )
     sliding_sync = preview.index(
-        "_apply_direct_rotate_sliding_sync(context, session)",
+        "_apply_direct_rotate_sliding_syncs(",
         early_return,
     )
     assert guard < early_return < sliding_sync
