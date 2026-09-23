@@ -199,6 +199,7 @@ class SlidingRotateSyncSession:
     terminal_selected: bool
     start_fk_states: tuple[SnapControlState, ...]
     start_terminal_state: SnapControlState
+    start_solver_state: SnapControlState
     start_ik_state: SnapControlState
     start_pole_state: SnapControlState
     start_pole_angle: float
@@ -492,6 +493,33 @@ def _sync_generated_sliding_hinge_branch_from_public_pose(
     return bool(configure_generated_rigped_ik_hinge_branch(solver_owner, branch_sign))
 
 
+def _sync_generated_sliding_forearm_roll_from_public_pose(
+    solver_owner,
+    public_lower,
+) -> bool:
+    """Restore keyed ForeArm axial roll as a native Sliding IK input."""
+
+    if str(getattr(solver_owner, "name", "")) not in {"MCH_ForeArm.L", "MCH_ForeArm.R"}:
+        return False
+    if str(getattr(public_lower, "name", "")) not in {"ForeArm.L", "ForeArm.R"}:
+        return False
+    if solver_owner.rotation_mode != "QUATERNION":
+        return False
+    hinge_state = _hinge_state_from_basis(public_lower, public_lower.matrix_basis)
+    if hinge_state is None:
+        return False
+    desired_long = float(hinge_state[1])
+    current = solver_owner.rotation_quaternion.copy().normalized()
+    current_long = _signed_twist_angle(current, _RIGPED_LOCAL_AXES["Y"])
+    delta = ((desired_long - current_long + pi) % (2.0 * pi)) - pi
+    if abs(delta) <= 1e-7:
+        return False
+    solver_owner.rotation_quaternion = (
+        current @ Quaternion(_RIGPED_LOCAL_AXES["Y"], delta)
+    ).normalized()
+    return True
+
+
 def _set_replay_limb_fk_feedback_muted(
     rig,
     pose,
@@ -581,10 +609,15 @@ def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
                     continue
 
                 branch_changed = False
+                roll_changed = False
                 if contact_type is ContactKeyType.SLIDING:
                     public_lower = pose.get(public_names[1])
                     if public_lower is not None:
                         branch_changed = _sync_generated_sliding_hinge_branch_from_public_pose(
+                            state_bone,
+                            public_lower,
+                        )
+                        roll_changed = _sync_generated_sliding_forearm_roll_from_public_pose(
                             state_bone,
                             public_lower,
                         )
@@ -600,7 +633,7 @@ def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
                     view_layer is not None
                     and getattr(bpy.context, "scene", None) is scene
                 )
-                if (branch_changed or feedback_changed) and live_context:
+                if (branch_changed or roll_changed or feedback_changed) and live_context:
                     view_layer.update()
 
                 # A reachable near-straight Planted leg can remain stuck at full
@@ -615,7 +648,7 @@ def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
                             bpy.context,
                             capability,
                         )
-                touched = branch_changed or feedback_changed or seed_changed or touched
+                touched = branch_changed or roll_changed or feedback_changed or seed_changed or touched
                 if contact_type not in {ContactKeyType.SLIDING, ContactKeyType.PLANTED}:
                     continue
 
@@ -1408,8 +1441,18 @@ def cancel_fk_single_link_move(context, session: FkSingleLinkMoveSession) -> Non
 
 def _begin_fk_two_bone_move_for_resolution(
     resolved: SemanticMoveResolution,
+    *,
+    allow_sliding_forearm_swivel: bool = False,
 ) -> FkTwoBoneMoveSession:
-    if _fk_joint_move_kind(resolved) != "CHAIN_END":
+    sliding_forearm_swivel = (
+        allow_sliding_forearm_swivel
+        and resolved.contact_type is ContactKeyType.SLIDING
+        and len(resolved.capability.fk_controls) == 2
+        and str(resolved.active_control.target.name) in {"ForeArm.L", "ForeArm.R"}
+        and runtime_control_key(resolved.active_control)
+        == runtime_control_key(resolved.capability.fk_controls[1])
+    )
+    if _fk_joint_move_kind(resolved) != "CHAIN_END" and not sliding_forearm_swivel:
         raise RigpedSemanticMoveError("Current selection is not a supported two-bone FK Move control.")
     capability = resolved.capability
     if len(capability.fk_controls) != 2:
@@ -6385,6 +6428,9 @@ def _direct_rotate_sliding_sync_sessions(
                 start_terminal_state=_capture_control_state(
                     capability.authored_terminal
                 ),
+                start_solver_state=_capture_control_state(
+                    capability.native_ik.solver_owner
+                ),
                 start_ik_state=_capture_control_state(capability.native_ik.ik_target),
                 start_pole_state=_capture_control_state(pole_target),
                 start_pole_angle=float(capability.native_ik.constraint.pole_angle),
@@ -7152,6 +7198,10 @@ def _restore_direct_rotate_sliding_sync_session(
     terminal_ik = capability.terminal_ik_constraint
     native_ik.influence = 0.0
     terminal_ik.influence = 0.0
+    _apply_control_state(
+        capability.native_ik.solver_owner,
+        session.start_solver_state,
+    )
     _apply_control_state(capability.native_ik.ik_target, session.start_ik_state)
     _apply_control_state(pole_target, session.start_pole_state)
     native_ik.pole_angle = session.start_pole_angle
@@ -7304,6 +7354,37 @@ def _apply_direct_rotate_sliding_sync(context, session: SlidingRotateSyncSession
         raise RigpedSemanticMoveError(str(exc)) from exc
 
 
+def _apply_sliding_forearm_long_roll(
+    context,
+    session: SlidingRotateSyncSession,
+    angle: float,
+) -> None:
+    """Roll the native lower IK link while keeping the Hand target orientation."""
+
+    solver_control = session.capability.native_ik.solver_owner
+    if session.start_solver_state.rotation_property != "rotation_quaternion":
+        raise RigpedSemanticMoveError("Sliding ForeArm roll requires quaternion solver rotation.")
+    start_rotation = Quaternion(session.start_solver_state.rotation).normalized()
+    desired_rotation = (
+        start_rotation @ Quaternion(_RIGPED_LOCAL_AXES["Y"], float(angle))
+    ).normalized()
+    _apply_control_state(
+        solver_control,
+        replace(
+            session.start_solver_state,
+            rotation=tuple(float(value) for value in desired_rotation),
+        ),
+        location=False,
+        rotation=True,
+    )
+    context.view_layer.update()
+    _refresh_current_sliding_public_overlays(
+        context,
+        capabilities=(session.capability,),
+        allow_seed=False,
+    )
+
+
 def _restore_direct_rotate_sliding_syncs(
     context,
     sessions: tuple[SlidingRotateSyncSession, ...],
@@ -7335,11 +7416,17 @@ def _forearm_special_z_session(context, active: ResolvedControl, axis_world: Vec
     if abs(float(requested.dot(local_z))) < 0.999:
         return None
     resolved = _selected_semantic_mapping(context)
-    if resolved is None or resolved.contact_type is not ContactKeyType.FREE:
+    if resolved is None or resolved.contact_type not in {
+        ContactKeyType.FREE,
+        ContactKeyType.SLIDING,
+    }:
         return None
     if runtime_control_key(resolved.active_control) != runtime_control_key(active):
         return None
-    return _begin_fk_two_bone_move_for_resolution(resolved)
+    return _begin_fk_two_bone_move_for_resolution(
+        resolved,
+        allow_sliding_forearm_swivel=(resolved.contact_type is ContactKeyType.SLIDING),
+    )
 
 
 def _apply_forearm_special_z_rotation(
@@ -7844,6 +7931,14 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         if active is None or not self._states:
             return
 
+        if self._sliding_syncs:
+            # The angle is absolute from mouse-down. Rebuild its FK/Hand input
+            # from that same snapshot before each Sliding FK-to-IK conversion;
+            # the previous tick's solved public pose is display only.
+            self._restore_preview(context)
+            if abs(self._current_angle) <= 1e-9:
+                return
+
         if self._forearm_special_session is not None:
             if not _apply_forearm_special_z_rotation(
                 context,
@@ -7867,6 +7962,34 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     context,
                     capabilities=self._sliding_guard_capabilities,
                 )
+            return
+
+        if (
+            self._orientation == "LOCAL"
+            and self.axis == "Y"
+            and len(self._states) == 1
+            and len(self._sliding_syncs) == 1
+            and self._states[0].hinge_state is not None
+            and str(active.target.name) in {"ForeArm.L", "ForeArm.R"}
+            and runtime_control_key(active)
+            == runtime_control_key(self._sliding_syncs[0].capability.fk_controls[1])
+        ):
+            self._current_angle = _bounded_hinge_direct_rotate_angle(
+                active,
+                self._states,
+                self._axis_world,
+                self._current_angle,
+            )
+            if abs(self._current_angle) > 1e-9:
+                _apply_sliding_forearm_long_roll(
+                    context,
+                    self._sliding_syncs[0],
+                    self._current_angle,
+                )
+            _refresh_current_sliding_public_overlays(
+                context,
+                capabilities=self._sliding_guard_capabilities,
+            )
             return
 
         hinge_states = tuple(state for state in self._states if state.hinge_state is not None)
