@@ -21,6 +21,7 @@ from .phase4_contact_authoring import (
     execute_contact_replant,
 )
 from .phase4_contact_model import ContactKeyType, ContactPlantSpace
+from .phase4_representation_snap import RepresentationSnapError
 from .rigped_operation_domain import resolve_operation_domain
 from .semantic_adapter import control_context_for_context
 from .trackbar_model import clear_key_selection_for_context
@@ -754,14 +755,42 @@ class BAW_OT_contact(bpy.types.Operator):
         )
         writer_operation_id = f"baw-contact:{trace_operation_id}"
         link_trace_operation(writer_operation_id, trace_operation_id)
-        result = execute_contact_command(
-            context.scene,
-            control_context,
-            operation_id=writer_operation_id,
-            enabled_types=contact_enabled_types(context),
-            plant_space=contact_plant_space(context),
-            contact_point_local=tuple(float(value) for value in context.scene.baw_contact_point_local),
-        )
+        try:
+            result = execute_contact_command(
+                context.scene,
+                control_context,
+                operation_id=writer_operation_id,
+                enabled_types=contact_enabled_types(context),
+                plant_space=contact_plant_space(context),
+                contact_point_local=tuple(
+                    float(value) for value in context.scene.baw_contact_point_local
+                ),
+            )
+        except RepresentationSnapError as exc:
+            # Representation snap is allowed to fail closed for unsupported
+            # singular/reach-limit poses. The writer owns rollback; the UI
+            # boundary must surface that outcome as a normal cancelled command,
+            # not leak a Python exception to the animator.
+            detail = str(exc)
+            trace_event(
+                "OPERATION",
+                "CONTACT_FAIL",
+                operation_id=trace_operation_id,
+                context=context,
+                writer_operation_id=writer_operation_id,
+                diagnostics=(
+                    {
+                        "code": "REPRESENTATION_SNAP_FAILED",
+                        "detail": detail,
+                    },
+                ),
+            )
+            self.report(
+                {"WARNING"},
+                "Contact change cancelled: the target Contact mode cannot preserve "
+                "the current limb pose safely.",
+            )
+            return {"CANCELLED"}
         if not result.applied:
             detail = result.diagnostics[0].detail if result.diagnostics else "Contact authoring failed"
             trace_event(
