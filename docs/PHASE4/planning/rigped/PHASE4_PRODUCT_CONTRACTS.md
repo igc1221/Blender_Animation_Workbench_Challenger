@@ -62,6 +62,26 @@ Alt + Double Click     = semantic Chain/Group remove
 - visible ForeArm/Calf must **not** own Blender native IK solver constraints directly. That experiment was reverted because it caused yellow IK-chain coloration and arm/leg inconsistency.
 - hidden/MCH chains own solver implementation. User-facing controls remain Biped-like and do not expose a separate target/pole workflow.
 
+#### ForeArm / Calf lower-link Rotate
+
+ForeArm.L/R and Calf.L/R share one animator-facing lower-link Rotate contract:
+
+```text
+LOCAL X = hinge / bend
+LOCAL Y = axial roll around the lower-link length axis
+LOCAL Z = limb swivel around the shoulder-to-wrist / hip-to-foot axis
+```
+
+State-specific terminal behavior is explicit:
+
+- **Free LOCAL Z:** the limb swivels, terminal Hand/Foot position stays fixed, and terminal rotation follows the lower link.
+- **Sliding LOCAL Z:** the limb swivels while terminal Hand/Foot **world position and world rotation remain fixed**.
+- **Sliding LOCAL Y:** the lower link rolls while terminal Hand/Foot **world position and world rotation remain fixed**.
+- direct rotation of the terminal Hand/Foot itself remains the operation that may intentionally change terminal orientation.
+- these rules apply symmetrically to left/right arm and leg mappings; sign/mirror implementation details must not change the user-visible contract.
+
+This lower-link contract is a deliberate semantic operation and is an exception to ordinary parent-FK descendant-follow behavior where stated above.
+
 ### Fit
 
 - Fit owns structural proportions, joint placement, and rest hierarchy edits.
