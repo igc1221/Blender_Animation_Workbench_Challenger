@@ -5349,6 +5349,17 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                             capabilities=self._sliding_guard_capabilities,
                         )
                         commit_rigped_auto_writer_results(tuple(deferred_auto_results))
+                        # Committing the direct AUTO writer can immediately
+                        # reevaluate the Action at this same frame. Re-project
+                        # the IK-authoritative public chains after that commit
+                        # so Planted/Sliding visible controls remain welded to
+                        # their hidden result instead of inheriting the moved
+                        # body hierarchy.
+                        _refresh_current_sliding_public_overlays(
+                            context,
+                            capabilities=self._sliding_guard_capabilities,
+                            allow_seed=False,
+                        )
                 except (RuntimeError, ValueError, ReferenceError) as exc:
                     rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
                     _restore_direct_move_states(
