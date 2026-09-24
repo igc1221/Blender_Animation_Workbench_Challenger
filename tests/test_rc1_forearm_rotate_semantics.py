@@ -216,13 +216,33 @@ def test_rc1_sliding_lower_local_x_is_effective_without_removing_forbidden_axis_
     assert "or sliding_lower_full_four" in preview[supported:guard]
     assert "full_four_local_x_axes: dict[int, Vector] = {}" in preview
     assert "full_four_local_x = (" in preview
-    assert 'fallback_branch = -1 if lower_name.startswith("ForeArm.") else 1' in preview
-    assert "if abs(hinge_angle) <= radians(0.25)" in preview
+    assert "_lower_link_local_x_branch_sign(" in preview
     assert 'bend_axis = basis_world @ _RIGPED_LOCAL_AXES["X"]' in preview
     assert "bend_axis *= float(branch_sign)" in preview
     assert "semantic_bend_axis = full_four_local_x_axes.get(pointer)" in preview
     assert "mirror_opposites=False" in preview
     assert "pin_terminal=not sliding_lower_transports_terminal" in preview[sliding_sync:]
+
+
+def test_rc1_full_four_local_x_gesture_uses_active_semantic_bend_hemisphere() -> None:
+    invoke = _source(_method("BAW_OT_rigped_direct_rotate_axis", "invoke"))
+    assert "full_four_local_x_gesture = (" in invoke
+    assert 'selected_lower_names' in invoke
+    assert '("Calf.L", "Calf.R", "ForeArm.L", "ForeArm.R")' in invoke
+    assert "_hinge_state_from_basis(" in invoke
+    assert "axis = Vector(axis) * _lower_link_local_x_branch_sign(" in invoke
+    assert invoke.index("full_four_local_x_gesture = (") < invoke.index(
+        "pivot = _control_pivot_world(active)"
+    )
+
+    branch_sign = _evaluate_function(
+        "_lower_link_local_x_branch_sign",
+        {"radians": math.radians},
+    )
+    assert branch_sign("ForeArm.R", 0.0) == -1.0
+    assert branch_sign("Calf.L", 0.0) == 1.0
+    assert branch_sign("ForeArm.R", math.radians(8.0)) == 1.0
+    assert branch_sign("Calf.L", math.radians(-8.0)) == -1.0
 
 
 def test_rc1_local_z_sign_is_captured_once_from_frozen_tangent_agreement() -> None:
@@ -313,6 +333,17 @@ def test_rc1_damped_global_projection_step_stays_bounded_near_singularity() -> N
     near_singular = solve_step(0.8378, 0.8378, 0.999999, 0.3)
     assert all(math.isfinite(value) for value in near_singular)
     assert max(abs(value) for value in near_singular) < 0.5
+
+
+def test_rc1_sliding_replay_restores_signed_calf_branch_from_public_pose() -> None:
+    replay = _source(_function("_sync_generated_sliding_hinge_branch_from_public_pose"))
+    assert '"MCH_Calf.L"' in replay
+    assert '"MCH_Calf.R"' in replay
+    assert "_generated_lower_hinge_x_angle(quaternion)" in replay
+    assert 'fallback = -1 if name.startswith("MCH_ForeArm.") else 1' in replay
+    assert "abs(angle) <= radians(0.01)" in replay
+    assert "elif name in" not in replay
+    assert "branch_sign = 1" not in replay
 
 
 def test_rc1_builder_forearm_roll_comes_from_chain_geometry_with_safe_fallback() -> None:

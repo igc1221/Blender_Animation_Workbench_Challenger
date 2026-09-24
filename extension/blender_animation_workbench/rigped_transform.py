@@ -46,6 +46,7 @@ from .phase4_representation_snap import (
     SnapDirection,
     _canonical_generated_rigped_pole,
     _derived_pole_angle,
+    _generated_lower_hinge_x_angle,
     _generated_rigped_hinge_branch,
     _initial_pole_solution,
     build_representation_snap_payload,
@@ -480,14 +481,15 @@ def _sync_generated_sliding_hinge_branch_from_public_pose(
     """Restore the generated hidden hinge branch from evaluated authored FK data."""
 
     name = str(getattr(solver_owner, "name", ""))
-    if name in {"MCH_ForeArm.L", "MCH_ForeArm.R"}:
-        quaternion = public_lower.matrix_basis.to_quaternion().normalized()
-        angle = 2.0 * atan2(float(quaternion.x), float(quaternion.w))
-        angle = ((angle + pi) % (2.0 * pi)) - pi
-        fallback = -1
-        branch_sign = fallback if abs(angle) <= radians(0.25) else (1 if angle > 0.0 else -1)
-    elif name in {"MCH_Calf.L", "MCH_Calf.R"}:
-        branch_sign = 1
+    if name in {"MCH_ForeArm.L", "MCH_ForeArm.R", "MCH_Calf.L", "MCH_Calf.R"}:
+        quaternion = public_lower.matrix_basis.to_quaternion()
+        angle = _generated_lower_hinge_x_angle(quaternion)
+        fallback = -1 if name.startswith("MCH_ForeArm.") else 1
+        branch_sign = (
+            fallback
+            if abs(angle) <= radians(0.01)
+            else (1 if angle > 0.0 else -1)
+        )
     else:
         return False
     return bool(configure_generated_rigped_ik_hinge_branch(solver_owner, branch_sign))
@@ -6224,6 +6226,19 @@ def _hinge_state_from_basis(
     )
 
 
+def _lower_link_local_x_branch_sign(
+    pose_bone_name: str,
+    hinge_angle: float,
+) -> float:
+    """Return the semantic bend hemisphere for a Rigped lower-link LOCAL X."""
+
+    name = str(pose_bone_name)
+    fallback = -1.0 if name.startswith("ForeArm.") else 1.0
+    if abs(float(hinge_angle)) <= radians(0.25):
+        return fallback
+    return 1.0 if float(hinge_angle) > 0.0 else -1.0
+
+
 def _hinge_axis_weights(
     active: ResolvedControl,
     state: DirectRotateControlState,
@@ -8049,6 +8064,30 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         )
         if axis is None or axis.length <= 1e-9:
             return {"CANCELLED"}
+
+        selected_lower_names = tuple(
+            sorted(
+                str(control.target.name)
+                for control in controls
+                if isinstance(control.target, bpy.types.PoseBone)
+            )
+        )
+        full_four_local_x_gesture = (
+            str(context.scene.transform_orientation_slots[0].type) == "LOCAL"
+            and self.axis == "X"
+            and selected_lower_names
+            == ("Calf.L", "Calf.R", "ForeArm.L", "ForeArm.R")
+        )
+        if full_four_local_x_gesture:
+            active_hinge_state = _hinge_state_from_basis(
+                active.target,
+                active.target.matrix_basis,
+            )
+            if active_hinge_state is not None:
+                axis = Vector(axis) * _lower_link_local_x_branch_sign(
+                    str(active.target.name),
+                    float(active_hinge_state[0]),
+                )
         pivot = _control_pivot_world(active)
         if self.axis == "FREE":
             region_data = getattr(context, "region_data", None)
@@ -8715,12 +8754,10 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 if not isinstance(pose_bone, bpy.types.PoseBone) or hinge_state is None:
                     continue
                 lower_name = str(pose_bone.name)
-                fallback_branch = -1 if lower_name.startswith("ForeArm.") else 1
                 hinge_angle = float(hinge_state[0])
-                branch_sign = (
-                    fallback_branch
-                    if abs(hinge_angle) <= radians(0.25)
-                    else (1 if hinge_angle > 0.0 else -1)
+                branch_sign = _lower_link_local_x_branch_sign(
+                    lower_name,
+                    hinge_angle,
                 )
                 basis_world = (
                     state.control.owner_object.matrix_world.to_3x3()

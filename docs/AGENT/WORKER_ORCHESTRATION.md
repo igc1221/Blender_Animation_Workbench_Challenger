@@ -1,6 +1,6 @@
 # Blender Animation Workbench — Worker Orchestration
 
-> Updated: **2026-09-22 21:27 KST**
+> Updated: **2026-09-24 22:00 KST**
 > Authority: **Main / Sol**
 > Purpose: turn model-specific strengths/weaknesses into better task packets and lower Main repair cost.
 
@@ -40,7 +40,7 @@ Before every substantive Luna launch:
 3. pass those ids explicitly through `awb_skills`;
 4. after the response, process every worker-learning candidate as APPLY / DEFER / REJECT;
 5. if APPLY targets a skill, the next relevant Luna request must include that skill;
-6. only after response consumption + learning review may the lane be finalized/cleaned and reused.
+6. only after response consumption + learning review may the lane be cleaned and reused; use the registered Named Task `awb-luna-lanes-clean` as the canonical cleanup path rather than direct per-lane cleanup calls.
 
 Default mapping:
 - implementation / semantic architecture / bounded source changes → `worker-implementation`;
@@ -64,6 +64,8 @@ Choose the worker for the job rather than filling idle capacity.
 - risk if the worker over-expands scope or misses a frozen contract
 
 If the task does not benefit from parallelism, Main does it directly.
+
+**Repeated-debug reset invariant:** once Main triggers the three-attempt rollback-first reset for a bug family, no worker may continue reasoning from the contaminated failed-patch stack. New implementation/analysis packets must name the last-known-good checkpoint and the replay boundary immediately before the defect. Prior failed diffs may be supplied only as rejected-hypothesis evidence. The worker must propose a different root-cause path and must not ask the user to rebuild already-captured setup/keying.
 
 Worker availability/quota is a live runtime condition, not a durable quality grade. Check current availability before dispatch; if a provider or Luna is quota-limited/unavailable, skip it without rewriting its quality profile.
 

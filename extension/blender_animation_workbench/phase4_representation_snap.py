@@ -649,6 +649,40 @@ def _nearest_angle_about(angle: float, center: float) -> float:
     return float(center + ((float(angle) - center + math.pi) % (2.0 * math.pi) - math.pi))
 
 
+def _generated_lower_hinge_x_angle(quaternion: Any) -> float:
+    """Extract lower-link local-X hinge twist after removing local-Y roll."""
+
+    q = quaternion.normalized()
+    w, x, y, z = (
+        float(q.w),
+        float(q.x),
+        float(q.y),
+        float(q.z),
+    )
+    if w < 0.0:
+        w, x, y, z = (-w, -x, -y, -z)
+
+    # Match Rigped's authored decomposition: remove the long-axis Y twist
+    # first, then read the signed X twist from the remaining swing/hinge
+    # rotation. Reading raw quaternion.x/w is not invariant under compound
+    # LOCAL-Z swivel + Y roll and can select the opposite knee branch.
+    long_norm = math.hypot(w, y)
+    if long_norm > 1e-12:
+        twist_w = w / long_norm
+        twist_y = y / long_norm
+        without_long_w = w * twist_w + y * twist_y
+        without_long_x = x * twist_w + z * twist_y
+    else:
+        without_long_w = w
+        without_long_x = x
+
+    if without_long_w < 0.0:
+        without_long_w = -without_long_w
+        without_long_x = -without_long_x
+    angle = 2.0 * math.atan2(without_long_x, without_long_w)
+    return ((angle + math.pi) % (2.0 * math.pi)) - math.pi
+
+
 def _generated_rigped_hinge_branch(capability: LimbRepresentationCapability) -> int | None:
     """Resolve the authored FK lower-joint branch for the generated hidden solver.
 
@@ -667,12 +701,15 @@ def _generated_rigped_hinge_branch(capability: LimbRepresentationCapability) -> 
     else:
         return None
 
-    quaternion = capability.fk_controls[1].target.matrix_basis.to_quaternion().normalized()
-    components = (float(quaternion.x), float(quaternion.y), float(quaternion.z))
-    component = components[axis_index]
-    angle = 2.0 * math.atan2(component, float(quaternion.w))
-    angle = ((angle + math.pi) % (2.0 * math.pi)) - math.pi
-    if abs(angle) <= math.radians(0.25):
+    quaternion = capability.fk_controls[1].target.matrix_basis.to_quaternion()
+    if axis_index != 0:
+        return None
+    angle = _generated_lower_hinge_x_angle(quaternion)
+    # Only an effectively straight authored hinge is branch-ambiguous.
+    # A wider dead-zone can misclassify a real near-straight bend onto the
+    # opposite solver branch (for example Calf.L at -0.2349 degrees), which
+    # produces millimeter-scale FK->IK residuals even though the pose is valid.
+    if abs(angle) <= math.radians(0.01):
         return fallback
     return 1 if angle > 0.0 else -1
 
@@ -682,9 +719,12 @@ def _snap_pose_diagnostic_summary(matrix: Any) -> dict[str, tuple[float, ...]]:
 
     translation = matrix.to_translation()
     rotation = matrix.to_quaternion().normalized()
+    to_scale = getattr(matrix, "to_scale", None)
+    scale = to_scale() if callable(to_scale) else (1.0, 1.0, 1.0)
     return {
         "position": tuple(float(component) for component in translation),
         "rotation_quaternion": tuple(float(component) for component in rotation),
+        "scale": tuple(float(component) for component in scale),
     }
 
 
@@ -702,6 +742,8 @@ def _trace_fk_to_ik_residual_failure(
     residuals: SnapResiduals,
     scale: float,
     position_tolerance: float,
+    actual_result: tuple[Any, ...] | None = None,
+    actual_terminal: Any | None = None,
 ) -> None:
     """Trace only the bounded FK→IK residual failure snapshot; never author state."""
 
@@ -720,6 +762,16 @@ def _trace_fk_to_ik_residual_failure(
                 _snap_pose_diagnostic_summary(matrix) for matrix in expected_result[:2]
             ),
             expected_terminal=_snap_pose_diagnostic_summary(expected_terminal),
+            post_solve_result=(
+                tuple(_snap_pose_diagnostic_summary(matrix) for matrix in actual_result[:2])
+                if actual_result is not None
+                else None
+            ),
+            post_solve_terminal=(
+                _snap_pose_diagnostic_summary(actual_terminal)
+                if actual_terminal is not None
+                else None
+            ),
             post_write_ik_target=_snap_pose_diagnostic_summary(ik_target.target.matrix),
             post_write_pole_target=(
                 _snap_pose_diagnostic_summary(pole_target.target.matrix)
@@ -1189,6 +1241,119 @@ def execute_representation_snap(
         else:
             raise RepresentationSnapError(f"Unsupported I12 constraint field: {field!r}")
 
+
+    def refine_fk_to_ik_target_radially(
+        current_residuals: SnapResiduals,
+        *,
+        scale: float,
+        position_tolerance: float,
+    ) -> SnapResiduals:
+        """Close small near-straight native IK position error without relaxing gates."""
+
+        from mathutils import Vector
+
+        if len(expected_result) < 2:
+            return current_residuals
+        if (
+            current_residuals.max_rotation_error > _rotation_tolerance()
+            or current_residuals.terminal_rotation_error > _rotation_tolerance()
+        ):
+            return current_residuals
+
+        root = expected_result[0].to_translation()
+        terminal = expected_terminal.to_translation()
+        axis = Vector(terminal - root)
+        if axis.length <= 1e-9:
+            return current_residuals
+        axis.normalize()
+
+        target = capability.native_ik.ik_target
+        base_target = target.target.matrix.copy()
+        base_joint = capability.result_controls[1].target.matrix.to_translation().copy()
+        expected_joint = expected_result[1].to_translation()
+        joint_error = Vector(expected_joint - base_joint)
+        if joint_error.length <= 1e-12:
+            return current_residuals
+
+        probe_step = max(1e-6, float(position_tolerance) * 2.0)
+        probe = base_target.copy()
+        probe.translation = base_target.to_translation() - axis * probe_step
+        stage_write("probe near-straight IK target closure")
+        target.target.matrix = probe
+        bpy.context.view_layer.update()
+
+        probe_joint = capability.result_controls[1].target.matrix.to_translation().copy()
+        response = Vector(probe_joint - base_joint) / probe_step
+        denominator = float(response.length_squared)
+        if denominator <= 1e-12 or not math.isfinite(denominator):
+            stage_write("restore unrefined IK target")
+            target.target.matrix = base_target
+            bpy.context.view_layer.update()
+            return current_residuals
+
+        correction = float(response.dot(joint_error)) / denominator
+        correction_bound = max(
+            float(position_tolerance) * 2.0,
+            float(current_residuals.max_position_error) * 2.0,
+            abs(float(scale)) * 1e-7,
+        )
+        correction = max(-correction_bound, min(correction_bound, correction))
+        if not math.isfinite(correction) or abs(correction) <= 1e-12:
+            stage_write("restore unrefined IK target")
+            target.target.matrix = base_target
+            bpy.context.view_layer.update()
+            return current_residuals
+
+        refined = base_target.copy()
+        refined.translation = base_target.to_translation() - axis * correction
+        stage_write("refine near-straight IK target closure")
+        target.target.matrix = refined
+        bpy.context.view_layer.update()
+        refined_residuals = _residuals_for_expected(
+            capability,
+            expected_result,
+            expected_terminal,
+        )
+
+        before_score = max(
+            current_residuals.max_position_error,
+            current_residuals.terminal_position_error,
+        )
+        after_score = max(
+            refined_residuals.max_position_error,
+            refined_residuals.terminal_position_error,
+        )
+        try:
+            from .debug_trace import trace_event
+
+            trace_event(
+                "CONTACT",
+                "FK_TO_IK_RADIAL_REFINEMENT",
+                operation_id=str(plan.operation_id),
+                context=bpy.context,
+                mapping_id=str(payload.mapping_id),
+                probe_step=float(probe_step),
+                joint_error=tuple(float(value) for value in joint_error),
+                response=tuple(float(value) for value in response),
+                correction=float(correction),
+                correction_bound=float(correction_bound),
+                before_chain_position=float(current_residuals.max_position_error),
+                before_terminal_position=float(current_residuals.terminal_position_error),
+                after_chain_position=float(refined_residuals.max_position_error),
+                after_terminal_position=float(refined_residuals.terminal_position_error),
+                before_score=float(before_score),
+                after_score=float(after_score),
+            )
+        except Exception:  # noqa: BLE001, S110 -- diagnostics must never affect snap rollback
+            pass
+        if after_score < before_score:
+            return refined_residuals
+
+        stage_write("restore non-improving IK target refinement")
+        target.target.matrix = base_target
+        bpy.context.view_layer.update()
+        return current_residuals
+
     try:
         hook.enter(OperationStage.PLAN, operation=plan.operation_id)
         if payload.direction is SnapDirection.FK_TO_IK:
@@ -1288,6 +1453,12 @@ def execute_representation_snap(
                 expected_result,
                 expected_terminal,
             )
+            if not _residuals_within_tolerance(residuals, scale=residual_scale):
+                residuals = refine_fk_to_ik_target_radially(
+                    residuals,
+                    scale=residual_scale,
+                    position_tolerance=position_tolerance,
+                )
         if not _residuals_within_tolerance(residuals, scale=residual_scale):
             if payload.direction is SnapDirection.FK_TO_IK:
                 _trace_fk_to_ik_residual_failure(
@@ -1303,6 +1474,11 @@ def execute_representation_snap(
                     residuals=residuals,
                     scale=residual_scale,
                     position_tolerance=position_tolerance,
+                    actual_result=tuple(
+                        control.target.matrix.copy()
+                        for control in capability.result_controls
+                    ),
+                    actual_terminal=capability.result_terminal.target.matrix.copy(),
                 )
             raise RepresentationSnapError(
                 "I12_RESIDUAL_GATE_FAILED: "

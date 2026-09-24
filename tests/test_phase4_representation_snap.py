@@ -401,15 +401,56 @@ class _BranchQuaternion:
         return self
 
 
+class _CompoundBranchQuaternion:
+    def __init__(self, values: tuple[float, float, float, float]):
+        self.w, self.x, self.y, self.z = values
+
+    def normalized(self):
+        magnitude = math.sqrt(
+            self.w * self.w
+            + self.x * self.x
+            + self.y * self.y
+            + self.z * self.z
+        )
+        return _CompoundBranchQuaternion(
+            (
+                self.w / magnitude,
+                self.x / magnitude,
+                self.y / magnitude,
+                self.z / magnitude,
+            )
+        )
+
+
+def test_generated_lower_hinge_branch_ignores_compound_roll_swivel_sign_alias() -> None:
+    # This quaternion has positive raw x/w, but after removing its local-Y
+    # long-axis roll the actual X hinge twist is negative. LOCAL-Z swivel can
+    # produce exactly this kind of compound lower-link basis.
+    quaternion = _CompoundBranchQuaternion(
+        (
+            0.3920977512483196,
+            0.16953066546789985,
+            -0.7333283468172737,
+            0.5289123204145149,
+        )
+    )
+    raw_angle = 2.0 * math.atan2(quaternion.x, quaternion.w)
+    hinge_angle = representation_snap._generated_lower_hinge_x_angle(quaternion)
+    assert raw_angle > 0.0
+    assert hinge_angle < 0.0
+
+
 @pytest.mark.parametrize(
     ("solver_name", "angle", "expected"),
     (
         ("MCH_Calf.L", math.radians(40.0), 1),
         ("MCH_Calf.R", math.radians(-40.0), -1),
-        ("MCH_Calf.L", math.radians(0.1), 1),
+        ("MCH_Calf.L", math.radians(-0.2349), -1),
+        ("MCH_Calf.L", 0.0, 1),
         ("MCH_ForeArm.L", math.radians(40.0), 1),
         ("MCH_ForeArm.R", math.radians(-40.0), -1),
-        ("MCH_ForeArm.L", math.radians(0.1), -1),
+        ("MCH_ForeArm.L", math.radians(0.1), 1),
+        ("MCH_ForeArm.L", 0.0, -1),
     ),
 )
 def test_generated_rigped_hinge_branch_tracks_authored_fk_and_uses_mapping_fallback(
