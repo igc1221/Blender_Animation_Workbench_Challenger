@@ -156,19 +156,20 @@ def test_rc1_sliding_lower_local_x_is_effective_without_removing_forbidden_axis_
     assert "pin_terminal=not sliding_lower_local_x" in preview[sliding_sync:]
 
 
-def test_rc1_local_z_sign_is_captured_once_by_lower_link_role() -> None:
-    invoke = _source(_method("BAW_OT_rigped_direct_rotate_axis", "invoke"))
-    assert "self._forearm_special_axis_sign = (" in invoke
-    assert '-1.0 if active_name in {"ForeArm.L", "ForeArm.R"} else 1.0' in invoke
-    assert "_lower_link_local_z_swivel_sign" not in invoke
-    assert "_lower_link_z_degenerate" not in invoke
+def test_rc1_local_z_sign_is_captured_once_from_frozen_joint_tangent() -> None:
+    sign = _source(_function("_lower_limb_special_z_axis_sign"))
+    assert "joint_offset = Vector(session.joint_world) - root" in sign
+    assert "input_tangent = input_axis.cross(joint_offset)" in sign
+    assert "semantic_tangent = semantic_axis.cross(joint_offset)" in sign
+    assert "abs(alignment) <= 1e-4" in sign
+    assert "return 1.0 if alignment > 0.0 else -1.0" in sign
 
-    # Multi-selection keeps the already-accepted left/right mirror parity while
-    # applying the same stable ForeArm role inversion. Calf keeps its old sign.
-    assert 'if lower_name in {"ForeArm.L", "ForeArm.R"}' in invoke
-    assert 'active_name.endswith(".L")' in invoke
-    assert 'lower_name.endswith(".R")' in invoke
-    assert "axis_sign *= -1.0" in invoke
+    invoke = _source(_method("BAW_OT_rigped_direct_rotate_axis", "invoke"))
+    assert "self._forearm_special_axis_sign = _lower_limb_special_z_axis_sign(" in invoke
+    assert "_mapped_direct_rotate_axis(" in invoke
+    assert 'axis_name="Z"' in invoke
+    assert 'if lower_name in {"ForeArm.L", "ForeArm.R"}' not in invoke
+    assert "axis_sign *= -1.0" not in invoke
 
     preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
     assert "self._current_angle * self._forearm_special_axis_sign" in preview
