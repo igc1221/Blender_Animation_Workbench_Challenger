@@ -1,8 +1,11 @@
 import inspect
+import math
 import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+
+import pytest
 
 PACKAGE_PATH = Path(__file__).parents[1] / "extension" / "blender_animation_workbench"
 PACKAGE_NAME = "baw_phase4_representation_snap_tests"
@@ -385,6 +388,114 @@ def test_generated_rigped_transient_hinge_branch_uses_builder_authority() -> Non
     source = inspect.getsource(representation_snap._configure_generated_rigped_hinge_branch)
     assert "configure_generated_rigped_ik_hinge_branch" in source
     assert "math.radians(179.0)" not in source
+
+
+class _BranchQuaternion:
+    def __init__(self, angle: float):
+        self.w = math.cos(angle * 0.5)
+        self.x = math.sin(angle * 0.5)
+        self.y = 0.0
+        self.z = 0.0
+
+    def normalized(self):
+        return self
+
+
+@pytest.mark.parametrize(
+    ("solver_name", "angle", "expected"),
+    (
+        ("MCH_Calf.L", math.radians(40.0), 1),
+        ("MCH_Calf.R", math.radians(-40.0), -1),
+        ("MCH_Calf.L", math.radians(0.1), 1),
+        ("MCH_ForeArm.L", math.radians(40.0), 1),
+        ("MCH_ForeArm.R", math.radians(-40.0), -1),
+        ("MCH_ForeArm.L", math.radians(0.1), -1),
+    ),
+)
+def test_generated_rigped_hinge_branch_tracks_authored_fk_and_uses_mapping_fallback(
+    solver_name: str,
+    angle: float,
+    expected: int,
+) -> None:
+    authored_fk = SimpleNamespace(
+        matrix_basis=SimpleNamespace(to_quaternion=lambda: _BranchQuaternion(angle)),
+        # A conflicting evaluated matrix proves branch selection reads the FK
+        # authored basis instead of the dormant IK/result representation.
+        matrix=SimpleNamespace(to_quaternion=lambda: _BranchQuaternion(-angle)),
+    )
+    capability = SimpleNamespace(
+        native_ik=SimpleNamespace(
+            solver_owner=SimpleNamespace(target=SimpleNamespace(name=solver_name))
+        ),
+        fk_controls=(None, SimpleNamespace(target=authored_fk)),
+    )
+
+    assert representation_snap._generated_rigped_hinge_branch(capability) == expected
+
+
+class _DiagnosticQuaternion(tuple):
+    def __new__(cls, values):
+        return super().__new__(cls, values)
+
+    def normalized(self):
+        return self
+
+
+class _DiagnosticMatrix:
+    def __init__(self, position, rotation=(1.0, 0.0, 0.0, 0.0)):
+        self._position = position
+        self._rotation = _DiagnosticQuaternion(rotation)
+
+    def to_translation(self):
+        return self._position
+
+    def to_quaternion(self):
+        return self._rotation
+
+
+def test_fk_to_ik_residual_trace_is_bounded_and_contains_snap_comparison(monkeypatch) -> None:
+    captured = []
+    trace_module = ModuleType(f"{PACKAGE_NAME}.debug_trace")
+    trace_module.trace_event = lambda channel, event, **data: captured.append(
+        (channel, event, data)
+    )
+    monkeypatch.setitem(sys.modules, trace_module.__name__, trace_module)
+
+    expected_matrix = _DiagnosticMatrix((1.0, 2.0, 3.0))
+    expected_terminal = _DiagnosticMatrix((4.0, 5.0, 6.0))
+    ik_target_matrix = _DiagnosticMatrix((4.0, 5.0, 6.0))
+    pole_matrix = _DiagnosticMatrix((7.0, 8.0, 9.0))
+    representation_snap._trace_fk_to_ik_residual_failure(
+        plan=SimpleNamespace(operation_id="i12-test-operation"),
+        payload=SimpleNamespace(mapping_id="LEG.R"),
+        context=object(),
+        hinge_branch=-1,
+        expected_result=(expected_matrix, expected_matrix, expected_matrix),
+        expected_terminal=expected_terminal,
+        ik_target=SimpleNamespace(target=SimpleNamespace(matrix=ik_target_matrix)),
+        pole_target=SimpleNamespace(target=SimpleNamespace(matrix=pole_matrix)),
+        pole_angle=0.25,
+        residuals=representation_snap.SnapResiduals(0.0002, 0.0003, 0.0004, 0.0005),
+        scale=5.0,
+        position_tolerance=0.000016,
+    )
+
+    assert len(captured) == 1
+    channel, event, data = captured[0]
+    assert (channel, event) == ("CONTACT", "FK_TO_IK_SNAP_RESIDUAL_FAILURE")
+    assert data["operation_id"] == "i12-test-operation"
+    assert data["mapping_id"] == "LEG.R"
+    assert data["selected_hinge_branch"] == -1
+    assert len(data["expected_result"]) == 2
+    assert data["expected_terminal"]["position"] == (4.0, 5.0, 6.0)
+    assert data["post_write_ik_target"]["position"] == (4.0, 5.0, 6.0)
+    assert data["post_write_pole_target"]["position"] == (7.0, 8.0, 9.0)
+    assert data["residuals"] == {
+        "chain_position": 0.0002,
+        "chain_rotation": 0.0003,
+        "terminal_position": 0.0004,
+        "terminal_rotation": 0.0005,
+    }
 
 
 def test_generated_rigped_canonical_pole_preserves_solved_gauge() -> None:

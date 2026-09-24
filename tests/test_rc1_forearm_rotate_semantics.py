@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import math
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,13 @@ def _source(node: ast.AST) -> str:
     segment = ast.get_source_segment(SOURCE, node)
     assert segment is not None
     return segment
+
+
+def _evaluate_function(name: str, namespace: dict[str, object]) -> object:
+    scope = dict(namespace)
+    module = ast.Module(body=[_function(name)], type_ignores=[])
+    exec(compile(module, str(TRANSFORM_PATH), "exec"), scope)  # noqa: S102
+    return scope[name]
 
 
 def test_rc1_lower_limb_axis_contract_is_x_hinge_y_roll_z_swivel() -> None:
@@ -129,21 +137,97 @@ def test_rc1_forbidden_hinge_axis_skips_sliding_fk_to_ik_sync_preview() -> None:
         early_return,
     )
     assert guard < early_return < sliding_sync
-    assert "hinge_axis_effective = sliding_global_projection or any(" in preview
+    assert (
+        "hinge_axis_effective = sliding_global_projection or sliding_lower_local_x or any("
+        in preview
+    )
     assert "self._current_angle = 0.0" in preview[early_return:sliding_sync]
+
+
+def test_rc1_sliding_lower_local_x_is_effective_without_removing_forbidden_axis_guard() -> None:
+    preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
+    supported = preview.index("sliding_lower_local_x = (")
+    guard = preview.index("if hinge_states and not generic_states and not hinge_axis_effective:")
+    early_return = preview.index("self._current_angle = 0.0", guard)
+    sliding_sync = preview.index("_apply_direct_rotate_sliding_syncs(", early_return)
+    assert supported < guard < early_return < sliding_sync
+    assert 'self._orientation == "LOCAL"' in preview[supported:guard]
+    assert 'self.axis == "X"' in preview[supported:guard]
+    assert "pin_terminal=not sliding_lower_local_x" in preview[sliding_sync:]
+
+
+def test_rc1_local_z_sign_is_captured_once_by_lower_link_role() -> None:
+    invoke = _source(_method("BAW_OT_rigped_direct_rotate_axis", "invoke"))
+    assert "self._forearm_special_axis_sign = (" in invoke
+    assert '-1.0 if active_name in {"ForeArm.L", "ForeArm.R"} else 1.0' in invoke
+    assert "_lower_link_local_z_swivel_sign" not in invoke
+    assert "_lower_link_z_degenerate" not in invoke
+
+    # Multi-selection keeps the already-accepted left/right mirror parity while
+    # applying the same stable ForeArm role inversion. Calf keeps its old sign.
+    assert 'if lower_name in {"ForeArm.L", "ForeArm.R"}' in invoke
+    assert 'active_name.endswith(".L")' in invoke
+    assert 'lower_name.endswith(".R")' in invoke
+    assert "axis_sign *= -1.0" in invoke
+
+    preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
+    assert "self._current_angle * self._forearm_special_axis_sign" in preview
+    assert "terminal_follows_second=not bool(self._sliding_syncs)" in preview
 
 
 def test_rc1_sliding_global_rotate_projects_to_swivel_and_axial_roll() -> None:
     projector = _source(_function("_project_global_rotation_to_sliding_lower_dofs"))
     assert "swivel_axis = end - root" in projector
-    assert "lower_axis" in projector
-    assert "swivel_angle" in projector
-    assert "roll_angle" in projector
+    assert "roll_generator = post_swivel_rotation @ local_y" in projector
+    assert "_damped_two_axis_rotation_step(" in projector
+    assert "swivel_bound = pi - radians(0.25)" in projector
+    assert "roll_minimum" in projector
+    assert "roll_maximum" in projector
+    assert "largest_step > 0.35" in projector
+    assert "_quaternion_rotation_vector_components(" in projector
+    assert "start_radial" not in projector
+    assert "desired_radial" not in projector
+    assert "atan2(" not in projector
 
     preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
     assert "if hinge_states and not sliding_global_projection:" in preview
     assert "_apply_solved_two_bone_fk_pose(" in preview
     assert '_RIGPED_LOCAL_AXES["Y"]' in preview
+    assert "sliding_global_projection_diagnostics=projection_diagnostics" in _source(
+        _method("BAW_OT_rigped_direct_rotate_axis", "modal")
+    )
+    assert "_sliding_global_projected_dofs: tuple[tuple[str, float, float], ...]" in SOURCE
+
+
+def test_rc1_rotation_vector_is_continuous_across_pi() -> None:
+    rotation_vector = _evaluate_function(
+        "_quaternion_rotation_vector_components",
+        {"atan2": math.atan2, "sqrt": math.sqrt},
+    )
+    assert callable(rotation_vector)
+
+    def axis_quaternion(angle: float) -> tuple[float, float, float, float]:
+        return (math.cos(angle * 0.5), math.sin(angle * 0.5), 0.0, 0.0)
+
+    before = rotation_vector(axis_quaternion(math.pi - 0.01))
+    after = rotation_vector(axis_quaternion(math.pi + 0.01))
+    assert isinstance(before, tuple) and isinstance(after, tuple)
+    assert math.isclose(before[0], math.pi - 0.01, abs_tol=1e-9)
+    assert math.isclose(after[0], math.pi + 0.01, abs_tol=1e-9)
+    assert math.isclose(after[0] - before[0], 0.02, abs_tol=1e-9)
+
+
+def test_rc1_damped_projection_is_proportional_and_bounded_near_singularity() -> None:
+    solve_step = _evaluate_function("_damped_two_axis_rotation_step", {})
+    assert callable(solve_step)
+    small = solve_step(0.1, 0.0, 0.0, 0.05)
+    doubled = solve_step(0.2, 0.0, 0.0, 0.05)
+    assert math.isclose(doubled[0], small[0] * 2.0, rel_tol=1e-10)
+    assert math.isclose(doubled[1], small[1] * 2.0, abs_tol=1e-10)
+
+    near_singular = solve_step(0.8378, 0.8378, 0.999999, 0.3)
+    assert all(math.isfinite(value) for value in near_singular)
+    assert max(abs(value) for value in near_singular) < 0.5
 
 
 def test_rc1_builder_forearm_roll_comes_from_chain_geometry_with_safe_fallback() -> None:

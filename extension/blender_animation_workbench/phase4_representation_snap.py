@@ -662,7 +662,8 @@ def _generated_rigped_hinge_branch(capability: LimbRepresentationCapability) -> 
         axis_index = 0
         fallback = -1
     elif solver_name in {"MCH_Calf.L", "MCH_Calf.R"}:
-        return 1
+        axis_index = 0
+        fallback = 1
     else:
         return None
 
@@ -674,6 +675,71 @@ def _generated_rigped_hinge_branch(capability: LimbRepresentationCapability) -> 
     if abs(angle) <= math.radians(0.25):
         return fallback
     return 1 if angle > 0.0 else -1
+
+
+def _snap_pose_diagnostic_summary(matrix: Any) -> dict[str, tuple[float, ...]]:
+    """Return a small pose-space transform summary for bounded I12 tracing."""
+
+    translation = matrix.to_translation()
+    rotation = matrix.to_quaternion().normalized()
+    return {
+        "position": tuple(float(component) for component in translation),
+        "rotation_quaternion": tuple(float(component) for component in rotation),
+    }
+
+
+def _trace_fk_to_ik_residual_failure(
+    *,
+    plan: Any,
+    payload: RepresentationSnapPayload,
+    context: Any,
+    hinge_branch: int | None,
+    expected_result: tuple[Any, ...],
+    expected_terminal: Any,
+    ik_target: Any,
+    pole_target: Any,
+    pole_angle: float | None,
+    residuals: SnapResiduals,
+    scale: float,
+    position_tolerance: float,
+) -> None:
+    """Trace only the bounded FK→IK residual failure snapshot; never author state."""
+
+    try:
+        from .debug_trace import trace_event
+
+        trace_event(
+            "CONTACT",
+            "FK_TO_IK_SNAP_RESIDUAL_FAILURE",
+            operation_id=str(plan.operation_id),
+            context=context,
+            mapping_id=str(payload.mapping_id),
+            selected_hinge_branch=hinge_branch,
+            hinge_branch_source="authored_fk_lower_link_local_x_with_mapping_fallback",
+            expected_result=tuple(
+                _snap_pose_diagnostic_summary(matrix) for matrix in expected_result[:2]
+            ),
+            expected_terminal=_snap_pose_diagnostic_summary(expected_terminal),
+            post_write_ik_target=_snap_pose_diagnostic_summary(ik_target.target.matrix),
+            post_write_pole_target=(
+                _snap_pose_diagnostic_summary(pole_target.target.matrix)
+                if pole_target is not None
+                else None
+            ),
+            post_write_pole_angle=(float(pole_angle) if pole_angle is not None else None),
+            residuals={
+                "chain_position": float(residuals.max_position_error),
+                "chain_rotation": float(residuals.max_rotation_error),
+                "terminal_position": float(residuals.terminal_position_error),
+                "terminal_rotation": float(residuals.terminal_rotation_error),
+            },
+            scale=float(scale),
+            position_tolerance=float(position_tolerance),
+            rotation_tolerance=float(_rotation_tolerance()),
+            pose_space="armature_pose",
+        )
+    except Exception:  # noqa: BLE001, S110 -- diagnostics must never affect snap rollback
+        pass
 
 
 def _configure_generated_rigped_hinge_branch(owner, branch_sign: int) -> bool:
@@ -1210,6 +1276,21 @@ def execute_representation_snap(
         residual_scale = _character_scale(capability)
         position_tolerance = _position_tolerance(residual_scale)
         if not _residuals_within_tolerance(residuals, scale=residual_scale):
+            if payload.direction is SnapDirection.FK_TO_IK:
+                _trace_fk_to_ik_residual_failure(
+                    plan=plan,
+                    payload=payload,
+                    context=bpy.context,
+                    hinge_branch=hinge_branch,
+                    expected_result=expected_result,
+                    expected_terminal=expected_terminal,
+                    ik_target=capability.native_ik.ik_target,
+                    pole_target=capability.native_ik.pole_target,
+                    pole_angle=pole_angle,
+                    residuals=residuals,
+                    scale=residual_scale,
+                    position_tolerance=position_tolerance,
+                )
             raise RepresentationSnapError(
                 "I12_RESIDUAL_GATE_FAILED: "
                 f"mapping={payload.mapping_id} "
