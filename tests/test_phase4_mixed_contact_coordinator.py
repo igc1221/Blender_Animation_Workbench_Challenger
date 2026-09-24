@@ -9,6 +9,12 @@ SOURCE_PATH = (
     / "blender_animation_workbench"
     / "phase4_contact_authoring.py"
 )
+CONTACT_UI_PATH = (
+    Path(__file__).parents[1]
+    / "extension"
+    / "blender_animation_workbench"
+    / "phase4_contact_ui.py"
+)
 
 
 def _tree() -> ast.Module:
@@ -222,3 +228,21 @@ def test_contact_reevaluation_preserves_unrelated_hidden_contact_authority() -> 
     assert "excluded_mapping_ids=(intent.mapping_id,)" in single_source
     assert "preserve_pose_bones=_unrelated_contact_hidden_pose_bones(" in batch_source
     assert "item.intent.mapping_id for item in prepared_tuple" in batch_source
+
+def test_contact_batch_prepare_converts_representation_snap_error_to_diagnostic() -> None:
+    batch = _function("execute_contact_batch_intent_plan")
+    source = ast.get_source_segment(
+        SOURCE_PATH.read_text(encoding="utf-8"),
+        batch,
+    )
+    assert source is not None
+    assert "RepresentationSnapError" in source
+    assert '"CONTACT_BATCH_PREPARE_FAIL"' in source
+    assert '"I20_LIMB_PREPARE_REJECTED"' in source
+
+
+def test_contact_ui_traces_unexpected_command_exception() -> None:
+    source = CONTACT_UI_PATH.read_text(encoding="utf-8")
+    assert "trace_exception" in source
+    assert '"CONTACT_EXCEPTION"' in source
+    assert "except (RuntimeError, ValueError, ReferenceError) as exc:" in source

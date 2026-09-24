@@ -98,10 +98,16 @@ def test_rc1_sliding_lower_long_roll_is_shared_by_forearm_and_calf() -> None:
     assert "_apply_sliding_lower_long_roll(" in preview
 
 
-def test_rc1_sliding_rotate_keeps_terminal_target_pinned_unless_terminal_is_selected() -> None:
+def test_rc1_sliding_rotate_terminal_policy_is_axis_specific() -> None:
     source = _source(_function("_apply_direct_rotate_sliding_syncs"))
-    assert "if session.terminal_selected" in source
+    assert "pin_terminal: bool = True" in source
+    assert "if session.terminal_selected or not pin_terminal" in source
     assert "else session.start_ik_state" in source
+
+    preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
+    assert 'self._orientation == "LOCAL"' in preview
+    assert 'self.axis == "X"' in preview
+    assert "pin_terminal=not sliding_lower_local_x" in preview
 
 
 def test_rc1_forbidden_hinge_axis_bounds_to_zero_instead_of_preserving_requested_angle() -> None:
@@ -114,7 +120,7 @@ def test_rc1_forbidden_hinge_axis_bounds_to_zero_instead_of_preserving_requested
 
 def test_rc1_forbidden_hinge_axis_skips_sliding_fk_to_ik_sync_preview() -> None:
     preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
-    guard = preview.index("hinge_axis_effective = any(")
+    guard = preview.index("sliding_global_projection = bool(")
     early_return = preview.index(
         "if hinge_states and not generic_states and not hinge_axis_effective:"
     )
@@ -123,7 +129,21 @@ def test_rc1_forbidden_hinge_axis_skips_sliding_fk_to_ik_sync_preview() -> None:
         early_return,
     )
     assert guard < early_return < sliding_sync
+    assert "hinge_axis_effective = sliding_global_projection or any(" in preview
     assert "self._current_angle = 0.0" in preview[early_return:sliding_sync]
+
+
+def test_rc1_sliding_global_rotate_projects_to_swivel_and_axial_roll() -> None:
+    projector = _source(_function("_project_global_rotation_to_sliding_lower_dofs"))
+    assert "swivel_axis = end - root" in projector
+    assert "lower_axis" in projector
+    assert "swivel_angle" in projector
+    assert "roll_angle" in projector
+
+    preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
+    assert "if hinge_states and not sliding_global_projection:" in preview
+    assert "_apply_solved_two_bone_fk_pose(" in preview
+    assert '_RIGPED_LOCAL_AXES["Y"]' in preview
 
 
 def test_rc1_builder_forearm_roll_comes_from_chain_geometry_with_safe_fallback() -> None:
