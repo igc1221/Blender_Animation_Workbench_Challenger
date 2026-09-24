@@ -1310,27 +1310,42 @@ This is a protected RC1 regression slice. It was difficult to stabilize and must
 - Before declaring any four-limb repair complete, rerun at least paired Calf GLOBAL X/Y/Z and paired ForeArm GLOBAL X/Y/Z as a regression sanity check if the shared GLOBAL path was touched.
 - The visible LOCAL gizmo may legitimately follow the active/last-selected bone. Multi-selection semantics must not infer that every selected limb should rotate around that active bone's anatomical axis.
 
-### Current four-limb blockers at handoff
+### Current four-limb status / rollback-first LOCAL Z blocker — 2026-09-24
 
-1. **Four-limb LOCAL X semantic contract — OPEN**
+1. **Four-limb LOCAL X — USER PASS**
    - Selection: `Calf.L + Calf.R + ForeArm.L + ForeArm.R`.
-   - All four now respond, but the intended contract is stricter: in both **FREE and Sliding**, the same LOCAL X gesture must bend/flex each limb about its own anatomical hinge axis, independent of which bone is active and supplies the visible gizmo.
-   - Current in-source `full_four_local_x` / `full_four_local_x_axes` attempt is **not USER-passed**. Treat it as WIP, not authority.
+   - FREE LOCAL X USER PASS: each limb bends on its own anatomical flex axis; active ForeArm vs active Calf no longer reverses the user's mouse-direction sense.
+   - Free -> Sliding transition USER-confirmed after the C repair below.
+   - Sliding LOCAL X USER PASS: all four bend on their own axes with natural mouse direction.
+   - Preserve this accepted behavior while fixing LOCAL Z.
 
-2. **C / Free -> Sliding Contact blocker — REPRODUCED / OPEN**
-   - C input itself is received. Failure is not the keymap.
-   - Contact preparation rolls back with `I20_LIMB_PREPARE_REJECTED / I12_RESIDUAL_GATE_FAILED` on Calf.L mapping `f147c624-bf93-4c96-8dde-8acca3c1a96b`.
-   - Reproduced residual: scale `5.87880115`; frozen position tolerance `1.88121637e-05`; chain position residual `1.96355426e-05`; terminal residual `3.34224774e-06`; rotations 0.
-   - Latest repeated failure session: `d9611da889a742e7b5666100a922006b`. Earlier detailed diagnostic session: `7e133dfe3f81492491a567a31082036f`.
-   - Failure-only trace event `FK_TO_IK_SNAP_RESIDUAL_FAILURE` records selected hinge branch, expected chain/terminal, IK target, pole target/angle and residuals.
-   - The attempted one-shot extra depsgraph evaluation before the **unchanged** residual gate did **not** fix the live USER FIRST failure. Do not mark it solved just because I12 runtime still passes.
-   - Historical symptom remains relevant: deleting/re-authoring existing keys could make C work, so same-frame/existing-key evaluated-state interaction remains a prime investigation area.
+2. **C / Free -> Sliding — ROOT FIXED / REGRESSION PROTECTED**
+   - Original live blocker was `I20_LIMB_PREPARE_REJECTED / I12_RESIDUAL_GATE_FAILED`.
+   - First reproduced case was a micrometer-scale FK->IK residual and was fixed with bounded finite-difference radial IK target refinement in `phase4_representation_snap.py`; frozen tolerances were not widened.
+   - A later live failure exposed a separate near-straight branch issue: an authored Calf bend near `-0.2349°` was incorrectly collapsed into the positive fallback by a `0.25°` dead zone. The branch ambiguity threshold was reduced to an effectively-straight `0.01°`, preserving the actual authored sign.
+   - Fitted golden regressions cover the original four-limb existing-key transition and the near-straight Calf case.
+   - Current verification after rollback: `awb-check` **487 PASS + Ruff**, I12 runtime PASS, I16 runtime PASS.
 
-3. **Immediate next-session order**
-   - First fix the reproduced Contact residual failure without widening frozen tolerances.
-   - Then verify four-limb FREE LOCAL X semantic bend with different active-last bones.
-   - Then C -> Sliding and verify four-limb Sliding LOCAL X semantic bend.
-   - Only after those pass continue remaining four-limb LOCAL/GLOBAL axes and broad RC1 soak.
+3. **Four-limb Sliding LOCAL Z — OPEN / current blocker**
+   - User clarification: ForeArms swivel naturally in LOCAL, while Calves visually move as if driven by a common/world-like axis instead of each leg's intended local swivel behavior.
+   - Several local repair attempts did not close the visual defect. Those later LOCAL-Z-only behavior/diagnostic edits are **not authority** and were removed.
+   - Do not continue sign/axis exception stacking from the failed state.
+
+4. **Mandatory rollback-first debug boundary**
+   - Product recovery checkpoint: **`031df6b590ac0ae0f3d4bcc53953d8c05ebe3f17`**.
+   - Latest handoff/replay checkpoint: **`bb38ceac258579e3671c963658c7e66a299b1aa2`**.
+   - Pre-defect replay: `debug/regressions/rc1_four_limb_local_z_prebug_replay.json`.
+   - This replay contains 11 accepted actions from the prior user path and intentionally excludes the failing mixed four-limb LOCAL Z gesture.
+   - Replay PASS in `RECORDED_RESULT`; after replay, automated setup leaves `Calf.L/R + ForeArm.L/R` selected, `ForeArm.L` active, orientation `LOCAL`, and all four lower limbs in Sliding / IK influence 1.
+   - Next bug-fix attempt must begin from this clean checkpoint and derive a **different root-cause hypothesis**. Reproduce setup with replay; the user performs only the final LOCAL Z drag/visual judgment.
+   - If the next attempt fails, return to this same checkpoint/replay boundary rather than advancing the failed working state.
+   - Canonical procedure: `docs/AGENT/AWB_DEBUG_FLIGHT_RECORDER.md` and `docs/AGENT/BLENDER_USER_FIRST_FINAL_TEST_PROTOCOL.md`.
+
+5. **Protected regressions**
+   - Do not regress the paired GLOBAL DLS projection checkpoint `b5b9a8dc21ee1920ff9520bf4701c0f5f2ce150f`.
+   - Do not widen Contact residual tolerances.
+   - Do not reinterpret LOCAL gizmo display following the active bone as a requirement that all selected limbs share that active bone's anatomical axis.
+   - Logs prove route/state/commit; only USER FIRST can pass visual direction, smoothness, and intuitive swivel behavior.
 
 ## 6. Explicit non-goals until this plan closes
 
@@ -1349,8 +1364,8 @@ Do not start or redesign:
 
 ## 7. Immediate next action
 
-**RC1 is OPEN.** Preserve paired lower-link USER PASS checkpoint `b5b9a8dc21ee1920ff9520bf4701c0f5f2ce150f` and do not regress the accepted Calf/ForeArm Sliding GLOBAL X/Y/Z solver behavior.
+**RC1 is OPEN.** Preserve paired lower-link USER PASS checkpoint `b5b9a8dc21ee1920ff9520bf4701c0f5f2ce150f`, product recovery checkpoint `031df6b590ac0ae0f3d4bcc53953d8c05ebe3f17`, and the accepted four-limb FREE/Sliding LOCAL X behavior.
 
-Next session begins with the reproduced four-limb Contact blocker: C reaches Contact authoring but Free -> Sliding fails on Calf.L with `I12_RESIDUAL_GATE_FAILED`. Resolve that failure without widening frozen tolerance, then USER FIRST four-limb FREE LOCAL X and Sliding LOCAL X with each limb bending on its own flex axis independent of active-bone gizmo orientation.
+Next session begins from the rollback-first LOCAL Z boundary. Use `debug/regressions/rc1_four_limb_local_z_prebug_replay.json` in `RECORDED_RESULT` mode to rebuild the accepted setup, then automatically select `Calf.L/R + ForeArm.L/R`, make `ForeArm.L` active, set orientation `LOCAL`, and confirm all four mappings remain Sliding. The user performs only the final mixed four-limb LOCAL Z drag and judges whether the Calves swivel in their intended leg-local sense rather than a common/world-like direction.
 
-Do not declare the four-limb blocker family closed until those paths pass and paired GLOBAL regression behavior remains intact.
+Do not stack another sign/axis exception onto the rejected LOCAL Z attempts. Re-derive the root cause from the clean checkpoint/replay state; if the attempt fails, return to the same recovery boundary. Do not widen Contact tolerances or touch the protected paired GLOBAL DLS projection unless direct evidence requires it.
