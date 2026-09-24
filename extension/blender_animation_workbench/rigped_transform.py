@@ -7668,29 +7668,38 @@ def _lower_limb_special_z_axis_sign(
     session: FkTwoBoneMoveSession,
     input_axis_world: Vector,
 ) -> float:
-    """Map LOCAL-Z input onto the frozen semantic swivel direction once per gesture."""
+    """Map LOCAL-Z input onto the frozen semantic swivel axis once per gesture."""
 
-    root = Vector(session.root_world)
-    joint_offset = Vector(session.joint_world) - root
-    semantic_axis = Vector(session.end_world) - root
-    input_axis = Vector(input_axis_world)
-    if (
-        joint_offset.length <= 1e-9
-        or semantic_axis.length <= 1e-9
-        or input_axis.length <= 1e-9
-    ):
+    semantic_axis = tuple(
+        float(end) - float(root)
+        for root, end in zip(session.root_world, session.end_world, strict=True)
+    )
+    input_axis = tuple(float(component) for component in input_axis_world)
+    input_length = sqrt(sum(component * component for component in input_axis))
+    semantic_length = sqrt(sum(component * component for component in semantic_axis))
+    if input_length <= 1e-9 or semantic_length <= 1e-9:
         return 1.0
-    semantic_axis.normalize()
-    input_axis.normalize()
-    input_tangent = input_axis.cross(joint_offset)
-    semantic_tangent = semantic_axis.cross(joint_offset)
-    if input_tangent.length <= 1e-7 or semantic_tangent.length <= 1e-7:
-        return 1.0
-    input_tangent.normalize()
-    semantic_tangent.normalize()
-    alignment = float(input_tangent.dot(semantic_tangent))
+    input_axis = tuple(component / input_length for component in input_axis)
+    semantic_axis = tuple(component / semantic_length for component in semantic_axis)
+    alignment = sum(
+        input_component * semantic_component
+        for input_component, semantic_component in zip(
+            input_axis,
+            semantic_axis,
+            strict=True,
+        )
+    )
     if abs(alignment) <= 1e-4:
-        return 1.0
+        # Near perpendicular there is no meaningful dot-product hemisphere.
+        # Use each frozen axis's dominant world component as a deterministic
+        # tie-break; the captured result is then held for the full gesture.
+        input_dominant = max(range(3), key=lambda index: abs(input_axis[index]))
+        semantic_dominant = max(range(3), key=lambda index: abs(semantic_axis[index]))
+        input_sign = 1.0 if input_axis[input_dominant] >= 0.0 else -1.0
+        semantic_sign = (
+            1.0 if semantic_axis[semantic_dominant] >= 0.0 else -1.0
+        )
+        return input_sign * semantic_sign
     return 1.0 if alignment > 0.0 else -1.0
 
 
@@ -7720,6 +7729,210 @@ def _apply_lower_limb_special_z_rotation(
     if applied and update:
         context.view_layer.update()
     return applied
+
+
+def _quaternion_rotation_vector_components(
+    rotation: tuple[float, float, float, float],
+) -> tuple[float, float, float]:
+    """Return a branch-preserving rotation vector for an (w, x, y, z) quaternion."""
+
+    w, x, y, z = (float(component) for component in rotation)
+    magnitude = sqrt(w * w + x * x + y * y + z * z)
+    if magnitude <= 1e-12:
+        return (0.0, 0.0, 0.0)
+    w, x, y, z = (component / magnitude for component in (w, x, y, z))
+    vector_length = sqrt(x * x + y * y + z * z)
+    if vector_length <= 1e-12:
+        return (0.0, 0.0, 0.0)
+    angle = 2.0 * atan2(vector_length, w)
+    scale = angle / vector_length
+    return (x * scale, y * scale, z * scale)
+
+
+def _damped_two_axis_rotation_step(
+    swivel_error: float,
+    roll_error: float,
+    generator_alignment: float,
+    damping: float,
+) -> tuple[float, float]:
+    """Solve one bounded-size DLS update from two unit world generators."""
+
+    alignment = max(-1.0, min(1.0, float(generator_alignment)))
+    damping_sq = max(1e-8, float(damping) * float(damping))
+    diagonal = 1.0 + damping_sq
+    determinant = diagonal * diagonal - alignment * alignment
+    if determinant <= 1e-12:
+        return (0.0, 0.0)
+    first = (
+        diagonal * float(swivel_error) - alignment * float(roll_error)
+    ) / determinant
+    second = (
+        diagonal * float(roll_error) - alignment * float(swivel_error)
+    ) / determinant
+    return (float(first), float(second))
+
+
+@dataclass(frozen=True, slots=True)
+class SlidingGlobalRotateProjection:
+    swivel_angle: float
+    roll_angle: float
+    residual_radians: float
+    conditioning: float
+
+
+def _project_global_rotation_to_sliding_lower_dofs(
+    session: FkTwoBoneMoveSession,
+    state: DirectRotateControlState,
+    axis_world: Vector,
+    angle: float,
+) -> SlidingGlobalRotateProjection:
+    """Project one GLOBAL Rotate gesture onto Sliding swivel + axial-roll DOF.
+
+    Refine the two actual world rotation generators from the zero-DOF branch.
+    The swivel is around root-to-terminal; axial roll is around the lower-link
+    local Y after that swivel. Damping leaves unreachable orientation as a
+    measured residual instead of amplifying a near-singular inverse.
+    """
+
+    requested_axis = Vector(axis_world)
+    if requested_axis.length <= 1e-9:
+        return SlidingGlobalRotateProjection(0.0, 0.0, 0.0, 0.0)
+    requested_axis.normalize()
+    requested_rotation = Quaternion(requested_axis, float(angle))
+
+    root = Vector(session.root_world)
+    end = Vector(session.end_world)
+    swivel_axis = end - root
+    if swivel_axis.length <= 1e-9:
+        return SlidingGlobalRotateProjection(
+            0.0,
+            0.0,
+            min(2.0 * pi, abs(float(angle))),
+            0.0,
+        )
+    swivel_axis.normalize()
+
+    owner_world3 = session.second_control.owner_object.matrix_world.to_3x3()
+    start_world_basis = (
+        owner_world3 @ session.second_start_matrix.to_3x3()
+    ).normalized()
+    start_world_rotation = start_world_basis.to_quaternion().normalized()
+    desired_world_rotation = (
+        requested_rotation @ start_world_rotation
+    ).normalized()
+
+    pose_bone = state.control.target
+    hinge_state = state.hinge_state
+    limits = (
+        _RIGPED_HINGE_JOINT_LIMITS.get(str(pose_bone.name))
+        if isinstance(pose_bone, bpy.types.PoseBone)
+        else None
+    )
+    if hinge_state is None or limits is None:
+        return SlidingGlobalRotateProjection(
+            0.0,
+            0.0,
+            min(2.0 * pi, abs(float(angle))),
+            0.0,
+        )
+
+    swivel_bound = pi - radians(0.25)
+    start_long = float(hinge_state[1])
+    roll_limit = float(limits[3])
+    roll_minimum = -roll_limit - start_long
+    roll_maximum = roll_limit - start_long
+    local_y = _RIGPED_LOCAL_AXES["Y"]
+    swivel_angle = 0.0
+    roll_angle = 0.0
+    conditioning = 0.0
+
+    for _iteration in range(24):
+        swivel_world_rotation = Quaternion(swivel_axis, swivel_angle)
+        post_swivel_rotation = (
+            swivel_world_rotation @ start_world_rotation
+        ).normalized()
+        roll_generator = post_swivel_rotation @ local_y
+        if roll_generator.length <= 1e-9:
+            break
+        roll_generator.normalize()
+        alignment = max(
+            -1.0,
+            min(1.0, float(swivel_axis.dot(roll_generator))),
+        )
+        alignment_magnitude = abs(alignment)
+        conditioning = sqrt(
+            max(0.0, 1.0 - alignment_magnitude)
+            / max(1e-12, 1.0 + alignment_magnitude)
+        )
+
+        predicted_world_rotation = (
+            post_swivel_rotation
+            @ Quaternion(local_y, roll_angle)
+        ).normalized()
+        error_rotation = (
+            desired_world_rotation @ predicted_world_rotation.conjugated()
+        ).normalized()
+        error = Vector(
+            _quaternion_rotation_vector_components(
+                tuple(float(component) for component in error_rotation)
+            )
+        )
+        if error.length <= 1e-6:
+            break
+
+        damping = 0.02 + (1.0 - conditioning) * 0.28
+        swivel_step, roll_step = _damped_two_axis_rotation_step(
+            float(swivel_axis.dot(error)),
+            float(roll_generator.dot(error)),
+            alignment,
+            damping,
+        )
+        largest_step = max(abs(swivel_step), abs(roll_step))
+        if largest_step > 0.35:
+            scale = 0.35 / largest_step
+            swivel_step *= scale
+            roll_step *= scale
+
+        next_swivel = _clamp_scalar(
+            swivel_angle + swivel_step,
+            -swivel_bound,
+            swivel_bound,
+        )
+        next_roll = _clamp_scalar(
+            roll_angle + roll_step,
+            roll_minimum,
+            roll_maximum,
+        )
+        if (
+            abs(next_swivel - swivel_angle) <= 1e-8
+            and abs(next_roll - roll_angle) <= 1e-8
+        ):
+            break
+        swivel_angle = next_swivel
+        roll_angle = next_roll
+
+    final_swivel_rotation = Quaternion(swivel_axis, swivel_angle)
+    final_post_swivel_rotation = (
+        final_swivel_rotation @ start_world_rotation
+    ).normalized()
+    final_rotation = (
+        final_post_swivel_rotation @ Quaternion(local_y, roll_angle)
+    ).normalized()
+    final_error = (
+        desired_world_rotation @ final_rotation.conjugated()
+    ).normalized()
+    residual = Vector(
+        _quaternion_rotation_vector_components(
+            tuple(float(component) for component in final_error)
+        )
+    ).length
+
+    return SlidingGlobalRotateProjection(
+        float(swivel_angle),
+        float(roll_angle),
+        min(2.0 * pi, max(0.0, float(residual))),
+        max(0.0, min(1.0, float(conditioning))),
+    )
 
 
 class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
@@ -7766,8 +7979,13 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
     _auto_contact_batch_plan: RigpedAutoContactBatchPlan | None = None
     _deferred_auto_contact_mapping_ids: tuple[str, ...] = ()
     _forearm_special_session: FkTwoBoneMoveSession | None = None
-    _forearm_special_axis_sign: float = 1.0
+    _single_lower_link_z_axis_sign: float = 1.0
     _lower_link_z_sessions: tuple[tuple[FkTwoBoneMoveSession, float, bool], ...] = ()
+    _sliding_global_lower_sessions: tuple[
+        tuple[FkTwoBoneMoveSession, SlidingRotateSyncSession], ...
+    ] = ()
+    _sliding_global_projected_dofs: tuple[tuple[str, float, float], ...] = ()
+    _sliding_global_projection_diagnostics: tuple[tuple[str, float, float], ...] = ()
     _trace_operation_id: str | None = None
 
     trackball_radius_px: FloatProperty(
@@ -7881,7 +8099,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             )
         self._states = tuple(states)
         self._forearm_special_session = None
-        self._forearm_special_axis_sign = 1.0
+        self._single_lower_link_z_axis_sign = 1.0
         self._lower_link_z_sessions = ()
         try:
             self._forearm_special_session = _lower_limb_special_z_session(
@@ -7895,13 +8113,11 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             self._active = None
             return {"CANCELLED"}
         if self._forearm_special_session is not None:
-            # LOCAL Z is an animator-facing swivel semantic. Compare the frozen
-            # input-axis joint tangent with the frozen semantic swivel tangent
-            # once at gesture start; never feed evaluated preview geometry back
-            # into the sign.
-            self._forearm_special_axis_sign = _lower_limb_special_z_axis_sign(
-                self._forearm_special_session,
-                Vector(axis),
+            self._single_lower_link_z_axis_sign = (
+                _lower_limb_special_z_axis_sign(
+                    self._forearm_special_session,
+                    Vector(axis),
+                )
             )
         if self._forearm_special_session is not None and len(self._states) > 1:
             # The dedicated single-ForeArm swivel preview cannot own a multi
@@ -7934,9 +8150,49 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             )
         )
         lower_link_set = {"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}
-        # Sliding GLOBAL lower-link Rotate uses the same bounded hinge + axial-roll
-        # projection as Free. Sliding then transports the changed terminal into its
-        # hidden IK target, avoiding the near-straight swivel/roll singularity.
+        self._sliding_global_lower_sessions = ()
+        self._sliding_global_projected_dofs = ()
+        self._sliding_global_projection_diagnostics = ()
+        if (
+            str(context.scene.transform_orientation_slots[0].type) == "GLOBAL"
+            and self.axis in {"X", "Y", "Z"}
+            and len(self._states) == len(self._sliding_syncs)
+            and len(self._states) == len(lower_link_resolutions)
+            and len(lower_link_names) == len(self._states)
+            and all(name in lower_link_set for name in lower_link_names)
+        ):
+            sync_by_mapping = {
+                str(session.capability.native_ik.mapping_id): session
+                for session in self._sliding_syncs
+            }
+            global_rows: list[
+                tuple[FkTwoBoneMoveSession, SlidingRotateSyncSession]
+            ] = []
+            try:
+                for resolved in lower_link_resolutions:
+                    if resolved.contact_type is not ContactKeyType.SLIDING:
+                        global_rows = []
+                        break
+                    sync_session = sync_by_mapping.get(
+                        str(resolved.capability.native_ik.mapping_id)
+                    )
+                    if sync_session is None:
+                        global_rows = []
+                        break
+                    global_rows.append(
+                        (
+                            _begin_fk_two_bone_move_for_resolution(
+                                resolved,
+                                allow_sliding_lower_swivel=True,
+                            ),
+                            sync_session,
+                        )
+                    )
+            except RigpedSemanticMoveError as exc:
+                _report_operator_error(self, context, exc)
+                global_rows = []
+            if len(global_rows) == len(self._states):
+                self._sliding_global_lower_sessions = tuple(global_rows)
 
         if (
             str(context.scene.transform_orientation_slots[0].type) == "LOCAL"
@@ -7980,16 +8236,13 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                                     resolved.contact_type is ContactKeyType.SLIDING
                                 ),
                             )
-                            mapped_axis = _mapped_direct_rotate_axis(
-                                active,
-                                lower_control,
-                                Vector(axis),
-                                mirror_opposites=True,
-                                axis_name="Z",
-                            )
+                            lower_local_z = (
+                                lower_control.owner_object.matrix_world
+                                @ lower_control.target.matrix
+                            ).to_3x3().normalized().col[2]
                             axis_sign = _lower_limb_special_z_axis_sign(
                                 special_session,
-                                mapped_axis,
+                                Vector(lower_local_z),
                             )
                             multi_rows.append(
                                 (
@@ -8366,7 +8619,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             if not _apply_lower_limb_special_z_rotation(
                 context,
                 self._forearm_special_session,
-                self._current_angle * self._forearm_special_axis_sign,
+                self._current_angle * self._single_lower_link_z_axis_sign,
                 terminal_follows_second=not bool(self._sliding_syncs),
             ):
                 raise RigpedSemanticMoveError(
@@ -8406,24 +8659,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             self._orientation == "LOCAL"
             and self.axis == "X"
             and len(self._states) == len(self._sliding_syncs)
-            and bool(sliding_lower_names)
-            and all(
-                name in {"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}
-                for name in sliding_lower_names
-            )
-        )
-        sliding_lower_global = (
-            self._orientation == "GLOBAL"
-            and self.axis in {"X", "Y", "Z"}
-            and len(self._states) == len(self._sliding_syncs)
-            and bool(sliding_lower_names)
-            and all(
-                name in {"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}
-                for name in sliding_lower_names
-            )
-        )
-        sliding_lower_transports_terminal = (
-            sliding_lower_local_x or sliding_lower_global
+            and (sliding_lower_single or sliding_lower_pair)
         )
         if (
             self._orientation == "LOCAL"
@@ -8518,7 +8754,8 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         # receives the same visible/world rotation direction. LOCAL retains the
         # anatomical opposite-side mirror behavior for paired controls.
         mirror_opposites = self._orientation == "LOCAL" and self.axis != "FREE"
-        hinge_axis_effective = sliding_lower_local_x or any(
+        sliding_global_projection = bool(self._sliding_global_lower_sessions)
+        hinge_axis_effective = sliding_global_projection or sliding_lower_local_x or any(
             abs(weight) > 1e-7
             for state in hinge_states
             for weight in _hinge_axis_weights(
@@ -8541,7 +8778,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         # gizmo orientation. Hand/Foot and broad ball joints follow the actual
         # rotate axis and stop at the first invalid swing/twist pose along that
         # path, avoiding both Euler coupling and quaternion re-entry flips.
-        if hinge_states:
+        if hinge_states and not sliding_global_projection:
             self._current_angle = _bounded_hinge_direct_rotate_angle(
                 active,
                 hinge_states,
@@ -8600,6 +8837,130 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             resolved_desired_by_bone[pointer] = desired
             return desired
 
+        if self._sliding_global_lower_sessions:
+            projected_rows = []
+            any_swivel = False
+            for special_session, sync_session in self._sliding_global_lower_sessions:
+                second_target = special_session.second_control.target
+                if not isinstance(second_target, bpy.types.PoseBone):
+                    raise RigpedSemanticMoveError(
+                        "Sliding GLOBAL lower-link Rotate lost its PoseBone target."
+                    )
+                state = state_by_bone.get(int(second_target.as_pointer()))
+                if state is None:
+                    raise RigpedSemanticMoveError(
+                        "Sliding GLOBAL lower-link Rotate lost its selected lower-link state."
+                    )
+                projection = _project_global_rotation_to_sliding_lower_dofs(
+                    special_session,
+                    state,
+                    self._axis_world,
+                    self._current_angle,
+                )
+                projected_rows.append(
+                    (special_session, sync_session, projection)
+                )
+                if abs(projection.swivel_angle) <= 1e-9:
+                    continue
+                root = Vector(special_session.root_world)
+                end = Vector(special_session.end_world)
+                swivel_axis = end - root
+                if swivel_axis.length <= 1e-9:
+                    raise RigpedSemanticMoveError(
+                        "Sliding GLOBAL lower-link Rotate found a collapsed swivel axis."
+                    )
+                swivel_axis.normalize()
+                desired_joint = root + Quaternion(
+                    swivel_axis,
+                    projection.swivel_angle,
+                ) @ (
+                    Vector(special_session.joint_world) - root
+                )
+                if not _apply_solved_two_bone_fk_pose(
+                    special_session,
+                    desired_joint,
+                    end,
+                    terminal_follows_second=False,
+                ):
+                    raise RigpedSemanticMoveError(
+                        "Sliding GLOBAL lower-link Rotate could not apply its projected swivel."
+                    )
+                any_swivel = True
+
+            self._sliding_global_projected_dofs = tuple(
+                (
+                    str(row[0].second_control.target.name),
+                    float(row[2].swivel_angle),
+                    float(row[2].roll_angle),
+                )
+                for row in projected_rows
+            )
+            self._sliding_global_projection_diagnostics = tuple(
+                (
+                    str(row[0].second_control.target.name),
+                    float(row[2].residual_radians),
+                    float(row[2].conditioning),
+                )
+                for row in projected_rows[:4]
+            )
+
+            if any_swivel:
+                context.view_layer.update()
+                _apply_direct_rotate_sliding_syncs(
+                    context,
+                    tuple(row[1] for row in projected_rows),
+                )
+
+            roll_capabilities = []
+            for _special_session, sync_session, projection in projected_rows:
+                roll_angle = projection.roll_angle
+                if abs(roll_angle) <= 1e-9:
+                    continue
+                if sync_session.start_solver_state.rotation_property != "rotation_quaternion":
+                    raise RigpedSemanticMoveError(
+                        "Sliding GLOBAL lower-link roll requires quaternion solver rotation."
+                    )
+                solver_control = sync_session.capability.native_ik.solver_owner
+                start_rotation = Quaternion(
+                    sync_session.start_solver_state.rotation
+                ).normalized()
+                desired_rotation = (
+                    start_rotation
+                    @ Quaternion(_RIGPED_LOCAL_AXES["Y"], roll_angle)
+                ).normalized()
+                _apply_control_state(
+                    solver_control,
+                    replace(
+                        sync_session.start_solver_state,
+                        rotation=tuple(float(value) for value in desired_rotation),
+                    ),
+                    location=False,
+                    rotation=True,
+                )
+                roll_capabilities.append(sync_session.capability)
+
+            if roll_capabilities:
+                context.view_layer.update()
+                _refresh_current_sliding_public_overlays(
+                    context,
+                    capabilities=tuple(roll_capabilities),
+                    allow_seed=False,
+                )
+
+            if self._sliding_dependency_guards:
+                _refresh_frozen_sliding_dependency_overlays(
+                    context,
+                    self._sliding_dependency_guards,
+                    operation_id=self._trace_operation_id,
+                    phase="ROTATE_PREVIEW",
+                )
+            else:
+                _refresh_current_sliding_public_overlays(
+                    context,
+                    capabilities=self._sliding_guard_capabilities,
+                )
+            return
+
         for state in state_by_bone.values():
             pose_bone = state.control.target
             assert isinstance(pose_bone, bpy.types.PoseBone)
@@ -8622,7 +8983,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         _apply_direct_rotate_sliding_syncs(
             context,
             self._sliding_syncs,
-            pin_terminal=not sliding_lower_transports_terminal,
+            pin_terminal=not sliding_lower_local_x,
         )
         if self._sliding_dependency_guards:
             _refresh_frozen_sliding_dependency_overlays(
@@ -9020,6 +9381,8 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 clear_key_selection_for_context(context)
                 context.scene.baw_has_selected_key = False
 
+            projected_dofs = self._sliding_global_projected_dofs
+            projection_diagnostics = self._sliding_global_projection_diagnostics
             self._states = ()
             self._sliding_syncs = ()
             self._sliding_guard_capabilities = ()
@@ -9047,6 +9410,8 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 route="DIRECT_ROTATE",
                 axis=self.axis,
                 final_angle=angle,
+                sliding_global_projected_dofs=projected_dofs,
+                sliding_global_projection_diagnostics=projection_diagnostics,
                 auto_key=bool(getattr(context.scene, "baw_auto_key_enabled", False)),
                 replay_action={
                     "kind": "ROTATE",
