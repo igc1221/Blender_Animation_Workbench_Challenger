@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import math
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,13 +39,6 @@ def _source(node: ast.AST) -> str:
     segment = ast.get_source_segment(SOURCE, node)
     assert segment is not None
     return segment
-
-
-def _evaluate_function(name: str, namespace: dict[str, object]) -> object:
-    scope = dict(namespace)
-    module = ast.Module(body=[_function(name)], type_ignores=[])
-    exec(compile(module, str(TRANSFORM_PATH), "exec"), scope)  # noqa: S102
-    return scope[name]
 
 
 def test_rc1_lower_limb_axis_contract_is_x_hinge_y_roll_z_swivel() -> None:
@@ -115,7 +107,12 @@ def test_rc1_sliding_rotate_terminal_policy_is_axis_specific() -> None:
     preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
     assert 'self._orientation == "LOCAL"' in preview
     assert 'self.axis == "X"' in preview
-    assert "pin_terminal=not sliding_lower_local_x" in preview
+    assert "sliding_lower_global = (" in preview
+    assert 'self._orientation == "GLOBAL"' in preview
+    assert 'self.axis in {"X", "Y", "Z"}' in preview
+    assert "sliding_lower_transports_terminal = (" in preview
+    assert "sliding_lower_local_x or sliding_lower_global" in preview
+    assert "pin_terminal=not sliding_lower_transports_terminal" in preview
 
 
 def test_rc1_forbidden_hinge_axis_bounds_to_zero_instead_of_preserving_requested_angle() -> None:
@@ -128,7 +125,7 @@ def test_rc1_forbidden_hinge_axis_bounds_to_zero_instead_of_preserving_requested
 
 def test_rc1_forbidden_hinge_axis_skips_sliding_fk_to_ik_sync_preview() -> None:
     preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
-    guard = preview.index("sliding_global_projection = bool(")
+    guard = preview.index("hinge_axis_effective = sliding_lower_local_x or any(")
     early_return = preview.index(
         "if hinge_states and not generic_states and not hinge_axis_effective:"
     )
@@ -137,10 +134,6 @@ def test_rc1_forbidden_hinge_axis_skips_sliding_fk_to_ik_sync_preview() -> None:
         early_return,
     )
     assert guard < early_return < sliding_sync
-    assert (
-        "hinge_axis_effective = sliding_global_projection or sliding_lower_local_x or any("
-        in preview
-    )
     assert "self._current_angle = 0.0" in preview[early_return:sliding_sync]
 
 
@@ -153,7 +146,8 @@ def test_rc1_sliding_lower_local_x_is_effective_without_removing_forbidden_axis_
     assert supported < guard < early_return < sliding_sync
     assert 'self._orientation == "LOCAL"' in preview[supported:guard]
     assert 'self.axis == "X"' in preview[supported:guard]
-    assert "pin_terminal=not sliding_lower_local_x" in preview[sliding_sync:]
+    assert "sliding_lower_local_x or sliding_lower_global" in preview[supported:sliding_sync]
+    assert "pin_terminal=not sliding_lower_transports_terminal" in preview[sliding_sync:]
 
 
 def test_rc1_local_z_sign_is_captured_once_from_frozen_joint_tangent() -> None:
@@ -176,59 +170,22 @@ def test_rc1_local_z_sign_is_captured_once_from_frozen_joint_tangent() -> None:
     assert "terminal_follows_second=not bool(self._sliding_syncs)" in preview
 
 
-def test_rc1_sliding_global_rotate_projects_to_swivel_and_axial_roll() -> None:
-    projector = _source(_function("_project_global_rotation_to_sliding_lower_dofs"))
-    assert "swivel_axis = end - root" in projector
-    assert "roll_generator = post_swivel_rotation @ local_y" in projector
-    assert "_damped_two_axis_rotation_step(" in projector
-    assert "swivel_bound = pi - radians(0.25)" in projector
-    assert "roll_minimum" in projector
-    assert "roll_maximum" in projector
-    assert "largest_step > 0.35" in projector
-    assert "_quaternion_rotation_vector_components(" in projector
-    assert "start_radial" not in projector
-    assert "desired_radial" not in projector
-    assert "atan2(" not in projector
+def test_rc1_sliding_global_rotate_uses_shared_hinge_roll_and_transports_terminal() -> None:
+    invoke = _source(_method("BAW_OT_rigped_direct_rotate_axis", "invoke"))
+    assert "Sliding GLOBAL lower-link Rotate uses the same bounded hinge + axial-roll" in invoke
+    assert "_sliding_global_lower_sessions" not in SOURCE
+    assert "_project_global_rotation_to_sliding_lower_dofs" not in SOURCE
+    assert "sliding_global_projected_dofs" not in SOURCE
 
     preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
-    assert "if hinge_states and not sliding_global_projection:" in preview
-    assert "_apply_solved_two_bone_fk_pose(" in preview
-    assert '_RIGPED_LOCAL_AXES["Y"]' in preview
-    assert "sliding_global_projection_diagnostics=projection_diagnostics" in _source(
-        _method("BAW_OT_rigped_direct_rotate_axis", "modal")
-    )
-    assert "_sliding_global_projected_dofs: tuple[tuple[str, float, float], ...]" in SOURCE
-
-
-def test_rc1_rotation_vector_is_continuous_across_pi() -> None:
-    rotation_vector = _evaluate_function(
-        "_quaternion_rotation_vector_components",
-        {"atan2": math.atan2, "sqrt": math.sqrt},
-    )
-    assert callable(rotation_vector)
-
-    def axis_quaternion(angle: float) -> tuple[float, float, float, float]:
-        return (math.cos(angle * 0.5), math.sin(angle * 0.5), 0.0, 0.0)
-
-    before = rotation_vector(axis_quaternion(math.pi - 0.01))
-    after = rotation_vector(axis_quaternion(math.pi + 0.01))
-    assert isinstance(before, tuple) and isinstance(after, tuple)
-    assert math.isclose(before[0], math.pi - 0.01, abs_tol=1e-9)
-    assert math.isclose(after[0], math.pi + 0.01, abs_tol=1e-9)
-    assert math.isclose(after[0] - before[0], 0.02, abs_tol=1e-9)
-
-
-def test_rc1_damped_projection_is_proportional_and_bounded_near_singularity() -> None:
-    solve_step = _evaluate_function("_damped_two_axis_rotation_step", {})
-    assert callable(solve_step)
-    small = solve_step(0.1, 0.0, 0.0, 0.05)
-    doubled = solve_step(0.2, 0.0, 0.0, 0.05)
-    assert math.isclose(doubled[0], small[0] * 2.0, rel_tol=1e-10)
-    assert math.isclose(doubled[1], small[1] * 2.0, abs_tol=1e-10)
-
-    near_singular = solve_step(0.8378, 0.8378, 0.999999, 0.3)
-    assert all(math.isfinite(value) for value in near_singular)
-    assert max(abs(value) for value in near_singular) < 0.5
+    assert "sliding_lower_global = (" in preview
+    assert 'self._orientation == "GLOBAL"' in preview
+    assert 'self.axis in {"X", "Y", "Z"}' in preview
+    assert "if hinge_states:" in preview
+    assert "_bounded_hinge_direct_rotate_angle(" in preview
+    assert "_hinge_direct_rotate_desired(" in preview
+    assert "sliding_lower_transports_terminal" in preview
+    assert "pin_terminal=not sliding_lower_transports_terminal" in preview
 
 
 def test_rc1_builder_forearm_roll_comes_from_chain_geometry_with_safe_fallback() -> None:
