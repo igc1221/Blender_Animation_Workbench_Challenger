@@ -1241,6 +1241,97 @@ USER EVIDENCE: prior E1-E12 USER FIRST acceptance remains authoritative and was 
 NEXT ITEM ALLOWED: A6 Planted in the next work slice; A6 was not started during A5 closure.
 ```
 
+## 5B. RC1 paired lower-link GLOBAL Rotate — MAJOR BUG FIX / USER PASS CHECKPOINT — 2026-09-24
+
+This is a protected RC1 regression slice. It was difficult to stabilize and must remain intact while the later four-limb multi-selection path is repaired.
+
+### Accepted checkpoint / recovery pointer
+
+- Canonical USER PASS checkpoint: **`b5b9a8dc21ee1920ff9520bf4701c0f5f2ce150f`**.
+- Stable paired-state reconstruction: `debug/d2f_12_action_restore.json` using `RECORDED_RESULT` replay.
+- Automated state at acceptance: `awb-check` **481/481 + Ruff PASS**; I12/I13/I15/I3-I5 PASS; frozen lower-link replay PASS 8/8.
+- Do not interpret later four-limb failures as invalidating this paired USER PASS unless an explicit paired regression is reproduced.
+
+### Original paired GLOBAL blockers that were fixed
+
+- Calf.L/R Sliding GLOBAL X: initially no visible response, then a large jump near end of drag.
+- Calf.L/R Sliding GLOBAL Y: moved, but at an explosively amplified rate.
+- Calf GLOBAL Z needed explicit terminal-hold/continuity acceptance.
+- ForeArm.L/R Sliding GLOBAL X/Y/Z required the same shared behavior without one-arm-only response, branch flips, or terminal drift.
+- These symptoms could not be safely fixed with per-axis sign/speed hacks because the lower link in Sliding has only two meaningful live rotational DOFs under a pinned terminal.
+
+### Accepted implementation contract
+
+1. **Shared GLOBAL projection, not per-axis patches**
+   - Requested GLOBAL X/Y/Z rotation is converted into a desired lower-link world rotation.
+   - That desired rotation is projected onto exactly two Sliding lower-link DOFs:
+     - swivel about the root -> terminal axis;
+     - lower-link local-Y axial roll.
+   - Projection uses the shared conditioned damped least-squares path `_project_global_rotation_to_sliding_lower_dofs(...)`.
+
+2. **Terminal world transform remains pinned**
+   - Hand/Foot terminal world position and world rotation remain the Sliding authority during GLOBAL Rotate.
+   - Swivel uses the two-bone solve with `terminal_follows_second=False`, followed by Sliding synchronization.
+   - GLOBAL X/Y/Z therefore move the bend plane / lower-link orientation without transporting the authored terminal.
+
+3. **Critical swivel -> roll composition fix**
+   - An earlier DLS version applied the projected local-Y roll to the gesture-start solver rotation and overwrote the preceding swivel contribution.
+   - Accepted behavior first performs swivel + Sliding sync, then captures the **current solver state after that sync**, and composes axial roll onto that current rotation.
+   - Do not revert to composing roll from `start_solver_state` after swivel.
+
+4. **Gesture-relative trust bound**
+   - Poor conditioning previously allowed tiny GLOBAL Y input to produce very large projected DOF steps.
+   - The accepted projection bounds both swivel and roll to at most **2x the absolute requested gesture angle**, still intersected with joint/branch limits.
+   - Do not reduce this to arbitrary per-axis multipliers; the 2x bound is a shared solver trust region accepted by USER FIRST.
+
+5. **Diagnostics remain observable**
+   - Commit traces retain `sliding_global_projected_dofs` and `sliding_global_projection_diagnostics` (residual + conditioning).
+   - These prove route/projection behavior; visible smoothness/terminal hold remains a USER FIRST judgment.
+
+### USER FIRST acceptance evidence
+
+- Calf.L/R Sliding:
+  - LOCAL X USER PASS.
+  - LOCAL Z USER PASS.
+  - GLOBAL X USER PASS — representative commits in session `84e4a2cb42ea43cc9d31104f291cd83e` seq 46/48/50.
+  - GLOBAL Y USER PASS — representative seq 22/24/26/28; the user explicitly accepted the post-trust-bound speed/response.
+  - GLOBAL Z USER PASS — representative seq 52/54; user accepted terminal hold and continuity.
+- ForeArm.L/R Sliding:
+  - GLOBAL X USER PASS — representative seq 58/60 and 66/68.
+  - GLOBAL Y USER PASS — representative seq 62/64 and 70/72.
+  - GLOBAL Z USER PASS — representative seq 74/76/78/80.
+  - LOCAL X USER PASS — seq 85/87.
+  - LOCAL Z USER PASS from the paired slice.
+- ForeArm.L/R Free LOCAL Z was separately rechecked from a fresh baseline and USER-passed in session `bf770f8f4d0c4e2a9c829f124a9890f4`.
+
+### Regression rule for later four-limb work
+
+- Four-limb work may add a semantic selection layer, but **must not replace or weaken** the accepted paired GLOBAL DLS projection.
+- Before declaring any four-limb repair complete, rerun at least paired Calf GLOBAL X/Y/Z and paired ForeArm GLOBAL X/Y/Z as a regression sanity check if the shared GLOBAL path was touched.
+- The visible LOCAL gizmo may legitimately follow the active/last-selected bone. Multi-selection semantics must not infer that every selected limb should rotate around that active bone's anatomical axis.
+
+### Current four-limb blockers at handoff
+
+1. **Four-limb LOCAL X semantic contract — OPEN**
+   - Selection: `Calf.L + Calf.R + ForeArm.L + ForeArm.R`.
+   - All four now respond, but the intended contract is stricter: in both **FREE and Sliding**, the same LOCAL X gesture must bend/flex each limb about its own anatomical hinge axis, independent of which bone is active and supplies the visible gizmo.
+   - Current in-source `full_four_local_x` / `full_four_local_x_axes` attempt is **not USER-passed**. Treat it as WIP, not authority.
+
+2. **C / Free -> Sliding Contact blocker — REPRODUCED / OPEN**
+   - C input itself is received. Failure is not the keymap.
+   - Contact preparation rolls back with `I20_LIMB_PREPARE_REJECTED / I12_RESIDUAL_GATE_FAILED` on Calf.L mapping `f147c624-bf93-4c96-8dde-8acca3c1a96b`.
+   - Reproduced residual: scale `5.87880115`; frozen position tolerance `1.88121637e-05`; chain position residual `1.96355426e-05`; terminal residual `3.34224774e-06`; rotations 0.
+   - Latest repeated failure session: `d9611da889a742e7b5666100a922006b`. Earlier detailed diagnostic session: `7e133dfe3f81492491a567a31082036f`.
+   - Failure-only trace event `FK_TO_IK_SNAP_RESIDUAL_FAILURE` records selected hinge branch, expected chain/terminal, IK target, pole target/angle and residuals.
+   - The attempted one-shot extra depsgraph evaluation before the **unchanged** residual gate did **not** fix the live USER FIRST failure. Do not mark it solved just because I12 runtime still passes.
+   - Historical symptom remains relevant: deleting/re-authoring existing keys could make C work, so same-frame/existing-key evaluated-state interaction remains a prime investigation area.
+
+3. **Immediate next-session order**
+   - First fix the reproduced Contact residual failure without widening frozen tolerances.
+   - Then verify four-limb FREE LOCAL X semantic bend with different active-last bones.
+   - Then C -> Sliding and verify four-limb Sliding LOCAL X semantic bend.
+   - Only after those pass continue remaining four-limb LOCAL/GLOBAL axes and broad RC1 soak.
+
 ## 6. Explicit non-goals until this plan closes
 
 Do not start or redesign:
@@ -1258,10 +1349,8 @@ Do not start or redesign:
 
 ## 7. Immediate next action
 
-**E1 through E12 are USER PASS / CLOSED. Astra's A5 reopen is adjudicated and A5 stabilization is RE-CLOSED.**
+**RC1 is OPEN.** Preserve paired lower-link USER PASS checkpoint `b5b9a8dc21ee1920ff9520bf4701c0f5f2ce150f` and do not regress the accepted Calf/ForeArm Sliding GLOBAL X/Y/Z solver behavior.
 
-The A5 reopen checkpoint and subsequent agent-document cleanup checkpoints are complete and pushed. **Do not start A6 in this closure session.**
+Next session begins with the reproduced four-limb Contact blocker: C reaches Contact authoring but Free -> Sliding fails on Calf.L with `I12_RESIDUAL_GATE_FAILED`. Resolve that failure without widening frozen tolerance, then USER FIRST four-limb FREE LOCAL X and Sliding LOCAL X with each limb bending on its own flex axis independent of active-bone gizmo orientation.
 
-The next implementation item, when the new session begins, is **A6 — Planted** using the current Phase 4 product contracts and its normal narrow PRE gate.
-
-Do not reopen E1-E12 without new concrete regression evidence. The separate I19 continuous-contact broad-smoke residual remains debt and does not reopen A5.
+Do not declare the four-limb blocker family closed until those paths pass and paired GLOBAL regression behavior remains intact.

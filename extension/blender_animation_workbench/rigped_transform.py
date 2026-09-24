@@ -8657,6 +8657,18 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             ("Calf.L", "Calf.R"),
             ("ForeArm.L", "ForeArm.R"),
         }
+        sliding_lower_full_four = sliding_lower_names == (
+            "Calf.L",
+            "Calf.R",
+            "ForeArm.L",
+            "ForeArm.R",
+        )
+        full_four_local_x = (
+            self._orientation == "LOCAL"
+            and self.axis == "X"
+            and sliding_lower_full_four
+            and all(state.hinge_state is not None for state in self._states)
+        )
         sliding_lower_single = (
             len(sliding_lower_names) == 1
             and sliding_lower_names[0] in {"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}
@@ -8666,7 +8678,11 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             and self.axis == "X"
             and len(self._states) == len(self._sliding_syncs)
             and bool(sliding_lower_names)
-            and (sliding_lower_single or sliding_lower_pair)
+            and (
+                sliding_lower_single
+                or sliding_lower_pair
+                or sliding_lower_full_four
+            )
             and all(
                 name in {"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}
                 for name in sliding_lower_names
@@ -8691,6 +8707,33 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         sliding_lower_transports_terminal = (
             sliding_lower_local_x and not sliding_lower_pins_terminal
         )
+        full_four_local_x_axes: dict[int, Vector] = {}
+        if full_four_local_x:
+            for state in self._states:
+                pose_bone = state.control.target
+                hinge_state = state.hinge_state
+                if not isinstance(pose_bone, bpy.types.PoseBone) or hinge_state is None:
+                    continue
+                lower_name = str(pose_bone.name)
+                fallback_branch = -1 if lower_name.startswith("ForeArm.") else 1
+                hinge_angle = float(hinge_state[0])
+                branch_sign = (
+                    fallback_branch
+                    if abs(hinge_angle) <= radians(0.25)
+                    else (1 if hinge_angle > 0.0 else -1)
+                )
+                basis_world = (
+                    state.control.owner_object.matrix_world.to_3x3()
+                    @ state.start_matrix.to_3x3().normalized()
+                )
+                bend_axis = basis_world @ _RIGPED_LOCAL_AXES["X"]
+                if bend_axis.length <= 1e-9:
+                    raise RigpedSemanticMoveError(
+                        "Four-limb LOCAL X found a collapsed bend axis."
+                    )
+                bend_axis.normalize()
+                bend_axis *= float(branch_sign)
+                full_four_local_x_axes[int(pose_bone.as_pointer())] = bend_axis
         if (
             self._orientation == "LOCAL"
             and self.axis == "Y"
@@ -8809,14 +8852,34 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         # rotate axis and stop at the first invalid swing/twist pose along that
         # path, avoiding both Euler coupling and quaternion re-entry flips.
         if hinge_states and not sliding_global_projection:
-            self._current_angle = _bounded_hinge_direct_rotate_angle(
-                active,
-                hinge_states,
-                self._axis_world,
-                self._current_angle,
-                mirror_opposites=mirror_opposites,
-                axis_name=self.axis,
-            )
+            if full_four_local_x_axes:
+                bounded_angle = float(self._current_angle)
+                for state in hinge_states:
+                    pose_bone = state.control.target
+                    assert isinstance(pose_bone, bpy.types.PoseBone)
+                    bend_axis = full_four_local_x_axes.get(int(pose_bone.as_pointer()))
+                    if bend_axis is None:
+                        raise RigpedSemanticMoveError(
+                            "Four-limb Sliding LOCAL X lost a semantic bend axis."
+                        )
+                    bounded_angle = _bounded_hinge_direct_rotate_angle(
+                        state.control,
+                        (state,),
+                        bend_axis,
+                        bounded_angle,
+                        mirror_opposites=False,
+                        axis_name="X",
+                    )
+                self._current_angle = bounded_angle
+            else:
+                self._current_angle = _bounded_hinge_direct_rotate_angle(
+                    active,
+                    hinge_states,
+                    self._axis_world,
+                    self._current_angle,
+                    mirror_opposites=mirror_opposites,
+                    axis_name=self.axis,
+                )
         if generic_states:
             self._current_angle = _bounded_direct_rotate_angle(
                 active,
@@ -8853,15 +8916,27 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 )
             desired = None
             if state.hinge_state is not None:
-                desired = _hinge_direct_rotate_desired(
-                    active,
-                    state,
-                    self._axis_world,
-                    self._current_angle,
-                    mirror_opposites=mirror_opposites,
-                    axis_name=self.axis,
-                    parent_pose_matrix=parent_desired,
-                )
+                semantic_bend_axis = full_four_local_x_axes.get(pointer)
+                if semantic_bend_axis is not None:
+                    desired = _hinge_direct_rotate_desired(
+                        state.control,
+                        state,
+                        semantic_bend_axis,
+                        self._current_angle,
+                        mirror_opposites=False,
+                        axis_name="X",
+                        parent_pose_matrix=parent_desired,
+                    )
+                else:
+                    desired = _hinge_direct_rotate_desired(
+                        active,
+                        state,
+                        self._axis_world,
+                        self._current_angle,
+                        mirror_opposites=mirror_opposites,
+                        axis_name=self.axis,
+                        parent_pose_matrix=parent_desired,
+                    )
             if desired is None:
                 desired = raw_desired_by_bone[pointer]
             resolved_desired_by_bone[pointer] = desired

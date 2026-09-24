@@ -453,6 +453,19 @@ class _DiagnosticMatrix:
         return self._rotation
 
 
+def test_fk_to_ik_residual_gate_remeasures_after_one_bounded_depsgraph_update() -> None:
+    source = inspect.getsource(representation_snap.execute_representation_snap)
+    retry = source.index("payload.direction is SnapDirection.FK_TO_IK")
+    remeasure = source.index("residuals = _residuals_for_expected(", retry)
+    final_gate = source.index(
+        "if not _residuals_within_tolerance(residuals, scale=residual_scale):",
+        remeasure + 1,
+    )
+    assert "bpy.context.view_layer.update()" in source[retry:final_gate]
+    assert "Keep the frozen tolerance unchanged; only re-measure once." in source
+    assert "_position_tolerance(residual_scale)" in source
+
+
 def test_fk_to_ik_residual_trace_is_bounded_and_contains_snap_comparison(monkeypatch) -> None:
     captured = []
     trace_module = ModuleType(f"{PACKAGE_NAME}.debug_trace")

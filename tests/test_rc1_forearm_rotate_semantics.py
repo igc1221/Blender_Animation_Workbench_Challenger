@@ -208,7 +208,20 @@ def test_rc1_sliding_lower_local_x_is_effective_without_removing_forbidden_axis_
     assert supported < guard < early_return < sliding_sync
     assert 'self._orientation == "LOCAL"' in preview[supported:guard]
     assert 'self.axis == "X"' in preview[supported:guard]
-    assert "sliding_lower_single or sliding_lower_pair" in preview[supported:guard]
+    assert "sliding_lower_full_four = sliding_lower_names == (" in preview
+    assert '"Calf.L"' in preview[supported:guard]
+    assert '"Calf.R"' in preview[supported:guard]
+    assert '"ForeArm.L"' in preview[supported:guard]
+    assert '"ForeArm.R"' in preview[supported:guard]
+    assert "or sliding_lower_full_four" in preview[supported:guard]
+    assert "full_four_local_x_axes: dict[int, Vector] = {}" in preview
+    assert "full_four_local_x = (" in preview
+    assert 'fallback_branch = -1 if lower_name.startswith("ForeArm.") else 1' in preview
+    assert "if abs(hinge_angle) <= radians(0.25)" in preview
+    assert 'bend_axis = basis_world @ _RIGPED_LOCAL_AXES["X"]' in preview
+    assert "bend_axis *= float(branch_sign)" in preview
+    assert "semantic_bend_axis = full_four_local_x_axes.get(pointer)" in preview
+    assert "mirror_opposites=False" in preview
     assert "pin_terminal=not sliding_lower_transports_terminal" in preview[sliding_sync:]
 
 

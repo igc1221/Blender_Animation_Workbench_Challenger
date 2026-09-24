@@ -1275,6 +1275,19 @@ def execute_representation_snap(
         residuals = _residuals_for_expected(capability, expected_result, expected_terminal)
         residual_scale = _character_scale(capability)
         position_tolerance = _position_tolerance(residual_scale)
+        if (
+            payload.direction is SnapDirection.FK_TO_IK
+            and not _residuals_within_tolerance(residuals, scale=residual_scale)
+        ):
+            # Blender's two-bone IK can need one additional depsgraph evaluation
+            # after target/pole/branch/influence changes before its evaluated result
+            # settles. Keep the frozen tolerance unchanged; only re-measure once.
+            bpy.context.view_layer.update()
+            residuals = _residuals_for_expected(
+                capability,
+                expected_result,
+                expected_terminal,
+            )
         if not _residuals_within_tolerance(residuals, scale=residual_scale):
             if payload.direction is SnapDirection.FK_TO_IK:
                 _trace_fk_to_ik_residual_failure(
