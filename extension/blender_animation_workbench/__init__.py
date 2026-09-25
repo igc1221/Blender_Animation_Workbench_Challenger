@@ -9,7 +9,7 @@ from bpy.props import (
     PointerProperty,
 )
 
-from . import character_metadata
+from . import character_metadata, debug_input
 from .character_ops import (
     BAW_OT_assign_character_semantics,
     BAW_OT_bind_character_active,
@@ -45,6 +45,7 @@ from .character_ops import (
     BAW_PG_clone_owner_map_item,
 )
 from .character_ui import draw_character_assignment
+from .debug_input import BAW_OT_raw_input_observer, BAW_OT_raw_input_probe
 from .debug_trace import (
     register_debug_trace_handlers,
     unregister_debug_trace_handlers,
@@ -328,6 +329,8 @@ class BAW_PT_development_panel(bpy.types.Panel):
 
 
 _CLASSES = (
+    BAW_OT_raw_input_probe,
+    BAW_OT_raw_input_observer,
     BAW_OT_gizmo_label_help,
     BAW_AP_preferences,
     BAW_KSI_auto_key,
@@ -701,6 +704,7 @@ def register():
         default=0,
     )
     character_metadata.register()
+    debug_input.instrument_operator_classes(_CLASSES)
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
     initialize_global_gizmo_preferences(bpy.context)
@@ -739,6 +743,8 @@ def register():
     register_contact_keymaps()
     register_interaction_keymaps()
     register_trajectory_edit_keymaps()
+    debug_input.unregister_keymap_probes()
+    debug_input.register_raw_input_observers()
     register_draw_handler()
     register_trajectory_draw_handler()
     register_trajectory_tangent_draw_handler()
@@ -758,6 +764,7 @@ def register():
 
 
 def unregister():
+    debug_input.unregister_raw_input_observers()
     disable_awb_auto_key_if_active(bpy.context)
     unregister_debug_trace_handlers()
     unregister_global_gizmo_load_handler()
@@ -784,12 +791,14 @@ def unregister():
     unregister_contact_keymaps()
     unregister_viewport_keymaps()
     unregister_keymaps()
+    debug_input.unregister_keymap_probes()
     if hasattr(bpy.types.WindowManager, "baw_trackbar_frame_drag_active"):
         del bpy.types.WindowManager.baw_trackbar_frame_drag_active
     if hasattr(bpy.types.WindowManager, "baw_rigped_semantic_move_drag_active"):
         del bpy.types.WindowManager.baw_rigped_semantic_move_drag_active
     if hasattr(bpy.types.WindowManager, "baw_clone_owner_map"):
         del bpy.types.WindowManager.baw_clone_owner_map
+    debug_input.restore_operator_instrumentation(_CLASSES)
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)
     character_metadata.unregister()

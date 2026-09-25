@@ -107,6 +107,41 @@ def _prepare_project_root(tmp_path: Path, *, external_debug: bool = False):
     ]
     interaction = source_debug / "awb_interaction_trace.jsonl"
     interaction_bytes = _write_jsonl(interaction, records)
+    raw_input = source_debug / "awb_raw_input_trace.jsonl"
+    raw_input_bytes = _write_jsonl(
+        raw_input,
+        [
+            {
+                "schema": "awb-raw-input-trace/v1",
+                "record_kind": "RAW_INPUT",
+                "raw_input_seq": 11,
+                "monotonic_ns": 110,
+                "origin": "LIVE_USER",
+                "event": {"type": "F13", "value": "PRESS"},
+            },
+            {
+                "schema": "awb-raw-input-trace/v1",
+                "record_kind": "OPERATOR_INGRESS",
+                "raw_input_seq": 11,
+                "monotonic_ns": 120,
+                "origin": "LIVE_USER",
+                "operator_id": "awb.transform",
+            },
+        ],
+    )
+    raw_input_previous = source_debug / "awb_raw_input_trace.previous.jsonl"
+    raw_input_previous_bytes = _write_jsonl(
+        raw_input_previous,
+        [
+            {
+                "schema": "awb-raw-input-trace/v1",
+                "record_kind": "MODAL_OWNER_BEGIN",
+                "raw_input_seq": 3,
+                "owner_id": "modal-old",
+                "active": True,
+            }
+        ],
+    )
     precision = source_debug / "awb_precision_trace.jsonl"
     precision_bytes = _write_jsonl(
         precision,
@@ -169,6 +204,7 @@ def _prepare_project_root(tmp_path: Path, *, external_debug: bool = False):
             "runtime_context": str(runtime_context),
             "runtime_errors": str(runtime_errors),
             "replay": str(replay),
+            "raw_input_trace": str(raw_input),
         },
         "trace_session_id": "session-current",
         "last_trace_seq": 3,
@@ -291,6 +327,8 @@ def _prepare_project_root(tmp_path: Path, *, external_debug: bool = False):
         precision: precision_bytes,
         runtime_errors: runtime_errors_bytes,
         raw_runtime: raw_runtime_bytes,
+        raw_input: raw_input_bytes,
+        raw_input_previous: raw_input_previous_bytes,
     }
     return root, live, source_bytes
 
@@ -329,6 +367,9 @@ def test_capture_generic_live_incident_is_immutable_and_fresh(tmp_path: Path):
     assert manifest["source_identity"]["blender"]["blend_file"] == live["blend_file"]
     assert manifest["artifacts"]["blender_runtime_current"]["source_authority"] == "project_launcher"
     assert manifest["artifacts"]["blender_runtime_current"]["live_blend_match"] is True
+    assert manifest["artifacts"]["raw_input_current"]["status"] == "PRESENT"
+    assert manifest["artifacts"]["raw_input_previous"]["status"] == "PRESENT"
+    assert manifest["artifacts"]["raw_input_current"]["bounded"] is True
     assert analysis["live_probe_status"] == "AVAILABLE"
     assert analysis["state_checkpoints_status"] == "AVAILABLE"
     assert analysis["state_checkpoint_count"] == 2
@@ -346,6 +387,22 @@ def test_capture_generic_live_incident_is_immutable_and_fresh(tmp_path: Path):
     assert state_before["confidence"] == "TRACE_PAIRED_BEGIN"
     assert state_before["operation_id"] == "op-1"
     assert state_before["source"]["seq"] == 2
+
+    _timeline, interaction_records, parse_errors, session_id, last_seq = module._build_timeline(
+        "INC-test",
+        {
+            "interaction_current": (incident / "interaction_trace.current.jsonl").read_bytes(),
+            "raw_input_current": (incident / "raw_input_trace.current.jsonl").read_bytes(),
+            "raw_input_previous": (incident / "raw_input_trace.previous.jsonl").read_bytes(),
+        },
+    )
+    assert parse_errors == 0
+    assert len(interaction_records) == 3
+    assert all(
+        record["schema"] == "awb-interaction-trace/v1" for record in interaction_records
+    )
+    assert session_id == "session-current"
+    assert last_seq == 3
 
     assert state_failure["status"] == "AVAILABLE"
     assert state_failure["trace_id"] == "trace:synthetic"
@@ -395,6 +452,24 @@ def test_capture_generic_live_incident_is_immutable_and_fresh(tmp_path: Path):
     assert causal_terminal["route_outcome"] == "CLAIMED"
     assert causal_terminal["dropped"] == 2
     assert causal_terminal["truncated"] is False
+    raw_envelopes = [
+        row for row in timeline_rows if row["schema"] == "awb-debug-raw-input-timeline/v1"
+    ]
+    assert len(raw_envelopes) == 3
+    assert {row["record_kind"] for row in raw_envelopes} == {
+        "RAW_INPUT",
+        "OPERATOR_INGRESS",
+        "MODAL_OWNER_BEGIN",
+    }
+    assert {row["source_artifact"] for row in raw_envelopes} == {
+        "raw_input_current",
+        "raw_input_previous",
+    }
+    assert all(
+        "record" in row and row["raw_schema"] == "awb-raw-input-trace/v1"
+        for row in raw_envelopes
+    )
+    assert not (incident / "input_routing.json").exists()
 
     assert replay["status"] == "AVAILABLE"
     assert replay["freshness"] == "FRESH"
@@ -404,9 +479,39 @@ def test_capture_generic_live_incident_is_immutable_and_fresh(tmp_path: Path):
     frozen_interaction = incident / "interaction_trace.current.jsonl"
     expected_hash = hashlib.sha256(frozen_interaction.read_bytes()).hexdigest()
     assert manifest["artifacts"]["interaction_current"]["sha256"] == expected_hash
+    for artifact_key, filename in (
+        ("raw_input_current", "raw_input_trace.current.jsonl"),
+        ("raw_input_previous", "raw_input_trace.previous.jsonl"),
+    ):
+        raw_path = incident / filename
+        assert manifest["artifacts"][artifact_key]["sha256"] == hashlib.sha256(
+            raw_path.read_bytes()
+        ).hexdigest()
 
     for source, expected in source_bytes.items():
         assert source.read_bytes() == expected
+
+
+def test_raw_input_artifact_uses_its_configured_byte_limit(tmp_path: Path):
+    module = _load_module()
+    root, live, _source_bytes = _prepare_project_root(tmp_path)
+
+    result = module.capture_incident(
+        root=root,
+        live_probe=lambda _root: live,
+        incident_id="INC-20260925-120010-1234abcd",
+        limits={"raw_input": 120},
+    )
+
+    incident = Path(result["incident_path"])
+    manifest = json.loads((incident / "manifest.json").read_text(encoding="utf-8"))
+    artifact = manifest["artifacts"]["raw_input_current"]
+    frozen = incident / "raw_input_trace.current.jsonl"
+    assert artifact["status"] == "TRUNCATED"
+    assert artifact["source_size"] > 120
+    assert artifact["captured_bytes"] <= 120
+    assert artifact["sha256"] == hashlib.sha256(frozen.read_bytes()).hexdigest()
+    assert result["evidence_status"] == "COMPLETE"
 
 
 def test_capture_falls_back_when_blender_mcp_is_unavailable(tmp_path: Path):
@@ -434,6 +539,20 @@ def test_capture_falls_back_when_blender_mcp_is_unavailable(tmp_path: Path):
     assert state_failure["unavailable_reason"] == "BLENDER_MCP_UNAVAILABLE"
     assert replay["status"] == "AVAILABLE"
     assert replay["freshness"] == "UNVERIFIED_ON_DISK"
+
+
+def test_live_probe_without_raw_input_path_uses_debug_root_fallback(tmp_path: Path):
+    module = _load_module()
+    root, live, _source_bytes = _prepare_project_root(tmp_path)
+    live["source_paths"].pop("raw_input_trace")
+
+    module._validate_live_probe_payload(live)
+    sources, source_kind = module._resolve_sources(root, live)
+
+    assert source_kind == "live_query"
+    assert sources["raw_input"] == (
+        Path(live["source_paths"]["debug_root"]) / "awb_raw_input_trace.jsonl"
+    )
 
 
 def test_capture_never_overwrites_published_incident(tmp_path: Path):
@@ -807,6 +926,9 @@ def test_live_probe_payload_is_read_only_and_bb3_state_capture_is_non_recording(
     assert "capture_debug_state_checkpoint" in code
     assert "read_recent_state_checkpoints" in code
     assert "record=False" in code
+    assert "debug_input" in code
+    assert "raw_input_trace_path" in code
+    assert "sys.modules.get" in code
 
 
 def test_schemas_are_generic_and_do_not_require_rigped():
@@ -816,6 +938,8 @@ def test_schemas_are_generic_and_do_not_require_rigped():
         "AWB_DEBUG_CHECKPOINT_V1.schema.json",
         "AWB_DEBUG_STATE_CHECKPOINTS_V1.schema.json",
         "AWB_DEBUG_DIVERGENCES_V1.schema.json",
+        "AWB_DEBUG_INPUT_ROUTING_V1.schema.json",
+        "AWB_DEBUG_RAW_INPUT_TIMELINE_V1.schema.json",
     ):
         payload = json.loads((ROOT / "docs" / "DEBUG" / "schemas" / name).read_text(encoding="utf-8"))
         lowered = json.dumps(payload, ensure_ascii=False).lower()
