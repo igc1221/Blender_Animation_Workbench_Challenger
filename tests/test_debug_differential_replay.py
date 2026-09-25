@@ -192,7 +192,7 @@ def test_bb6_missing_or_duplicate_checkpoint_alignment_is_unaligned_not_skipped(
     assert "MISSING_CHECKPOINT_ALIGNMENT" in current_missing["issues"]
     result = compare_replay_receipts(good, current_missing, mode="NORMAL")
     assert result["status"] == "UNALIGNED"
-    assert result["reason"] == "MISSING_ALIGNMENT"
+    assert result["reason"] == "ALIGNMENT_CONTRACT_MISMATCH"
 
     duplicate_rows = [
         _checkpoint(
@@ -295,3 +295,82 @@ def test_bb6_live_replay_evidence_assigns_frozen_checkpoint_sequence_before_bb4(
         and finding["result"] == "VIOLATION"
     ]
     assert chain_violations == []
+
+
+def test_bb6_symmetric_missing_checkpoint_is_unaligned_from_manifest_not_silently_matched():
+    missing_rows = [
+        _checkpoint(
+            "BEFORE_OPERATION",
+            state_hash="hash-before",
+            location=0.0,
+            runtime_checkpoint_id="shared:before",
+            runtime_trace_id="shared:trace-before",
+        )
+    ]
+    good = _receipt(
+        run_label="GOOD",
+        extension_digest="digest-good",
+        checkpoints=missing_rows,
+    )
+    current = _receipt(
+        run_label="CURRENT",
+        extension_digest="digest-current",
+        checkpoints=deepcopy(missing_rows),
+    )
+
+    assert good["status"] == "VALID"
+    assert current["status"] == "VALID"
+    result = compare_replay_receipts(good, current, mode="NORMAL")
+
+    assert result["status"] == "UNALIGNED"
+    assert result["reason"] == "ALIGNMENT_CONTRACT_MISMATCH"
+    assert {
+        (item["side"], tuple(item["key"]), item["reason"])
+        for item in result["unaligned"]
+    } == {
+        ("GOOD", ("semantic:0001", "AFTER_OPERATION", 1), "MISSING"),
+        ("CURRENT", ("semantic:0001", "AFTER_OPERATION", 1), "MISSING"),
+    }
+
+
+def test_bb6_checkpoint_route_must_match_step_manifest_ownership():
+    good = _receipt(run_label="GOOD", extension_digest="digest-good")
+    current_rows = [
+        _checkpoint(
+            "BEFORE_OPERATION",
+            state_hash="hash-before",
+            location=0.0,
+            runtime_checkpoint_id="current:before",
+            runtime_trace_id="current:trace-before",
+        ),
+        _checkpoint(
+            "AFTER_OPERATION",
+            state_hash="hash-after",
+            location=0.0,
+            runtime_checkpoint_id="current:after",
+            runtime_trace_id="current:trace-after",
+        ),
+    ]
+    current_rows[1]["replay_action_route"] = "WRONG_ROUTE"
+    current = _receipt(
+        run_label="CURRENT",
+        extension_digest="digest-current",
+        checkpoints=current_rows,
+    )
+
+    result = compare_replay_receipts(good, current, mode="NORMAL")
+
+    assert result["status"] == "UNALIGNED"
+    assert result["reason"] == "ALIGNMENT_CONTRACT_MISMATCH"
+    assert result["unaligned"][0]["reason"] == "CHECKPOINT_OWNERSHIP_MISMATCH"
+    assert result["unaligned"][0]["observed"]["action_route"] == "WRONG_ROUTE"
+
+
+def test_bb6_self_check_rejects_distinct_receipts_even_with_same_installed_identity():
+    good = _receipt(run_label="GOOD", extension_digest="digest-same")
+    current = _receipt(run_label="CURRENT", extension_digest="digest-same")
+
+    result = compare_replay_receipts(good, current, mode="SELF_CHECK")
+
+    assert result["status"] == "INVALID"
+    assert result["reason"] == "SELF_CHECK_REQUIRES_IDENTICAL_RECEIPT"
