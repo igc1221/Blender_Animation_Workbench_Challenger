@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
@@ -11,6 +13,8 @@ import bpy
 from mathutils import Matrix, Quaternion, Vector
 
 from .debug_trace import (
+    read_recent_trace_events,
+    replay_execution_active,
     replay_path,
     set_replay_execution_active,
     trace_scrub_begin,
@@ -81,6 +85,14 @@ class ReplayMode(StrEnum):
     RECORDED_RESULT = "RECORDED_RESULT"
     COMMAND = "COMMAND"
 
+
+_GUI_REPLAY_SCHEMA = "awb-gui-replay/v1"
+_GUI_REPLAY_RESULT_SCHEMA = "awb-gui-replay-result/v1"
+_GUI_REPLAY_TICKET_SCHEMA = "awb-gui-replay-ticket/v1"
+_GUI_REPLAY_ALLOWED_KEYS = {"W", "E", "R"}
+_GUI_REPLAY_ALLOWED_VALUES = {"PRESS", "RELEASE"}
+_GUI_REPLAY_DEFAULT_TIMEOUT_SECONDS = 60.0
+_GUI_REPLAY_NAMESPACE_KEY = "_awb_gui_replay_execution_id"
 
 _RECORDED_CONTACT_TYPES = tuple(ContactKeyType)
 
@@ -1472,3 +1484,382 @@ def run_checkpoint_scrub_replay(
         "divergence_count": divergence_count,
         "worst_public_result_errors": worst[:16],
     }
+
+def _gui_replay_failure(
+    reason: str,
+    *,
+    execution_id: str | None = None,
+    details: dict[str, Any] | None = None,
+    matched_routes: list[dict[str, Any]] | None = None,
+    expected_action_count: int = 0,
+) -> dict[str, Any]:
+    routes = list(matched_routes or ())
+    return {
+        "schema": _GUI_REPLAY_RESULT_SCHEMA,
+        "execution_id": execution_id,
+        "status": "FAILED",
+        "reason": reason,
+        "details": dict(details or {}),
+        "matched_action_count": len(routes),
+        "expected_action_count": int(expected_action_count),
+        "matched_routes": routes,
+    }
+
+
+def _gui_replay_view3d_target(context):
+    window = getattr(context, "window", None)
+    screen = getattr(context, "screen", None)
+    if window is None or screen is None:
+        return None
+    area = next(
+        (
+            item
+            for item in tuple(getattr(screen, "areas", ()) or ())
+            if getattr(item, "type", None) == "VIEW_3D"
+        ),
+        None,
+    )
+    if area is None:
+        return None
+    return (
+        window,
+        area,
+        int(area.x + area.width // 2),
+        int(area.y + area.height // 2),
+    )
+
+
+def _validate_gui_replay_payload(
+    payload: dict[str, Any],
+    *,
+    max_events: int,
+) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    if payload.get("schema") != _GUI_REPLAY_SCHEMA:
+        raise RuntimeError("AWB GUI replay payload schema is unsupported.")
+    if payload.get("target_area") != "VIEW_3D":
+        raise RuntimeError("AWB GUI replay v1 only supports VIEW_3D targets.")
+
+    raw_events = payload.get("events")
+    raw_actions = payload.get("actions")
+    if (
+        not isinstance(raw_events, list)
+        or not isinstance(raw_actions, list)
+        or not raw_events
+        or not raw_actions
+    ):
+        raise RuntimeError("AWB GUI replay requires bounded actions and events.")
+    if len(raw_events) > max(1, int(max_events)):
+        raise RuntimeError("AWB GUI replay exceeded its bounded event budget.")
+    if len(raw_events) != len(raw_actions) * 2:
+        raise RuntimeError("AWB GUI replay requires one PRESS/RELEASE pair per action.")
+
+    events: list[dict[str, Any]] = []
+    for item in raw_events:
+        if not isinstance(item, dict):
+            raise TypeError("AWB GUI replay event must be an object.")
+        event_type = str(item.get("type") or "")
+        value = str(item.get("value") or "")
+        if event_type not in _GUI_REPLAY_ALLOWED_KEYS:
+            raise RuntimeError(f"AWB GUI replay key is unsupported: {event_type!r}.")
+        if value not in _GUI_REPLAY_ALLOWED_VALUES:
+            raise RuntimeError(f"AWB GUI replay value is unsupported: {value!r}.")
+        events.append(dict(item))
+
+    for index in range(0, len(events), 2):
+        press = events[index]
+        release = events[index + 1]
+        if press.get("value") != "PRESS" or release.get("value") != "RELEASE":
+            raise RuntimeError("AWB GUI replay requires PRESS followed by RELEASE.")
+        for field in ("stroke_id", "type", "requested_mode"):
+            if press.get(field) != release.get(field):
+                raise RuntimeError(
+                    f"AWB GUI replay PRESS/RELEASE mismatch for {field}."
+                )
+
+    actions: list[dict[str, Any]] = []
+    for item in raw_actions:
+        if not isinstance(item, dict):
+            raise TypeError("AWB GUI replay action must be an object.")
+        requested_mode = str(item.get("requested_mode") or "")
+        key = str(item.get("key") or "")
+        if requested_mode not in {"MOVE", "ROTATE", "SCALE"}:
+            raise RuntimeError(
+                f"AWB GUI replay requested_mode is unsupported: {requested_mode!r}."
+            )
+        if key not in _GUI_REPLAY_ALLOWED_KEYS:
+            raise RuntimeError(f"AWB GUI replay action key is unsupported: {key!r}.")
+        actions.append(dict(item))
+    return tuple(actions), tuple(events)
+
+
+def _gui_replay_active_id() -> str | None:
+    value = bpy.app.driver_namespace.get(_GUI_REPLAY_NAMESPACE_KEY)
+    return str(value) if value else None
+
+
+def _clear_gui_replay_execution(execution_id: str) -> None:
+    if _gui_replay_active_id() == execution_id:
+        bpy.app.driver_namespace.pop(_GUI_REPLAY_NAMESPACE_KEY, None)
+        set_replay_execution_active(False)
+
+
+def _gui_replay_timeout_cleanup(execution_id: str):
+    _clear_gui_replay_execution(execution_id)
+
+
+def run_gui_input_replay(
+    context=None,
+    *,
+    gui_replay: dict[str, Any],
+    max_events: int = 128,
+    timeout_seconds: float = _GUI_REPLAY_DEFAULT_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Queue evidence-derived GUI events and return a stateless confirmation ticket."""
+
+    context = context or bpy.context
+    active_id = _gui_replay_active_id()
+    if active_id is not None or replay_execution_active():
+        return _gui_replay_failure(
+            "GUI_REPLAY_ALREADY_ACTIVE",
+            details={"active_execution_id": active_id},
+        )
+
+    target = _gui_replay_view3d_target(context)
+    if target is None:
+        return _gui_replay_failure("EXECUTION_UNAVAILABLE_HEADLESS")
+    window, _area, x, y = target
+    if not callable(getattr(window, "event_simulate", None)):
+        return _gui_replay_failure("EVENT_SIMULATION_UNAVAILABLE")
+
+    try:
+        actions, events = _validate_gui_replay_payload(
+            gui_replay,
+            max_events=max_events,
+        )
+    except Exception as exc:  # noqa: BLE001 - structured diagnostic failure
+        return _gui_replay_failure(
+            "INVALID_GUI_REPLAY_PAYLOAD",
+            details={"error": f"{type(exc).__name__}: {exc}"},
+        )
+
+    expected_blend = str(gui_replay.get("expected_blend") or "")
+    actual_blend = str(getattr(bpy.data, "filepath", "") or "")
+    if expected_blend and (
+        os.path.normcase(os.path.normpath(expected_blend))
+        != os.path.normcase(os.path.normpath(actual_blend))
+    ):
+        return _gui_replay_failure(
+            "BASELINE_BLEND_MISMATCH",
+            details={"expected": expected_blend, "observed": actual_blend},
+            expected_action_count=len(actions),
+        )
+    expected_mode = str(gui_replay.get("expected_mode") or "")
+    actual_mode = str(getattr(context, "mode", "") or "")
+    if expected_mode and expected_mode != actual_mode:
+        return _gui_replay_failure(
+            "BASELINE_MODE_MISMATCH",
+            details={"expected": expected_mode, "observed": actual_mode},
+            expected_action_count=len(actions),
+        )
+
+    expected_context = gui_replay.get("expected_context")
+    if isinstance(expected_context, dict):
+        expected_active = expected_context.get("active_object")
+        if isinstance(expected_active, dict):
+            expected_active = expected_active.get("name")
+        actual_active = getattr(getattr(context, "active_object", None), "name", None)
+        if expected_active and str(expected_active) != str(actual_active or ""):
+            return _gui_replay_failure(
+                "BASELINE_ACTIVE_OBJECT_MISMATCH",
+                details={"expected": expected_active, "observed": actual_active},
+                expected_action_count=len(actions),
+            )
+
+        expected_pose = tuple(
+            str(item.get("bone") if isinstance(item, dict) else item)
+            for item in tuple(expected_context.get("selected_pose_bones") or ())
+        )
+        actual_pose = tuple(
+            str(item.name)
+            for item in tuple(getattr(context, "selected_pose_bones", ()) or ())
+        )
+        if expected_pose and expected_pose != actual_pose:
+            return _gui_replay_failure(
+                "BASELINE_POSE_SELECTION_MISMATCH",
+                details={"expected": list(expected_pose), "observed": list(actual_pose)},
+                expected_action_count=len(actions),
+            )
+
+    recent = read_recent_trace_events(512, latest_session_only=True)
+    start_seq = int(recent[-1].get("seq") or 0) if recent else 0
+    execution_id = f"gui-replay:{uuid4().hex}"
+    timeout = max(1.0, float(timeout_seconds))
+    deadline = time.monotonic() + timeout
+
+    bpy.app.driver_namespace[_GUI_REPLAY_NAMESPACE_KEY] = execution_id
+    set_replay_execution_active(True, execution_id=execution_id)
+    try:
+        for event in events:
+            window.event_simulate(
+                type=str(event["type"]),
+                value=str(event["value"]),
+                x=x,
+                y=y,
+            )
+        bpy.app.timers.register(
+            lambda: _gui_replay_timeout_cleanup(execution_id),
+            first_interval=timeout,
+        )
+    except Exception as exc:  # noqa: BLE001 - never leave replay flag active
+        _clear_gui_replay_execution(execution_id)
+        return _gui_replay_failure(
+            "EVENT_SIMULATION_FAILED",
+            execution_id=execution_id,
+            details={"error": f"{type(exc).__name__}: {exc}"},
+            expected_action_count=len(actions),
+        )
+
+    return {
+        "schema": _GUI_REPLAY_TICKET_SCHEMA,
+        "execution_id": execution_id,
+        "status": "QUEUED",
+        "start_seq": start_seq,
+        "deadline_monotonic": deadline,
+        "expected_action_count": len(actions),
+        "event_count": len(events),
+        "target_xy": [x, y],
+        "actions": [dict(item) for item in actions],
+    }
+
+
+def _gui_replay_causal_matches(
+    ticket: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str | None]:
+    execution_id = str(ticket.get("execution_id") or "")
+    if not execution_id:
+        return [], "INVALID_GUI_REPLAY_TICKET"
+    rows = [
+        item
+        for item in read_recent_trace_events(1024, latest_session_only=True)
+        if bool(item.get("replay_execution", False))
+        and item.get("replay_execution_id") == execution_id
+    ]
+    rows.sort(key=lambda item: int(item.get("seq") or 0))
+
+    matched: list[dict[str, Any]] = []
+    cursor_seq = 0
+    for expected in tuple(ticket.get("actions") or ()):
+        if not isinstance(expected, dict):
+            return matched, "INVALID_GUI_REPLAY_TICKET"
+        requested_mode = str(expected.get("requested_mode") or "")
+        ingress = next(
+            (
+                item
+                for item in rows
+                if int(item.get("seq") or 0) > cursor_seq
+                and item.get("event") == "TRANSFORM_TOOL_INGRESS"
+                and str((item.get("data") or {}).get("requested_mode") or "")
+                == requested_mode
+            ),
+            None,
+        )
+        if ingress is None:
+            return matched, None
+
+        trace_id = ingress.get("trace_id")
+        terminal = next(
+            (
+                item
+                for item in rows
+                if int(item.get("seq") or 0) > int(ingress.get("seq") or 0)
+                and item.get("event") == "TRANSFORM_TOOL_TERMINAL"
+                and item.get("trace_id") == trace_id
+            ),
+            None,
+        )
+        if terminal is None:
+            return matched, None
+
+        expected_terminal = expected.get("expected_terminal_status")
+        expected_route = expected.get("expected_route_outcome")
+        if (
+            expected_terminal is not None
+            and terminal.get("terminal_status") != expected_terminal
+        ):
+            return matched, "CAUSAL_TERMINAL_STATUS_MISMATCH"
+        if expected_route is not None and terminal.get("route_outcome") != expected_route:
+            return matched, "CAUSAL_ROUTE_OUTCOME_MISMATCH"
+
+        matched.append(
+            {
+                "requested_mode": requested_mode,
+                "ingress_seq": ingress.get("seq"),
+                "terminal_seq": terminal.get("seq"),
+                "observed_trace_id": trace_id,
+                "terminal_status": terminal.get("terminal_status"),
+                "route_outcome": terminal.get("route_outcome"),
+            }
+        )
+        cursor_seq = int(terminal.get("seq") or cursor_seq)
+
+    return matched, None
+
+
+def confirm_gui_input_replay(ticket: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(ticket, dict) or ticket.get("schema") != _GUI_REPLAY_TICKET_SCHEMA:
+        return _gui_replay_failure("INVALID_GUI_REPLAY_TICKET")
+
+    execution_id = str(ticket.get("execution_id") or "")
+    expected_count = int(ticket.get("expected_action_count") or 0)
+    matched, mismatch = _gui_replay_causal_matches(ticket)
+
+    if mismatch is not None:
+        _clear_gui_replay_execution(execution_id)
+        return _gui_replay_failure(
+            mismatch,
+            execution_id=execution_id,
+            matched_routes=matched,
+            expected_action_count=expected_count,
+        )
+    if len(matched) == expected_count and expected_count > 0:
+        _clear_gui_replay_execution(execution_id)
+        return {
+            "schema": _GUI_REPLAY_RESULT_SCHEMA,
+            "execution_id": execution_id,
+            "status": "CONFIRMED",
+            "reason": None,
+            "details": {},
+            "matched_action_count": len(matched),
+            "expected_action_count": expected_count,
+            "matched_routes": matched,
+        }
+
+    deadline = float(ticket.get("deadline_monotonic") or 0.0)
+    active_id = _gui_replay_active_id()
+    if deadline and time.monotonic() >= deadline:
+        _clear_gui_replay_execution(execution_id)
+        return _gui_replay_failure(
+            "CAUSAL_CONFIRMATION_TIMEOUT",
+            execution_id=execution_id,
+            matched_routes=matched,
+            expected_action_count=expected_count,
+        )
+    if active_id != execution_id:
+        return _gui_replay_failure(
+            "GUI_REPLAY_EXECUTION_EXPIRED",
+            execution_id=execution_id,
+            matched_routes=matched,
+            expected_action_count=expected_count,
+        )
+
+    return {
+        "schema": _GUI_REPLAY_RESULT_SCHEMA,
+        "execution_id": execution_id,
+        "status": "PENDING",
+        "reason": None,
+        "details": {},
+        "matched_action_count": len(matched),
+        "expected_action_count": expected_count,
+        "matched_routes": matched,
+    }
+

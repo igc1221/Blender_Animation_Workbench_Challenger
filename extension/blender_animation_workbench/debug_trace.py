@@ -123,6 +123,7 @@ _LAST_FRAME: tuple[int, float] | None = None
 _WRITE_GUARD = False
 _PRECISION_WRITE_GUARD = False
 _REPLAY_EXECUTION_ACTIVE = False
+_REPLAY_EXECUTION_ID: str | None = None
 
 _OPERATION_CAUSAL = OperationCausalRegistry(max_bindings=2048)
 _LIFECYCLE_HANDLER_GUARD = LifecycleHandlerRecursionGuard()
@@ -152,13 +153,26 @@ _ORIGINAL_SYS_EXCEPTHOOK = sys.excepthook
 _ORIGINAL_THREADING_EXCEPTHOOK = getattr(threading, "excepthook", None)
 
 
-def set_replay_execution_active(active: bool) -> None:
-    global _REPLAY_EXECUTION_ACTIVE
+def set_replay_execution_active(
+    active: bool,
+    *,
+    execution_id: str | None = None,
+) -> None:
+    global _REPLAY_EXECUTION_ACTIVE, _REPLAY_EXECUTION_ID
     _REPLAY_EXECUTION_ACTIVE = bool(active)
+    _REPLAY_EXECUTION_ID = (
+        str(execution_id)
+        if _REPLAY_EXECUTION_ACTIVE and execution_id
+        else None
+    )
 
 
 def replay_execution_active() -> bool:
     return bool(_REPLAY_EXECUTION_ACTIVE)
+
+
+def replay_execution_id() -> str | None:
+    return str(_REPLAY_EXECUTION_ID) if _REPLAY_EXECUTION_ID else None
 
 
 def session_id() -> str:
@@ -1870,6 +1884,7 @@ def _precision_frame_sample(scene) -> None:
             "session_id": _SESSION_ID,
             "seq": _PRECISION_SEQUENCE,
             "replay_execution": bool(_REPLAY_EXECUTION_ACTIVE),
+            "replay_execution_id": _REPLAY_EXECUTION_ID,
             "utc": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "monotonic_ns": monotonic_ns(),
             "frame": current_frame,
@@ -1989,6 +2004,7 @@ def trace_event(
             "session_id": _SESSION_ID,
             "seq": _SEQUENCE,
             "replay_execution": bool(_REPLAY_EXECUTION_ACTIVE),
+            "replay_execution_id": _REPLAY_EXECUTION_ID,
             "utc": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "monotonic_ns": monotonic_ns(),
             "channel": str(channel),
