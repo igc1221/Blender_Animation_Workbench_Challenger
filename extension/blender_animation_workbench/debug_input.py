@@ -606,36 +606,21 @@ def _refresh_observed_event_types() -> set[str]:
 
 def record_observer_event(event: Any, context: Any = None) -> dict[str, Any] | None:
     event_type = str(_safe_event_value(event, "type", "") or "")
-    owner_id = _active_modal_owner_for_context(context)
-    sample_fields: dict[str, int] | None = None
-    if event_type == "MOUSEMOVE":
-        if owner_id is None:
-            return None
-        should_record, sample_fields = _should_record_modal_event(event, owner_id)
-        if not should_record:
-            return None
-    elif event_type not in _OBSERVED_EVENT_TYPES:
+    if _active_modal_owner_for_context(context) is not None:
         return None
-
-    fields: dict[str, Any] = {}
-    if event_type != "MOUSEMOVE":
-        fields["keymap_probe"] = _keymap_probe_evidence(context, event)
-    if owner_id is not None:
-        fields["modal_entry"] = True
-        fields["modal_owner_id"] = owner_id
-    if sample_fields:
-        fields.update(sample_fields)
+    if event_type in {"MOUSEMOVE", "INBETWEEN_MOUSEMOVE"}:
+        return None
+    if event_type not in _OBSERVED_EVENT_TYPES:
+        return None
 
     record = _emit(
         "OBSERVER_RAW_EVENT",
         source="PASS_THROUGH_OBSERVER",
         context=context,
         event=event,
-        owner_id=owner_id,
-        fields=fields,
+        fields={"keymap_probe": _keymap_probe_evidence(context, event)},
     )
-    event_value = str(_safe_event_value(event, "value", "") or "")
-    if owner_id is not None or event_value != "RELEASE":
+    if str(_safe_event_value(event, "value", "") or "") != "RELEASE":
         fingerprint = _fingerprint(
             event,
             (record["replay_execution"], record["replay_execution_id"]),
@@ -984,16 +969,13 @@ def _wrap_modal(operator_class: type, original):
     @wraps(original)
     def modal(self, context, event, *args, **kwargs):
         owner_id = _get_owner(self)
-        if _observer_active_for_context(context):
-            correlated_raw_input_seq = _consume_keymap_event(event)
-        else:
-            try:
-                modal_raw = _record_modal_raw_event(operator_id, owner_id, context, event)
-            except Exception:
-                modal_raw = None
-            correlated_raw_input_seq = (
-                modal_raw.get("raw_input_seq") if isinstance(modal_raw, dict) else None
-            )
+        try:
+            modal_raw = _record_modal_raw_event(operator_id, owner_id, context, event)
+        except Exception:
+            modal_raw = None
+        correlated_raw_input_seq = (
+            modal_raw.get("raw_input_seq") if isinstance(modal_raw, dict) else None
+        )
         try:
             result = original(self, context, event, *args, **kwargs)
         except Exception as exc:
