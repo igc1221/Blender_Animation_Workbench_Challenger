@@ -1305,6 +1305,7 @@ def run_semantic_replay(
     replay_file: str | None = None,
     script: dict[str, Any] | None = None,
     replay_mode: ReplayMode | str,
+    replay_execution_id: str | None = None,
     max_actions: int = 1000,
     max_frames: int = 12000,
 ) -> dict[str, Any]:
@@ -1329,7 +1330,10 @@ def run_semantic_replay(
 
     results: list[dict[str, Any]] = []
     frame_budget = [0]
-    set_replay_execution_active(True)
+    set_replay_execution_active(
+        True,
+        execution_id=replay_execution_id,
+    )
     try:
         for action in actions:
             if not isinstance(action, dict):
@@ -1611,6 +1615,7 @@ def run_gui_input_replay(
     context=None,
     *,
     gui_replay: dict[str, Any],
+    replay_execution_id: str | None = None,
     max_events: int = 128,
     timeout_seconds: float = _GUI_REPLAY_DEFAULT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
@@ -1692,7 +1697,11 @@ def run_gui_input_replay(
 
     recent = read_recent_trace_events(512, latest_session_only=True)
     start_seq = int(recent[-1].get("seq") or 0) if recent else 0
-    execution_id = f"gui-replay:{uuid4().hex}"
+    execution_id = (
+        str(replay_execution_id)
+        if replay_execution_id
+        else f"gui-replay:{uuid4().hex}"
+    )
     timeout = max(1.0, float(timeout_seconds))
     deadline = time.monotonic() + timeout
 

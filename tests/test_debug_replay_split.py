@@ -390,3 +390,269 @@ def test_bb5_incident_runner_passes_full_ticket_to_stateless_confirmation():
     assert "_gui_confirm_code(ticket)" in source
     assert "replay_execution_id=" in source
 
+def test_bb5_gui_payload_rejects_trailing_unterminated_ingress_after_success():
+    records = [
+        _record(2, "TRANSFORM_TOOL_INGRESS", trace="trace-w", requested_mode="MOVE"),
+        _record(
+            5,
+            "TRANSFORM_TOOL_TERMINAL",
+            trace="trace-w",
+            requested_mode="MOVE",
+            terminal_status="FINISHED",
+        ),
+        _record(6, "TRANSFORM_TOOL_INGRESS", trace="trace-e", requested_mode="ROTATE"),
+    ]
+    assert (
+        build_gui_replay_payload(
+            records,
+            current_session_id="session-current",
+            semantic_replay=_semantic(),
+            freshness="FRESH",
+        )
+        is None
+    )
+
+
+def test_bb5_replay_execution_records_are_excluded_from_replay_extraction():
+    records = _wer_records()
+    for item in records:
+        item["replay_execution"] = True
+        item["record"]["replay_execution"] = True
+
+    assert (
+        build_gui_replay_payload(
+            records,
+            current_session_id="session-current",
+            semantic_replay=_semantic(),
+            freshness="FRESH",
+        )
+        is None
+    )
+
+    modal = _record(
+        20,
+        "TRANSFORM_BEGIN",
+        trace="trace-modal",
+        operation_id="op-modal",
+        route_outcome=None,
+    )
+    modal["replay_execution"] = True
+    modal["record"]["replay_execution"] = True
+    assert (
+        build_replay_handoff(
+            [modal],
+            current_session_id="session-current",
+            semantic_replay=_semantic(),
+        )
+        is None
+    )
+
+
+def test_bb5_pure_gui_runner_accepts_null_semantic_replay_mode(monkeypatch):
+    import scripts.replay_awb_incident as incident_runner
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+
+        def execute_code(self, _code):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "status": "QUEUED",
+                    "start_seq": 0,
+                    "ticket": {
+                        "schema": "awb-gui-replay-ticket/v1",
+                        "execution_id": "gui-replay:test",
+                        "status": "QUEUED",
+                        "expected_action_count": 1,
+                        "actions": [
+                            {
+                                "requested_mode": "MOVE",
+                                "expected_terminal_status": "FINISHED",
+                                "expected_route_outcome": "CLAIMED",
+                            }
+                        ],
+                    },
+                }
+            return {
+                "schema": "awb-gui-replay-result/v1",
+                "execution_id": "gui-replay:test",
+                "status": "CONFIRMED",
+                "matched_action_count": 1,
+                "expected_action_count": 1,
+                "matched_routes": [],
+            }
+
+    monkeypatch.setattr(incident_runner.time, "sleep", lambda _seconds: None)
+    replay = {
+        "semantic_replay_mode": None,
+        "gui_replay": {
+            "semantic_prefix": None,
+        },
+    }
+    result = incident_runner._run_gui(FakeClient(), replay)
+    assert result["status"] == "CONFIRMED"
+
+
+def test_bb5_gui_prefix_and_events_share_one_execution_identity():
+    import scripts.replay_awb_incident as incident_runner
+
+    gui_replay = {
+        "semantic_prefix": _semantic(
+            {"kind": "AUTO_KEY", "source_seq": 1, "enabled": False}
+        )
+    }
+    code = incident_runner._gui_queue_code(
+        gui_replay,
+        "RECORDED_RESULT",
+        "gui-replay:shared",
+    )
+    assert code.count("replay_execution_id='gui-replay:shared'") == 2
+
+    evidence = incident_runner._evidence_code(
+        0,
+        replay_execution_id="gui-replay:shared",
+    )
+    assert "item.get('replay_execution_id') == 'gui-replay:shared'" in evidence
+
+
+def test_bb5_failed_gui_execution_cannot_report_clean_oracle(monkeypatch, tmp_path):
+    import scripts.replay_awb_incident as incident_runner
+
+    replay = {
+        "schema": "awb-debug-incident-replay/v1",
+        "incident_id": "INC-test-failed",
+        "coverage": "FULL_AUTOMATIC",
+        "recommended_path": "GUI_INPUT",
+        "semantic_replay_mode": None,
+        "gui_replay": {"semantic_prefix": None},
+        "handoff": None,
+        "failure_oracle": {
+            "schema": "awb-failure-oracle/v1",
+            "status": "BOUND",
+            "oracle_kind": "DIVERGENCE",
+            "invariant_id": "generic.hash_diff_consistency.v1",
+            "finding_code": "DIFF_AFTER_HASH_MISMATCH",
+            "checkpoint_seq": 2,
+            "boundary": "AFTER_OPERATION",
+            "paths": ["/semantic_state_hash"],
+            "expected_verdict": "VIOLATION",
+        },
+    }
+    (tmp_path / "replay.json").write_text(
+        json.dumps(replay),
+        encoding="utf-8",
+    )
+
+    class FakePersistentClient:
+        def __init__(self, timeout=60.0):
+            self.timeout = timeout
+            self.calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def execute_code(self, _code):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "status": "FAILED",
+                    "start_seq": 0,
+                    "ticket": {
+                        "status": "FAILED",
+                        "reason": "BASELINE_MODE_MISMATCH",
+                    },
+                }
+            return {"checkpoints": [], "timeline": []}
+
+    monkeypatch.setattr(
+        incident_runner,
+        "_persistent_blender_client",
+        lambda timeout: FakePersistentClient(timeout=timeout),
+    )
+    result = incident_runner.run_incident(tmp_path)
+    assert result["execution_status"] == "FAILED"
+    assert result["oracle_evaluation"]["status"] == "EVALUATION_ERROR"
+    assert result["oracle_evaluation"]["verdict"] == "UNAVAILABLE"
+
+
+def test_bb5_empty_blend_guard_does_not_normalize_empty_to_dot():
+    import scripts.replay_awb_incident as incident_runner
+
+    code = incident_runner._baseline_guard_code("")
+    assert "expected_blend_raw = ''" in code
+    assert "if expected_blend_raw" in code
+    assert 'else ""' in code
+
+
+def test_bb5_interleaved_semantic_action_blocks_gui_and_semantic_false_proof():
+    base = {
+        "schema": "awb-debug-incident-replay/v1",
+        "incident_id": "INC-interleaved",
+        "status": "AVAILABLE",
+        "freshness": "FRESH",
+        "source": "live_in_memory_builder",
+        "source_session_id": "session-current",
+        "captured_trace_session_id": "session-current",
+        "captured_last_seq": 14,
+        "semantic_replay": _semantic(
+            {"kind": "AUTO_KEY", "source_seq": 7, "enabled": False}
+        ),
+        "unavailable_reason": None,
+    }
+    replay = enrich_incident_replay(
+        base,
+        timeline_records=_wer_records(),
+        divergences={"first_divergence": None},
+        state_available=True,
+    )
+    assert replay["gui_replay"] is None
+    assert replay["coverage"] == "STATE_ONLY"
+    assert replay["recommended_path"] == "STATE_ONLY"
+
+
+def test_bb5_supported_gui_prefix_plus_unmatched_modal_requires_handoff():
+    records = [
+        _record(2, "TRANSFORM_TOOL_INGRESS", trace="trace-w", requested_mode="MOVE"),
+        _record(
+            5,
+            "TRANSFORM_TOOL_TERMINAL",
+            trace="trace-w",
+            requested_mode="MOVE",
+            terminal_status="FINISHED",
+        ),
+        _record(
+            6,
+            "TRANSFORM_BEGIN",
+            trace="trace-modal",
+            operation_id="op-modal",
+            route_outcome=None,
+        ),
+    ]
+    base = {
+        "schema": "awb-debug-incident-replay/v1",
+        "incident_id": "INC-handoff",
+        "status": "AVAILABLE",
+        "freshness": "FRESH",
+        "source": "live_in_memory_builder",
+        "source_session_id": "session-current",
+        "captured_trace_session_id": "session-current",
+        "captured_last_seq": 6,
+        "semantic_replay": _semantic(),
+        "unavailable_reason": None,
+    }
+    replay = enrich_incident_replay(
+        base,
+        timeline_records=records,
+        divergences={"first_divergence": None},
+        state_available=True,
+    )
+    assert replay["gui_replay"] is not None
+    assert replay["handoff"] is not None
+    assert replay["coverage"] == "PRE_FINAL_GESTURE"
+    assert replay["recommended_path"] == "GUI_INPUT"
+
