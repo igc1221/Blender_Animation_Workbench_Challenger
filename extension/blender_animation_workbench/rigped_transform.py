@@ -12,7 +12,16 @@ from bpy_extras.view3d_utils import location_3d_to_region_2d
 from mathutils import Matrix, Quaternion, Vector
 
 from .character_metadata import resolve_character
-from .debug_trace import link_trace_operation, new_trace_operation_id, trace_event, trace_exception
+from .debug_trace import (
+    TraceRouteOutcome,
+    TraceTerminalStatus,
+    bind_operation_causal_context,
+    link_trace_operation,
+    new_trace_causal_root,
+    new_trace_operation_id,
+    trace_event,
+    trace_exception,
+)
 from .gizmo_preferences import (
     MAX_LINEAR_ROTATION_RADIANS_PER_PIXEL,
     arcball_world_step,
@@ -3472,10 +3481,17 @@ class BAW_OT_rigped_semantic_move_axis(bpy.types.Operator):
         self._trace_operation_id = new_trace_operation_id(
             "hybrid-move" if fk_sessions else "sliding-move"
         )
+        bind_operation_causal_context(
+            self._trace_operation_id,
+            new_trace_causal_root("hybrid-move" if fk_sessions else "sliding-move"),
+        )
         trace_event(
             "OPERATION",
             "TRANSFORM_BEGIN",
             operation_id=self._trace_operation_id,
+            subsystem="modal",
+            lifecycle_phase="invoke",
+            route_outcome=TraceRouteOutcome.CLAIMED,
             context=context,
             tool="MOVE",
             route=route_name,
@@ -3565,6 +3581,10 @@ class BAW_OT_rigped_semantic_move_axis(bpy.types.Operator):
                     "OPERATION",
                     "TRANSFORM_CANCEL",
                     operation_id=self._trace_operation_id,
+                    subsystem="modal",
+                    lifecycle_phase="cancel",
+                    terminal_status=TraceTerminalStatus.CANCELLED,
+                    route_outcome=TraceRouteOutcome.CLAIMED,
                     context=context,
                     reason="NO_DELTA",
                 )
@@ -3683,6 +3703,10 @@ class BAW_OT_rigped_semantic_move_axis(bpy.types.Operator):
                     "OPERATION",
                     "TRANSFORM_FAIL",
                     operation_id=self._trace_operation_id,
+                    subsystem="modal",
+                    lifecycle_phase="fail",
+                    terminal_status=TraceTerminalStatus.CANCELLED,
+                    route_outcome=TraceRouteOutcome.CLAIMED,
                     context=context,
                     detail=detail or "Rigped Sliding Move commit failed",
                     final_delta=tuple(float(value) for value in self._last_delta),
@@ -3703,6 +3727,10 @@ class BAW_OT_rigped_semantic_move_axis(bpy.types.Operator):
                 "OPERATION",
                 "TRANSFORM_COMMIT",
                 operation_id=self._trace_operation_id,
+                subsystem="modal",
+                lifecycle_phase="commit",
+                terminal_status=TraceTerminalStatus.FINISHED,
+                route_outcome=TraceRouteOutcome.CLAIMED,
                 context=context,
                 tool="MOVE",
                 route=route_name,
@@ -3738,6 +3766,10 @@ class BAW_OT_rigped_semantic_move_axis(bpy.types.Operator):
                 "OPERATION",
                 "TRANSFORM_CANCEL",
                 operation_id=self._trace_operation_id,
+                subsystem="modal",
+                lifecycle_phase="cancel",
+                terminal_status=TraceTerminalStatus.CANCELLED,
+                route_outcome=TraceRouteOutcome.CLAIMED,
                 context=context,
                 reason=event.type,
             )
@@ -4095,10 +4127,17 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                 return {"CANCELLED"}
 
         self._trace_operation_id = new_trace_operation_id("fk-move")
+        bind_operation_causal_context(
+            self._trace_operation_id,
+            new_trace_causal_root("fk-move"),
+        )
         trace_event(
             "OPERATION",
             "TRANSFORM_BEGIN",
             operation_id=self._trace_operation_id,
+            subsystem="modal",
+            lifecycle_phase="invoke",
+            route_outcome=TraceRouteOutcome.CLAIMED,
             context=context,
             tool="MOVE",
             route="FK_MOVE",
@@ -4225,6 +4264,10 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                     "OPERATION",
                     "TRANSFORM_CANCEL",
                     operation_id=self._trace_operation_id,
+                    subsystem="modal",
+                    lifecycle_phase="cancel",
+                    terminal_status=TraceTerminalStatus.CANCELLED,
+                    route_outcome=TraceRouteOutcome.CLAIMED,
                     context=context,
                     reason="NO_DELTA",
                 )
@@ -4533,6 +4576,10 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                     "OPERATION",
                     "TRANSFORM_FAIL",
                     operation_id=self._trace_operation_id,
+                    subsystem="modal",
+                    lifecycle_phase="fail",
+                    terminal_status=TraceTerminalStatus.CANCELLED,
+                    route_outcome=TraceRouteOutcome.CLAIMED,
                     context=context,
                     detail=detail or "Rigped FK Move commit failed",
                     final_delta=tuple(float(value) for value in self._last_delta),
@@ -4576,6 +4623,10 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                 "OPERATION",
                 "TRANSFORM_COMMIT",
                 operation_id=self._trace_operation_id,
+                subsystem="modal",
+                lifecycle_phase="commit",
+                terminal_status=TraceTerminalStatus.FINISHED,
+                route_outcome=TraceRouteOutcome.CLAIMED,
                 context=context,
                 tool="MOVE",
                 route="FK_MOVE",
@@ -4597,6 +4648,10 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                 "OPERATION",
                 "TRANSFORM_CANCEL",
                 operation_id=self._trace_operation_id,
+                subsystem="modal",
+                lifecycle_phase="cancel",
+                terminal_status=TraceTerminalStatus.CANCELLED,
+                route_outcome=TraceRouteOutcome.CLAIMED,
                 context=context,
                 reason=event.type,
             )
@@ -5208,10 +5263,17 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                 return {"CANCELLED"}
 
         self._trace_operation_id = new_trace_operation_id("direct-move")
+        bind_operation_causal_context(
+            self._trace_operation_id,
+            new_trace_causal_root("direct-move"),
+        )
         trace_event(
             "OPERATION",
             "TRANSFORM_BEGIN",
             operation_id=self._trace_operation_id,
+            subsystem="modal",
+            lifecycle_phase="invoke",
+            route_outcome=TraceRouteOutcome.CLAIMED,
             context=context,
             tool="MOVE",
             route="DIRECT_MOVE",
@@ -5313,6 +5375,10 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                     "OPERATION",
                     "TRANSFORM_CANCEL",
                     operation_id=self._trace_operation_id,
+                    subsystem="modal",
+                    lifecycle_phase="cancel",
+                    terminal_status=TraceTerminalStatus.CANCELLED,
+                    route_outcome=TraceRouteOutcome.CLAIMED,
                     context=context,
                     reason="NO_DELTA",
                 )
@@ -5430,6 +5496,10 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                 "OPERATION",
                 "TRANSFORM_COMMIT",
                 operation_id=self._trace_operation_id,
+                subsystem="modal",
+                lifecycle_phase="commit",
+                terminal_status=TraceTerminalStatus.FINISHED,
+                route_outcome=TraceRouteOutcome.CLAIMED,
                 context=context,
                 tool="MOVE",
                 route="DIRECT_MOVE",
@@ -5459,6 +5529,10 @@ class BAW_OT_rigped_direct_move_axis(bpy.types.Operator):
                 "OPERATION",
                 "TRANSFORM_CANCEL",
                 operation_id=self._trace_operation_id,
+                subsystem="modal",
+                lifecycle_phase="cancel",
+                terminal_status=TraceTerminalStatus.CANCELLED,
+                route_outcome=TraceRouteOutcome.CLAIMED,
                 context=context,
                 reason=event.type,
             )
@@ -8534,6 +8608,10 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                             self._rotate_use_screen_tangent = True
 
         self._trace_operation_id = new_trace_operation_id("direct-rotate")
+        bind_operation_causal_context(
+            self._trace_operation_id,
+            new_trace_causal_root("direct-rotate"),
+        )
         authority = (
             self._auto_plan.intent.target_type.value
             if self._auto_plan is not None
@@ -8543,6 +8621,9 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             "OPERATION",
             "TRANSFORM_BEGIN",
             operation_id=self._trace_operation_id,
+            subsystem="modal",
+            lifecycle_phase="invoke",
+            route_outcome=TraceRouteOutcome.CLAIMED,
             context=context,
             tool="ROTATE",
             route="DIRECT_ROTATE",
@@ -9273,6 +9354,10 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     "OPERATION",
                     "TRANSFORM_CANCEL",
                     operation_id=self._trace_operation_id,
+                    subsystem="modal",
+                    lifecycle_phase="cancel",
+                    terminal_status=TraceTerminalStatus.CANCELLED,
+                    route_outcome=TraceRouteOutcome.CLAIMED,
                     context=context,
                     reason="NO_ANGLE",
                 )
@@ -9552,6 +9637,10 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 "OPERATION",
                 "TRANSFORM_COMMIT",
                 operation_id=self._trace_operation_id,
+                subsystem="modal",
+                lifecycle_phase="commit",
+                terminal_status=TraceTerminalStatus.FINISHED,
+                route_outcome=TraceRouteOutcome.CLAIMED,
                 context=context,
                 tool="ROTATE",
                 route="DIRECT_ROTATE",
@@ -9596,6 +9685,10 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 "OPERATION",
                 "TRANSFORM_CANCEL",
                 operation_id=self._trace_operation_id,
+                subsystem="modal",
+                lifecycle_phase="cancel",
+                terminal_status=TraceTerminalStatus.CANCELLED,
+                route_outcome=TraceRouteOutcome.CLAIMED,
                 context=context,
                 reason=event.type,
             )

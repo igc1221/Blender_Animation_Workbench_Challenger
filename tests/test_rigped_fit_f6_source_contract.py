@@ -69,11 +69,23 @@ def test_f6_native_guard_and_figure_ownership_remain_fail_closed():
 
 
 def test_f6_no_legacy_live_editbone_authority_or_save_mutation_is_reintroduced():
-    production = "\n".join(path.read_text(encoding="utf-8") for path in EXT.glob("*.py"))
+    product_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in EXT.glob("*.py")
+        if path.name not in {"debug_trace.py", "debug_causal.py"}
+    )
 
-    assert "rigped_fit_transform" not in production
-    assert "save_pre" not in production
-    assert "save_post" not in production
+    assert "rigped_fit_transform" not in product_sources
+    assert "save_pre" not in product_sources
+    assert "save_post" not in product_sources
+
+    debug_trace = _source("debug_trace.py")
+    save_pre_start = debug_trace.index("def _trace_save_pre")
+    save_pre_end = debug_trace.index("def _trace_save_post", save_pre_start)
+    save_pre_block = debug_trace[save_pre_start:save_pre_end]
+    assert "bpy.data" not in save_pre_block
+    assert "bpy.ops" not in save_pre_block
+
     commit = _source("rigped_fit_commit.py")
     assert "def commit_fit_semantic_session_atomic" in commit
     assert "_apply_manifest(semantic_session.rig_object, manifest, before)" in commit

@@ -11,7 +11,8 @@ from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
 
 from .character_query import characters_for_context
-from .debug_trace import trace_event
+from .debug_causal import TraceRouteOutcome, TraceTerminalStatus
+from .debug_trace import new_trace_causal_root, trace_event, trace_lifecycle_event
 from .phase4_contact_ui import transform_orientation_cycle
 from .rigped_box_wire_overlay import (
     box_display_names,
@@ -2172,11 +2173,28 @@ class BAW_OT_awb_select_click(bpy.types.Operator):
         )
 
     def invoke(self, context, event):
+        self._causal_context = None
+        if event.value == "PRESS":
+            self._causal_context = new_trace_causal_root("selection")
+            trace_lifecycle_event(
+                "SELECTION_CLICK_INGRESS",
+                subsystem="input",
+                phase="ingress",
+                causal=self._causal_context,
+                context=context,
+                operator=self.bl_idname,
+                action=self.action,
+                event_type=str(event.type),
+                event_value=str(event.value),
+            )
         active_tool_before = _active_native_transform_tool_id(context)
         if str(getattr(context, "mode", "")) == "OBJECT" and event.value == "PRESS":
             trace_event(
                 "INPUT",
                 "SELECTION_CLICK_BEGIN",
+                causal=self._causal_context,
+                subsystem="input",
+                lifecycle_phase="ingress",
                 context=context,
                 operator=self.bl_idname,
                 action=self.action,
@@ -2209,18 +2227,73 @@ class BAW_OT_awb_select_click(bpy.types.Operator):
             bool(getattr(context.scene, "baw_trackbar_enabled", True))
             and float(self._start_region[1]) <= float(TRACKBAR_INTERACTION_HEIGHT)
         ):
+            trace_lifecycle_event(
+                "SELECTION_CLICK_ROUTE",
+                subsystem="keymap",
+                phase="routing",
+                causal=self._causal_context,
+                route_outcome=TraceRouteOutcome.NATIVE_FALLTHROUGH,
+                context=context,
+                reason="TRACKBAR_REGION",
+            )
             return {"PASS_THROUGH"}
 
         self._last_region = self._start_region
         self._dragging = False
         self._cursor_changed = False
         context.window_manager.modal_handler_add(self)
+        trace_lifecycle_event(
+            "SELECTION_MODAL_STARTED",
+            subsystem="operator",
+            phase="invoke",
+            causal=self._causal_context,
+            route_outcome=TraceRouteOutcome.CLAIMED,
+            context=context,
+            operator=self.bl_idname,
+            action=self.action,
+        )
         return {"RUNNING_MODAL"}
 
     def _finish_cursor(self, context) -> None:
         if self._cursor_changed and context.window is not None:
             context.window.cursor_modal_restore()
         self._cursor_changed = False
+
+    def _trace_modal_result(self, context, result) -> None:
+        causal = getattr(self, "_causal_context", None)
+        if causal is None:
+            return
+        if "FINISHED" in result:
+            trace_lifecycle_event(
+                "SELECTION_MODAL_FINISHED",
+                subsystem="modal",
+                phase="commit",
+                causal=causal,
+                terminal_status=TraceTerminalStatus.FINISHED,
+                route_outcome=TraceRouteOutcome.CLAIMED,
+                context=context,
+            )
+            self._causal_context = None
+        elif "CANCELLED" in result:
+            trace_lifecycle_event(
+                "SELECTION_MODAL_CANCELLED",
+                subsystem="modal",
+                phase="cancel",
+                causal=causal,
+                terminal_status=TraceTerminalStatus.CANCELLED,
+                route_outcome=TraceRouteOutcome.CLAIMED,
+                context=context,
+            )
+            self._causal_context = None
+        elif "PASS_THROUGH" in result:
+            trace_lifecycle_event(
+                "SELECTION_MODAL_ROUTE",
+                subsystem="modal",
+                phase="routing",
+                causal=causal,
+                route_outcome=TraceRouteOutcome.NATIVE_FALLTHROUGH,
+                context=context,
+            )
 
     def _clear_on_miss(self, context, mode: str) -> None:
         if self.action != "SET":
@@ -2246,6 +2319,15 @@ class BAW_OT_awb_select_click(bpy.types.Operator):
                 )
                 if distance >= 6.0:
                     self._dragging = True
+                    trace_lifecycle_event(
+                        "SELECTION_DRAG_BEGIN",
+                        subsystem="modal",
+                        phase="modal_tick",
+                        causal=getattr(self, "_causal_context", None),
+                        route_outcome=TraceRouteOutcome.CLAIMED,
+                        context=context,
+                        transition="CLICK_TO_BOX",
+                    )
                     if context.window is not None and str(getattr(context, "mode", "")) != "EDIT_ARMATURE":
                         context.window.cursor_modal_set("CROSSHAIR")
                         self._cursor_changed = True
@@ -2278,12 +2360,15 @@ class BAW_OT_awb_select_click(bpy.types.Operator):
                 self._finish_cursor(context)
             if context.area is not None:
                 context.area.tag_redraw()
+            self._trace_modal_result(context, result)
             return result
 
         if event.type in {"ESC", "RIGHTMOUSE"}:
             _clear_viewport_box_overlay(context)
             self._finish_cursor(context)
-            return {"CANCELLED"}
+            result = {"CANCELLED"}
+            self._trace_modal_result(context, result)
+            return result
 
         return {"RUNNING_MODAL"}
 

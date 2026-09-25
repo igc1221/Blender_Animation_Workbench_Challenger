@@ -716,17 +716,27 @@ class BAW_OT_contact(bpy.types.Operator):
 
     def execute(self, context):
         from .debug_trace import (
+            TraceRouteOutcome,
+            TraceTerminalStatus,
+            bind_operation_causal_context,
             link_trace_operation,
+            new_trace_causal_root,
             new_trace_operation_id,
             trace_event,
             trace_exception,
+            trace_lifecycle_event,
         )
 
         trace_operation_id = new_trace_operation_id("contact")
-        trace_event(
-            "INPUT",
+        causal_root = new_trace_causal_root("contact")
+        bind_operation_causal_context(trace_operation_id, causal_root)
+        trace_lifecycle_event(
             "CONTACT_BEGIN",
+            subsystem="input",
+            phase="ingress",
             operation_id=trace_operation_id,
+            causal=causal_root,
+            route_outcome=TraceRouteOutcome.CLAIMED,
             context=context,
             enabled_types=tuple(item.value for item in contact_enabled_types(context)),
             plant_space=contact_plant_space(context).value,
@@ -781,6 +791,10 @@ class BAW_OT_contact(bpy.types.Operator):
                 "OPERATION",
                 "CONTACT_FAIL",
                 operation_id=trace_operation_id,
+                subsystem="operator",
+                lifecycle_phase="cancel",
+                terminal_status=TraceTerminalStatus.CANCELLED,
+                route_outcome=TraceRouteOutcome.REJECTED,
                 context=context,
                 writer_operation_id=writer_operation_id,
                 diagnostics=(
@@ -805,6 +819,16 @@ class BAW_OT_contact(bpy.types.Operator):
                 context=context,
                 writer_operation_id=writer_operation_id,
             )
+            trace_lifecycle_event(
+                "CONTACT_EXCEPTION_TERMINAL",
+                subsystem="operator",
+                phase="fail",
+                operation_id=trace_operation_id,
+                terminal_status=TraceTerminalStatus.CANCELLED,
+                route_outcome=TraceRouteOutcome.REJECTED,
+                context=context,
+                error_type=type(exc).__name__,
+            )
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         if not result.applied:
@@ -813,6 +837,10 @@ class BAW_OT_contact(bpy.types.Operator):
                 "OPERATION",
                 "CONTACT_FAIL",
                 operation_id=trace_operation_id,
+                subsystem="operator",
+                lifecycle_phase="cancel",
+                terminal_status=TraceTerminalStatus.CANCELLED,
+                route_outcome=TraceRouteOutcome.REJECTED,
                 context=context,
                 writer_operation_id=writer_operation_id,
                 diagnostics=tuple(
@@ -845,6 +873,10 @@ class BAW_OT_contact(bpy.types.Operator):
             "OPERATION",
             "CONTACT_COMMIT",
             operation_id=trace_operation_id,
+            subsystem="operator",
+            lifecycle_phase="commit",
+            terminal_status=TraceTerminalStatus.FINISHED,
+            route_outcome=TraceRouteOutcome.CLAIMED,
             context=context,
             writer_operation_id=writer_operation_id,
             contact_type=replay_contact_type,

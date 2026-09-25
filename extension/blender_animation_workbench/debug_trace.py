@@ -14,6 +14,19 @@ from uuid import uuid4
 import bpy
 from bpy.app.handlers import persistent
 
+from .debug_causal import (
+    LifecycleHandlerRecursionGuard,
+    OperationCausalRegistry,
+    TraceCausalContext,
+    TraceRouteOutcome,
+    TraceTerminalStatus,
+    new_trace_child,
+    new_trace_root,
+    validate_trace_evaluation_phase,
+    validate_trace_lifecycle_phase,
+    validate_trace_subsystem,
+)
+
 _TRACE_FILENAME = "awb_interaction_trace.jsonl"
 _PRECISION_TRACE_FILENAME = "awb_precision_trace.jsonl"
 _REPLAY_FILENAME = "awb_replay_latest.json"
@@ -24,6 +37,36 @@ _RUNTIME_ERRORS_FILENAME = "awb_runtime_errors.jsonl"
 _TRACE_MAX_BYTES = 4 * 1024 * 1024
 _PRECISION_TRACE_MAX_BYTES = 2 * 1024 * 1024
 _TAIL_READ_CHUNK_BYTES = 64 * 1024
+_EXPLICIT_TERMINAL_EVENTS: dict[
+    str,
+    tuple[TraceTerminalStatus, str, TraceRouteOutcome],
+] = {
+    "TRANSFORM_COMMIT": (
+        TraceTerminalStatus.FINISHED,
+        "commit",
+        TraceRouteOutcome.CLAIMED,
+    ),
+    "TRANSFORM_CANCEL": (
+        TraceTerminalStatus.CANCELLED,
+        "cancel",
+        TraceRouteOutcome.CLAIMED,
+    ),
+    "TRANSFORM_FAIL": (
+        TraceTerminalStatus.FAILED,
+        "fail",
+        TraceRouteOutcome.CLAIMED,
+    ),
+    "CONTACT_COMMIT": (
+        TraceTerminalStatus.FINISHED,
+        "commit",
+        TraceRouteOutcome.CLAIMED,
+    ),
+    "CONTACT_FAIL": (
+        TraceTerminalStatus.FAILED,
+        "fail",
+        TraceRouteOutcome.CLAIMED,
+    ),
+}
 
 _SESSION_ID = uuid4().hex
 _SEQUENCE = 0
@@ -33,6 +76,13 @@ _WRITE_GUARD = False
 _PRECISION_WRITE_GUARD = False
 _REPLAY_EXECUTION_ACTIVE = False
 _OPERATION_PARENTS: dict[str, str] = {}
+_OPERATION_CAUSAL = OperationCausalRegistry(max_bindings=2048)
+_LIFECYCLE_HANDLER_GUARD = LifecycleHandlerRecursionGuard()
+_DEPSGRAPH_TRACE_ENABLED = False
+_DEPSGRAPH_TRACE_SAMPLE_NS = 100_000_000
+_DEPSGRAPH_LAST_TRACE_NS = 0
+_DEPSGRAPH_DROPPED_SAMPLES = 0
+_DEPSGRAPH_SAMPLE_ACTIVE = False
 _SCRUB_STATE: dict[str, Any] | None = None
 _PRECISION_PREVIOUS_BONES: dict[tuple[str, str], dict[str, Any]] = {}
 _LAST_TRACE_RECORD: dict[str, Any] | None = None
@@ -54,10 +104,69 @@ def new_trace_operation_id(prefix: str) -> str:
     return f"{safe or 'awb'}:{uuid4().hex}"
 
 
-def link_trace_operation(child_operation_id: str | None, parent_operation_id: str | None) -> None:
+def new_trace_causal_root(prefix: str = "awb") -> TraceCausalContext:
+    return new_trace_root(prefix)
+
+
+def new_trace_causal_child(
+    parent: TraceCausalContext,
+    prefix: str = "span",
+) -> TraceCausalContext:
+    return new_trace_child(parent, prefix)
+
+
+def bind_operation_causal_context(
+    operation_id: str | None,
+    causal: TraceCausalContext,
+) -> TraceCausalContext | None:
+    return _OPERATION_CAUSAL.bind(operation_id, causal)
+
+
+def operation_causal_context(operation_id: str | None) -> TraceCausalContext | None:
+    return _OPERATION_CAUSAL.get(operation_id)
+
+
+def release_operation_causal_context(operation_id: str | None) -> None:
+    _OPERATION_CAUSAL.forget(operation_id)
+    if operation_id is not None:
+        _OPERATION_PARENTS.pop(str(operation_id), None)
+
+
+def set_depsgraph_trace_enabled(enabled: bool) -> None:
+    global _DEPSGRAPH_TRACE_ENABLED
+    _DEPSGRAPH_TRACE_ENABLED = bool(enabled)
+    pre_handlers = getattr(bpy.app.handlers, "depsgraph_update_pre", None)
+    post_handlers = getattr(bpy.app.handlers, "depsgraph_update_post", None)
+    if _DEPSGRAPH_TRACE_ENABLED:
+        if pre_handlers is not None and _trace_depsgraph_update_pre not in pre_handlers:
+            pre_handlers.append(_trace_depsgraph_update_pre)
+        if post_handlers is not None and _trace_depsgraph_update_post not in post_handlers:
+            post_handlers.append(_trace_depsgraph_update_post)
+    else:
+        if pre_handlers is not None and _trace_depsgraph_update_pre in pre_handlers:
+            pre_handlers.remove(_trace_depsgraph_update_pre)
+        if post_handlers is not None and _trace_depsgraph_update_post in post_handlers:
+            post_handlers.remove(_trace_depsgraph_update_post)
+
+
+def depsgraph_trace_enabled() -> bool:
+    return bool(_DEPSGRAPH_TRACE_ENABLED)
+
+
+def link_trace_operation(
+    child_operation_id: str | None,
+    parent_operation_id: str | None,
+) -> TraceCausalContext | None:
     if not child_operation_id or not parent_operation_id or child_operation_id == parent_operation_id:
-        return
-    _OPERATION_PARENTS[str(child_operation_id)] = str(parent_operation_id)
+        return None
+    child_id = str(child_operation_id)
+    parent_id = str(parent_operation_id)
+    _OPERATION_PARENTS[child_id] = parent_id
+    return _OPERATION_CAUSAL.link(
+        child_id,
+        parent_id,
+        child_prefix="operation",
+    )
 
 
 def trace_scrub_begin(context, *, source: str) -> None:
@@ -227,8 +336,26 @@ def _append_runtime_error_record(
                 "event": last_trace.get("event"),
                 "operation_id": last_trace.get("operation_id"),
                 "parent_operation_id": last_trace.get("parent_operation_id"),
+                "trace_id": last_trace.get("trace_id"),
+                "span_id": last_trace.get("span_id"),
+                "parent_span_id": last_trace.get("parent_span_id"),
+                "subsystem": last_trace.get("subsystem"),
+                "lifecycle_phase": last_trace.get("lifecycle_phase"),
+                "evaluation_phase": last_trace.get("evaluation_phase"),
+                "terminal_status": last_trace.get("terminal_status"),
+                "route_outcome": last_trace.get("route_outcome"),
                 "state": last_trace.get("state"),
                 "data": last_trace.get("data"),
+            },
+            "last_observed_causal": {
+                "session_id": last_trace.get("session_id"),
+                "seq": last_trace.get("seq"),
+                "trace_id": last_trace.get("trace_id"),
+                "span_id": last_trace.get("span_id"),
+                "parent_span_id": last_trace.get("parent_span_id"),
+                "subsystem": last_trace.get("subsystem"),
+                "lifecycle_phase": last_trace.get("lifecycle_phase"),
+                "evaluation_phase": last_trace.get("evaluation_phase"),
             },
         }
         path = _runtime_errors_path()
@@ -919,6 +1046,17 @@ def trace_event(
     *,
     operation_id: str | None = None,
     parent_operation_id: str | None = None,
+    causal: TraceCausalContext | None = None,
+    trace_id: str | None = None,
+    span_id: str | None = None,
+    parent_span_id: str | None = None,
+    subsystem: str | None = None,
+    lifecycle_phase: str | None = None,
+    evaluation_phase: str | None = None,
+    terminal_status: TraceTerminalStatus | None = None,
+    route_outcome: TraceRouteOutcome | None = None,
+    dropped: int | None = None,
+    truncated: bool | None = None,
     context=None,
     **data,
 ) -> None:
@@ -934,6 +1072,39 @@ def trace_event(
         resolved_parent = parent_operation_id
         if resolved_parent is None and operation_id is not None:
             resolved_parent = _OPERATION_PARENTS.get(str(operation_id))
+        bound_causal = causal or operation_causal_context(operation_id)
+        resolved_trace_id = trace_id if trace_id is not None else (
+            bound_causal.trace_id if bound_causal is not None else None
+        )
+        resolved_span_id = span_id if span_id is not None else (
+            bound_causal.span_id if bound_causal is not None else None
+        )
+        resolved_parent_span_id = (
+            parent_span_id
+            if parent_span_id is not None
+            else (bound_causal.parent_span_id if bound_causal is not None else None)
+        )
+        terminal_contract = _EXPLICIT_TERMINAL_EVENTS.get(str(event))
+        if terminal_contract is not None:
+            mapped_terminal, mapped_phase, mapped_route = terminal_contract
+            if terminal_status is None:
+                terminal_status = mapped_terminal
+            if lifecycle_phase is None:
+                lifecycle_phase = mapped_phase
+            if route_outcome is None:
+                route_outcome = mapped_route
+            if subsystem is None:
+                subsystem = "operator"
+        resolved_terminal = (
+            terminal_status.value
+            if isinstance(terminal_status, TraceTerminalStatus)
+            else (str(terminal_status) if terminal_status is not None else None)
+        )
+        resolved_route = (
+            route_outcome.value
+            if isinstance(route_outcome, TraceRouteOutcome)
+            else (str(route_outcome) if route_outcome is not None else None)
+        )
         record = {
             "schema": "awb-interaction-trace/v1",
             "session_id": _SESSION_ID,
@@ -945,6 +1116,19 @@ def trace_event(
             "event": str(event),
             "operation_id": operation_id,
             "parent_operation_id": resolved_parent,
+            "trace_id": resolved_trace_id,
+            "span_id": resolved_span_id,
+            "parent_span_id": resolved_parent_span_id,
+            "span_origin": (
+                bound_causal.span_origin if bound_causal is not None else None
+            ),
+            "subsystem": str(subsystem) if subsystem is not None else None,
+            "lifecycle_phase": str(lifecycle_phase) if lifecycle_phase is not None else None,
+            "evaluation_phase": str(evaluation_phase) if evaluation_phase is not None else None,
+            "terminal_status": resolved_terminal,
+            "route_outcome": resolved_route,
+            "dropped": int(dropped) if dropped is not None else None,
+            "truncated": bool(truncated) if truncated is not None else None,
             "state": _context_snapshot(context),
             "data": _json_safe(data),
         }
@@ -963,11 +1147,58 @@ def trace_event(
             }
         ):
             persist_latest_replay_script()
+        if terminal_status is not None and operation_id is not None:
+            _OPERATION_CAUSAL.forget(operation_id)
+            _OPERATION_PARENTS.pop(str(operation_id), None)
     except Exception:  # noqa: BLE001, S110 -- trace persistence is strictly non-blocking
         # Never let diagnostics alter the user's Blender operation.
         pass
     finally:
         _WRITE_GUARD = False
+
+
+def trace_lifecycle_event(
+    event: str,
+    *,
+    subsystem: str,
+    phase: str,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
+    causal: TraceCausalContext | None = None,
+    evaluation_phase: str | None = None,
+    terminal_status: TraceTerminalStatus | None = None,
+    route_outcome: TraceRouteOutcome | None = None,
+    dropped: int | None = None,
+    truncated: bool | None = None,
+    context=None,
+    **data,
+) -> None:
+    resolved_subsystem = validate_trace_subsystem(subsystem)
+    resolved_phase = validate_trace_lifecycle_phase(phase)
+    resolved_evaluation = validate_trace_evaluation_phase(evaluation_phase)
+    if terminal_status is not None and not isinstance(terminal_status, TraceTerminalStatus):
+        raise TypeError("terminal_status must be TraceTerminalStatus or None")
+    if route_outcome is not None and not isinstance(route_outcome, TraceRouteOutcome):
+        raise TypeError("route_outcome must be TraceRouteOutcome or None")
+    trace_event(
+        "LIFECYCLE",
+        event,
+        operation_id=operation_id,
+        parent_operation_id=parent_operation_id,
+        causal=causal,
+        subsystem=resolved_subsystem,
+        lifecycle_phase=resolved_phase,
+        evaluation_phase=resolved_evaluation,
+        terminal_status=terminal_status,
+        route_outcome=route_outcome,
+        dropped=dropped,
+        truncated=truncated,
+        context=context,
+        **data,
+    )
+    if terminal_status is not None and operation_id is not None:
+        _OPERATION_CAUSAL.forget(operation_id)
+        _OPERATION_PARENTS.pop(str(operation_id), None)
 
 
 def trace_exception(
@@ -999,6 +1230,153 @@ def trace_exception(
         traceback_text,
         context=context,
     )
+
+
+def _trace_standalone_handler_event(
+    event: str,
+    *,
+    phase: str,
+    evaluation_phase: str,
+    **data,
+) -> None:
+    if not _LIFECYCLE_HANDLER_GUARD.enter():
+        return
+    try:
+        trace_lifecycle_event(
+            event,
+            subsystem="handler",
+            phase=phase,
+            evaluation_phase=evaluation_phase,
+            context=getattr(bpy, "context", None),
+            **data,
+        )
+    finally:
+        _LIFECYCLE_HANDLER_GUARD.exit()
+
+
+@persistent
+def _trace_load_pre(*_args) -> None:
+    _trace_standalone_handler_event(
+        "FILE_LOAD_PRE",
+        phase="handler_pre",
+        evaluation_phase="pre_handler",
+    )
+
+
+@persistent
+def _trace_save_pre(*_args) -> None:
+    _trace_standalone_handler_event(
+        "FILE_SAVE_PRE",
+        phase="handler_pre",
+        evaluation_phase="pre_handler",
+    )
+
+
+@persistent
+def _trace_save_post(*_args) -> None:
+    _trace_standalone_handler_event(
+        "FILE_SAVE_POST",
+        phase="handler_post",
+        evaluation_phase="post_handler",
+        terminal_status=TraceTerminalStatus.FINISHED,
+    )
+
+
+@persistent
+def _trace_save_post_fail(*_args) -> None:
+    _trace_standalone_handler_event(
+        "FILE_SAVE_FAIL",
+        phase="fail",
+        evaluation_phase="post_handler",
+        terminal_status=TraceTerminalStatus.FAILED,
+    )
+
+
+@persistent
+def _trace_undo_pre(*_args) -> None:
+    _trace_standalone_handler_event(
+        "UNDO_PRE",
+        phase="handler_pre",
+        evaluation_phase="pre_handler",
+    )
+
+
+@persistent
+def _trace_undo_post(*_args) -> None:
+    _trace_standalone_handler_event(
+        "UNDO_POST",
+        phase="handler_post",
+        evaluation_phase="post_handler",
+        terminal_status=TraceTerminalStatus.FINISHED,
+    )
+
+
+@persistent
+def _trace_redo_pre(*_args) -> None:
+    _trace_standalone_handler_event(
+        "REDO_PRE",
+        phase="handler_pre",
+        evaluation_phase="pre_handler",
+    )
+
+
+@persistent
+def _trace_redo_post(*_args) -> None:
+    _trace_standalone_handler_event(
+        "REDO_POST",
+        phase="handler_post",
+        evaluation_phase="post_handler",
+        terminal_status=TraceTerminalStatus.FINISHED,
+    )
+
+
+@persistent
+def _trace_depsgraph_update_pre(*_args) -> None:
+    global _DEPSGRAPH_LAST_TRACE_NS, _DEPSGRAPH_DROPPED_SAMPLES, _DEPSGRAPH_SAMPLE_ACTIVE
+    _DEPSGRAPH_SAMPLE_ACTIVE = False
+    if not _DEPSGRAPH_TRACE_ENABLED:
+        return
+    now = monotonic_ns()
+    if now - _DEPSGRAPH_LAST_TRACE_NS < _DEPSGRAPH_TRACE_SAMPLE_NS:
+        _DEPSGRAPH_DROPPED_SAMPLES += 1
+        return
+    _DEPSGRAPH_LAST_TRACE_NS = now
+    dropped = _DEPSGRAPH_DROPPED_SAMPLES
+    _DEPSGRAPH_DROPPED_SAMPLES = 0
+    if not _LIFECYCLE_HANDLER_GUARD.enter():
+        return
+    _DEPSGRAPH_SAMPLE_ACTIVE = True
+    try:
+        trace_lifecycle_event(
+            "DEPSGRAPH_UPDATE_PRE",
+            subsystem="depsgraph",
+            phase="depsgraph_pre",
+            evaluation_phase="pre_handler",
+            dropped=dropped,
+            context=getattr(bpy, "context", None),
+        )
+    finally:
+        _LIFECYCLE_HANDLER_GUARD.exit()
+
+
+@persistent
+def _trace_depsgraph_update_post(*_args) -> None:
+    global _DEPSGRAPH_SAMPLE_ACTIVE
+    if not _DEPSGRAPH_TRACE_ENABLED or not _DEPSGRAPH_SAMPLE_ACTIVE:
+        return
+    _DEPSGRAPH_SAMPLE_ACTIVE = False
+    if not _LIFECYCLE_HANDLER_GUARD.enter():
+        return
+    try:
+        trace_lifecycle_event(
+            "DEPSGRAPH_UPDATE_POST",
+            subsystem="depsgraph",
+            phase="depsgraph_post",
+            evaluation_phase="post_handler",
+            context=getattr(bpy, "context", None),
+        )
+    finally:
+        _LIFECYCLE_HANDLER_GUARD.exit()
 
 
 @persistent
@@ -1034,6 +1412,7 @@ def _trace_load_post(*_args) -> None:
     global _LAST_FRAME, _SCRUB_STATE
     _SCRUB_STATE = None
     _OPERATION_PARENTS.clear()
+    _OPERATION_CAUSAL.reset()
     # At addon registration time Blender may not yet expose the target .blend
     # filepath, so the initial trace path can live under the temp directory.
     # Once load_post fires, preserve and rotate any existing trace beside the
@@ -1048,7 +1427,26 @@ def _trace_load_post(*_args) -> None:
         int(getattr(scene, "frame_current", 0)),
         float(getattr(scene, "frame_subframe", 0.0)),
     ) if scene is not None else None
-    trace_event("LIFECYCLE", "FILE_LOAD", context=bpy.context)
+    trace_lifecycle_event(
+        "FILE_LOAD",
+        subsystem="handler",
+        phase="handler_post",
+        evaluation_phase="post_handler",
+        terminal_status=TraceTerminalStatus.FINISHED,
+        context=bpy.context,
+    )
+
+
+def _register_handler_list(name: str, callback) -> None:
+    handlers = getattr(bpy.app.handlers, name, None)
+    if handlers is not None and callback not in handlers:
+        handlers.append(callback)
+
+
+def _unregister_handler_list(name: str, callback) -> None:
+    handlers = getattr(bpy.app.handlers, name, None)
+    if handlers is not None and callback in handlers:
+        handlers.remove(callback)
 
 
 def register_debug_trace_handlers() -> None:
@@ -1062,28 +1460,60 @@ def register_debug_trace_handlers() -> None:
     _archive_existing_session_file(_precision_trace_path())
     _archive_runtime_errors_for_new_session()
     _OPERATION_PARENTS.clear()
+    _OPERATION_CAUSAL.reset()
     _PRECISION_PREVIOUS_BONES.clear()
     scene = getattr(bpy.context, "scene", None)
     _LAST_FRAME = (
         int(getattr(scene, "frame_current", 0)),
         float(getattr(scene, "frame_subframe", 0.0)),
     ) if scene is not None else None
-    if _trace_frame_change_post not in bpy.app.handlers.frame_change_post:
-        bpy.app.handlers.frame_change_post.append(_trace_frame_change_post)
-    if _trace_load_post not in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.append(_trace_load_post)
+    _register_handler_list("frame_change_post", _trace_frame_change_post)
+    _register_handler_list("load_pre", _trace_load_pre)
+    _register_handler_list("load_post", _trace_load_post)
+    _register_handler_list("save_pre", _trace_save_pre)
+    _register_handler_list("save_post", _trace_save_post)
+    _register_handler_list("save_post_fail", _trace_save_post_fail)
+    _register_handler_list("undo_pre", _trace_undo_pre)
+    _register_handler_list("undo_post", _trace_undo_post)
+    _register_handler_list("redo_pre", _trace_redo_pre)
+    _register_handler_list("redo_post", _trace_redo_post)
+    # Depsgraph tracing is intentionally opt-in because it is high-rate.
+    if _DEPSGRAPH_TRACE_ENABLED:
+        set_depsgraph_trace_enabled(True)
     sys.excepthook = _runtime_excepthook
     if hasattr(threading, "excepthook"):
         threading.excepthook = _runtime_threading_excepthook
-    trace_event("LIFECYCLE", "SESSION_START", context=bpy.context, trace_path=trace_path())
+    trace_lifecycle_event(
+        "SESSION_START",
+        subsystem="runtime",
+        phase="invoke",
+        evaluation_phase="live_context",
+        context=bpy.context,
+        trace_path=trace_path(),
+    )
 
 
 def unregister_debug_trace_handlers() -> None:
-    trace_event("LIFECYCLE", "SESSION_END", context=bpy.context)
-    if _trace_frame_change_post in bpy.app.handlers.frame_change_post:
-        bpy.app.handlers.frame_change_post.remove(_trace_frame_change_post)
-    if _trace_load_post in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.remove(_trace_load_post)
+    trace_lifecycle_event(
+        "SESSION_END",
+        subsystem="runtime",
+        phase="commit",
+        evaluation_phase="live_context",
+        terminal_status=TraceTerminalStatus.FINISHED,
+        context=bpy.context,
+    )
+    _unregister_handler_list("frame_change_post", _trace_frame_change_post)
+    _unregister_handler_list("load_pre", _trace_load_pre)
+    _unregister_handler_list("load_post", _trace_load_post)
+    _unregister_handler_list("save_pre", _trace_save_pre)
+    _unregister_handler_list("save_post", _trace_save_post)
+    _unregister_handler_list("save_post_fail", _trace_save_post_fail)
+    _unregister_handler_list("undo_pre", _trace_undo_pre)
+    _unregister_handler_list("undo_post", _trace_undo_post)
+    _unregister_handler_list("redo_pre", _trace_redo_pre)
+    _unregister_handler_list("redo_post", _trace_redo_post)
+    set_depsgraph_trace_enabled(False)
+    _OPERATION_CAUSAL.reset()
     if sys.excepthook is _runtime_excepthook:
         sys.excepthook = _ORIGINAL_SYS_EXCEPTHOOK
     if (

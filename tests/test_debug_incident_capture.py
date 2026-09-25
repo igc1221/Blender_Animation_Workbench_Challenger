@@ -84,6 +84,16 @@ def _prepare_project_root(tmp_path: Path, *, external_debug: bool = False):
             "event": "TRANSFORM_FAIL",
             "operation_id": "op-1",
             "parent_operation_id": None,
+            "trace_id": "trace:synthetic",
+            "span_id": "span:operator",
+            "parent_span_id": "span:ingress",
+            "subsystem": "operator",
+            "lifecycle_phase": "fail",
+            "evaluation_phase": "live_context",
+            "terminal_status": "FAILED",
+            "route_outcome": "CLAIMED",
+            "dropped": 2,
+            "truncated": False,
             "state": {
                 "mode": "OBJECT",
                 "frame": 4,
@@ -163,6 +173,18 @@ def _prepare_project_root(tmp_path: Path, *, external_debug: bool = False):
         "trace_session_id": "session-current",
         "last_trace_seq": 3,
         "last_trace_event": "TRANSFORM_FAIL",
+        "last_causal": {
+            "trace_id": "trace:synthetic",
+            "span_id": "span:operator",
+            "parent_span_id": "span:ingress",
+            "operation_id": "op-1",
+            "parent_operation_id": None,
+            "subsystem": "operator",
+            "lifecycle_phase": "fail",
+            "evaluation_phase": "live_context",
+            "terminal_status": "FAILED",
+            "route_outcome": "CLAIMED",
+        },
         "semantic_replay": {
             "schema": "awb-semantic-replay/v1",
             "source_session_id": "session-current",
@@ -240,8 +262,30 @@ def test_capture_generic_live_incident_is_immutable_and_fresh(tmp_path: Path):
     assert state_before["source"]["seq"] == 2
 
     assert state_failure["status"] == "AVAILABLE"
+    assert state_failure["trace_id"] == "trace:synthetic"
+    assert state_failure["span_id"] == "span:operator"
+    assert state_failure["parent_span_id"] == "span:ingress"
+    assert state_failure["operation_id"] == "op-1"
+    assert state_failure["subsystem"] == "operator"
+    assert state_failure["lifecycle_phase"] == "fail"
+    assert state_failure["evaluation_phase"] == "live_context"
     assert state_failure["domain_probes"] == []
     assert "rigped" not in json.dumps(state_failure, ensure_ascii=False).lower()
+
+    timeline_rows = [
+        json.loads(line)
+        for line in (incident / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    causal_terminal = next(row for row in timeline_rows if row["event"] == "TRANSFORM_FAIL")
+    assert causal_terminal["trace_id"] == "trace:synthetic"
+    assert causal_terminal["span_id"] == "span:operator"
+    assert causal_terminal["subsystem"] == "operator"
+    assert causal_terminal["lifecycle_phase"] == "fail"
+    assert causal_terminal["terminal_status"] == "FAILED"
+    assert causal_terminal["route_outcome"] == "CLAIMED"
+    assert causal_terminal["dropped"] == 2
+    assert causal_terminal["truncated"] is False
 
     assert replay["status"] == "AVAILABLE"
     assert replay["freshness"] == "FRESH"
