@@ -99,6 +99,10 @@ def replay_execution_active() -> bool:
     return bool(_REPLAY_EXECUTION_ACTIVE)
 
 
+def session_id() -> str:
+    return str(_SESSION_ID)
+
+
 def new_trace_operation_id(prefix: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in str(prefix)).strip("-")
     return f"{safe or 'awb'}:{uuid4().hex}"

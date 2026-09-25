@@ -1956,8 +1956,31 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
             )
             return {"FINISHED"}
         if not _activate_awb_transform_workspace_tool(context, self.mode):
+            trace_lifecycle_event(
+                "TRANSFORM_TOOL_GENERIC_CANCELLED",
+                subsystem="operator",
+                phase="cancel",
+                causal=route_causal,
+                terminal_status=TraceTerminalStatus.CANCELLED,
+                route_outcome=TraceRouteOutcome.REJECTED,
+                context=context,
+                requested_mode=self.mode,
+                route="GENERIC_WORKSPACE_TOOL",
+            )
             return {"CANCELLED"}
         context.area.tag_redraw()
+        trace_lifecycle_event(
+            "TRANSFORM_TOOL_GENERIC_FINISHED",
+            subsystem="operator",
+            phase="commit",
+            causal=route_causal,
+            terminal_status=TraceTerminalStatus.FINISHED,
+            route_outcome=TraceRouteOutcome.CLAIMED,
+            context=context,
+            requested_mode=self.mode,
+            route="GENERIC_WORKSPACE_TOOL",
+            cycled_orientation=False,
+        )
         return {"FINISHED"}
 
 
