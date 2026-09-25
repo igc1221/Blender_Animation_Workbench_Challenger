@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import math
+import sys
+import threading
+import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic_ns
@@ -16,6 +19,8 @@ _PRECISION_TRACE_FILENAME = "awb_precision_trace.jsonl"
 _REPLAY_FILENAME = "awb_replay_latest.json"
 _REPLAY_PREVIOUS_FILENAME = "awb_replay_previous.json"
 _REPLAY_PREVIOUS2_FILENAME = "awb_replay_previous2.json"
+_RUNTIME_CONTEXT_FILENAME = "awb_runtime_context.json"
+_RUNTIME_ERRORS_FILENAME = "awb_runtime_errors.jsonl"
 _TRACE_MAX_BYTES = 4 * 1024 * 1024
 _PRECISION_TRACE_MAX_BYTES = 2 * 1024 * 1024
 _TAIL_READ_CHUNK_BYTES = 64 * 1024
@@ -30,6 +35,9 @@ _REPLAY_EXECUTION_ACTIVE = False
 _OPERATION_PARENTS: dict[str, str] = {}
 _SCRUB_STATE: dict[str, Any] | None = None
 _PRECISION_PREVIOUS_BONES: dict[tuple[str, str], dict[str, Any]] = {}
+_LAST_TRACE_RECORD: dict[str, Any] | None = None
+_ORIGINAL_SYS_EXCEPTHOOK = sys.excepthook
+_ORIGINAL_THREADING_EXCEPTHOOK = getattr(threading, "excepthook", None)
 
 
 def set_replay_execution_active(active: bool) -> None:
@@ -112,6 +120,11 @@ def _debug_root_path() -> Path:
         blend_dir = Path(filepath).resolve().parent
         if blend_dir.name.casefold() == "build":
             return blend_dir.parent / "debug"
+        if (
+            blend_dir.name.casefold() == "golden"
+            and blend_dir.parent.name.casefold() == "baselines"
+        ):
+            return blend_dir.parent.parent / "debug"
         return blend_dir / "debug"
     tempdir = str(getattr(bpy.app, "tempdir", "") or "")
     if tempdir:
@@ -153,6 +166,105 @@ def _replay_previous_path() -> Path:
 
 def _replay_previous2_path() -> Path:
     return _replay_path().with_name(_REPLAY_PREVIOUS2_FILENAME)
+
+
+def _runtime_error_root_path() -> Path:
+    return _debug_root_path() / "runtime_error_log"
+
+
+def _runtime_context_path() -> Path:
+    return _runtime_error_root_path() / _RUNTIME_CONTEXT_FILENAME
+
+
+def _runtime_errors_path() -> Path:
+    return _runtime_error_root_path() / _RUNTIME_ERRORS_FILENAME
+
+
+def runtime_context_path() -> str:
+    return str(_runtime_context_path())
+
+
+def runtime_errors_path() -> str:
+    return str(_runtime_errors_path())
+
+
+def _write_runtime_context_snapshot(record: dict[str, Any]) -> None:
+    try:
+        path = _runtime_context_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f"{path.name}.tmp")
+        temp_path.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp_path.replace(path)
+    except OSError:
+        pass
+
+
+def _append_runtime_error_record(
+    source: str,
+    exc_type: str,
+    message: str,
+    traceback_text: str,
+    *,
+    context=None,
+) -> None:
+    try:
+        last_trace = _LAST_TRACE_RECORD or {}
+        record = {
+            "schema": "awb-runtime-error/v1",
+            "utc": datetime.now(UTC).isoformat(timespec="milliseconds"),
+            "session_id": _SESSION_ID,
+            "source": str(source),
+            "error_type": str(exc_type),
+            "error": str(message),
+            "traceback": str(traceback_text),
+            "state": _context_snapshot(context),
+            "last_trace": {
+                "seq": last_trace.get("seq"),
+                "channel": last_trace.get("channel"),
+                "event": last_trace.get("event"),
+                "operation_id": last_trace.get("operation_id"),
+                "parent_operation_id": last_trace.get("parent_operation_id"),
+                "state": last_trace.get("state"),
+                "data": last_trace.get("data"),
+            },
+        }
+        path = _runtime_errors_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+            handle.write("\n")
+    except Exception:  # noqa: BLE001, S110 -- diagnostics must never block Blender
+        pass
+
+
+def _runtime_excepthook(exc_type, exc_value, exc_tb) -> None:
+    traceback_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    _append_runtime_error_record(
+        "sys.excepthook",
+        getattr(exc_type, "__name__", str(exc_type)),
+        str(exc_value),
+        traceback_text,
+        context=getattr(bpy, "context", None),
+    )
+    _ORIGINAL_SYS_EXCEPTHOOK(exc_type, exc_value, exc_tb)
+
+
+def _runtime_threading_excepthook(args) -> None:
+    traceback_text = "".join(
+        traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)
+    )
+    _append_runtime_error_record(
+        "threading.excepthook",
+        getattr(args.exc_type, "__name__", str(args.exc_type)),
+        str(args.exc_value),
+        traceback_text,
+        context=getattr(bpy, "context", None),
+    )
+    if _ORIGINAL_THREADING_EXCEPTHOOK is not None:
+        _ORIGINAL_THREADING_EXCEPTHOOK(args)
 
 
 def _read_replay_script_file(path: Path) -> dict[str, Any] | None:
@@ -205,6 +317,17 @@ def _archive_existing_session_file(path: Path) -> None:
     except OSError:
         # Diagnostics must never block Blender startup.
         return
+
+
+def _archive_runtime_errors_for_new_session() -> None:
+    path = _runtime_errors_path()
+    records = _read_jsonl_tail(path, 1)
+    if not records:
+        return
+    recorded_session = str(records[-1].get("session_id") or "")
+    if recorded_session == _SESSION_ID:
+        return
+    _archive_existing_session_file(path)
 
 
 def _read_jsonl_tail(path: Path, limit: int) -> list[dict[str, Any]]:
@@ -799,7 +922,7 @@ def trace_event(
     context=None,
     **data,
 ) -> None:
-    global _SEQUENCE, _WRITE_GUARD
+    global _LAST_TRACE_RECORD, _SEQUENCE, _WRITE_GUARD
     if _WRITE_GUARD:
         return
     _WRITE_GUARD = True
@@ -828,6 +951,8 @@ def trace_event(
         with path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
             handle.write("\n")
+        _LAST_TRACE_RECORD = record
+        _write_runtime_context_snapshot(record)
         if (
             not _REPLAY_EXECUTION_ACTIVE
             and str(event) in {
@@ -854,6 +979,9 @@ def trace_exception(
     context=None,
     **data,
 ) -> None:
+    traceback_text = "".join(
+        traceback.format_exception(type(exc), exc, exc.__traceback__)
+    )
     trace_event(
         channel,
         event,
@@ -861,7 +989,15 @@ def trace_exception(
         context=context,
         error_type=type(exc).__name__,
         error=str(exc),
+        traceback=traceback_text,
         **data,
+    )
+    _append_runtime_error_record(
+        "trace_exception",
+        type(exc).__name__,
+        str(exc),
+        traceback_text,
+        context=context,
     )
 
 
@@ -905,6 +1041,7 @@ def _trace_load_post(*_args) -> None:
     persist_latest_replay_script()
     _archive_existing_session_file(_trace_path())
     _archive_existing_session_file(_precision_trace_path())
+    _archive_runtime_errors_for_new_session()
     _PRECISION_PREVIOUS_BONES.clear()
     scene = getattr(bpy.context, "scene", None)
     _LAST_FRAME = (
@@ -923,6 +1060,7 @@ def register_debug_trace_handlers() -> None:
     persist_latest_replay_script()
     _archive_existing_session_file(_trace_path())
     _archive_existing_session_file(_precision_trace_path())
+    _archive_runtime_errors_for_new_session()
     _OPERATION_PARENTS.clear()
     _PRECISION_PREVIOUS_BONES.clear()
     scene = getattr(bpy.context, "scene", None)
@@ -934,6 +1072,9 @@ def register_debug_trace_handlers() -> None:
         bpy.app.handlers.frame_change_post.append(_trace_frame_change_post)
     if _trace_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_trace_load_post)
+    sys.excepthook = _runtime_excepthook
+    if hasattr(threading, "excepthook"):
+        threading.excepthook = _runtime_threading_excepthook
     trace_event("LIFECYCLE", "SESSION_START", context=bpy.context, trace_path=trace_path())
 
 
@@ -943,3 +1084,11 @@ def unregister_debug_trace_handlers() -> None:
         bpy.app.handlers.frame_change_post.remove(_trace_frame_change_post)
     if _trace_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_trace_load_post)
+    if sys.excepthook is _runtime_excepthook:
+        sys.excepthook = _ORIGINAL_SYS_EXCEPTHOOK
+    if (
+        hasattr(threading, "excepthook")
+        and threading.excepthook is _runtime_threading_excepthook
+        and _ORIGINAL_THREADING_EXCEPTHOOK is not None
+    ):
+        threading.excepthook = _ORIGINAL_THREADING_EXCEPTHOOK

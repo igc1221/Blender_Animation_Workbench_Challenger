@@ -8,8 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PREP_PATH = ROOT / "scripts" / "prepare_rigped_animate_baseline_via_mcp.py"
 E9_PATH = ROOT / "scripts" / "verify_phase4_e9_multilimb_sliding.py"
-GOLDEN_PATH = ROOT / "baselines" / "golden" / "rigped_animate_manual_baseline_v4.blend"
-MANIFEST_PATH = ROOT / "baselines" / "golden" / "rigped_animate_manual_baseline_v4.json"
+GOLDEN_PATH = ROOT / "baselines" / "golden" / "rigped_animate_manual_baseline_v1.blend"
+MANIFEST_PATH = ROOT / "baselines" / "golden" / "rigped_animate_manual_baseline_v1.json"
 
 
 def _source(path: Path) -> tuple[str, ast.Module]:
@@ -43,9 +43,9 @@ def test_golden_manual_baseline_hash_matches_manifest() -> None:
     actual = hashlib.sha256(GOLDEN_PATH.read_bytes()).hexdigest()
 
     assert manifest["status"] == "GOLDEN_IMMUTABLE"
-    assert expected == "f1bd6b2c7d4888f7f67f2ad7509ce842c095a8f14fd9015ebfb4f209d18035d8"
+    assert expected == "8c5ee34f94ee5445d73c058545ebd2f89e0e783ef787b0e7d1258694edd68577"
     assert actual == expected
-    assert GOLDEN_PATH.stat().st_size == manifest["size_bytes"] == 975876
+    assert GOLDEN_PATH.stat().st_size == manifest["size_bytes"] == 974052
 
 
 def test_manual_baseline_prepare_copies_golden_then_opens_working_copy() -> None:
@@ -59,7 +59,7 @@ def test_manual_baseline_prepare_copies_golden_then_opens_working_copy() -> None
     assert "working.write_bytes(golden_bytes)" in prepare
     assert "actual_golden != expected" in prepare
     assert "actual_working != expected" in prepare
-    assert "root / 'baselines' / 'golden' / 'rigped_animate_manual_baseline_v4.blend'" in prepare
+    assert "root / 'baselines' / 'golden' / 'rigped_animate_manual_baseline_v1.blend'" in prepare
     assert "root / 'build' / 'rigped_animate_manual_baseline.blend'" in prepare
     assert "CODE_TEMPLATE.replace('__WORKING_PATH__', repr(str(working)))" in main
     assert "read_setup_descriptor(view)" in code

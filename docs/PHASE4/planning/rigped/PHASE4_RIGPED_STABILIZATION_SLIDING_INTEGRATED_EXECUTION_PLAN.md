@@ -1,4 +1,4 @@
-﻿# Phase 4 Rigped — Stabilization + Sliding Integrated Execution Plan
+# Phase 4 Rigped — Stabilization + Sliding Integrated Execution Plan
 
 > Updated: **2026-09-23 04:49 KST**
 > Status: **A5 STABILIZATION + E1-E12 USER PASS / CLOSED — HISTORICAL EXECUTION LEDGER; A6 is also CLOSED**
@@ -1339,7 +1339,7 @@ This is a protected RC1 regression slice. It was difficult to stabilize and must
    - Replay PASS in `RECORDED_RESULT`; after replay, automated setup leaves `Calf.L/R + ForeArm.L/R` selected, `ForeArm.L` active, orientation `LOCAL`, and all four lower limbs in Sliding / IK influence 1.
    - Next bug-fix attempt must begin from this clean checkpoint and derive a **different root-cause hypothesis**. Reproduce setup with replay; the user performs only the final LOCAL Z drag/visual judgment.
    - If the next attempt fails, return to this same checkpoint/replay boundary rather than advancing the failed working state.
-   - Canonical procedure: `docs/AGENT/AWB_DEBUG_FLIGHT_RECORDER.md` and `docs/AGENT/BLENDER_USER_FIRST_FINAL_TEST_PROTOCOL.md`.
+   - Canonical procedure: `docs/DEBUG/AWB_DEBUG_FLIGHT_RECORDER.md` and `docs/AGENT/BLENDER_USER_FIRST_FINAL_TEST_PROTOCOL.md`.
 
 5. **Protected regressions**
    - Do not regress the paired GLOBAL DLS projection checkpoint `b5b9a8dc21ee1920ff9520bf4701c0f5f2ce150f`.
