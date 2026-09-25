@@ -66,18 +66,52 @@ def _replay(*, path: str = "SEMANTIC") -> dict[str, Any]:
 
 
 def _clean_result(digest: str = "expected-digest") -> dict[str, Any]:
+    step = {
+        "step_index": 1,
+        "step_id": "semantic:0001",
+        "source_seq": 1,
+        "action_kind": "SCRUB",
+        "action_route": "SCRUB",
+        "checkpoint_boundaries": ["BEFORE_OPERATION", "AFTER_OPERATION"],
+    }
     return {
         "schema": "awb-debug-git-bisect-bootstrap-result/v1",
         "path": "SEMANTIC",
         "execution_status": "EXECUTED",
-        "semantic_result": {"schema": "awb-semantic-replay-result/v1", "action_count": 1},
+        "semantic_result": {
+            "schema": "awb-semantic-replay-result/v1",
+            "action_count": 1,
+            "step_manifest": [step],
+        },
         "checkpoints": [
             {
                 "checkpoint_seq": 1,
                 "checkpoint_id": "cp-1",
                 "boundary": "BEFORE_OPERATION",
                 "semantic_state_hash": "abc",
-            }
+                "replay_step_id": "semantic:0001",
+                "replay_step_index": 1,
+                "replay_action_kind": "SCRUB",
+                "replay_action_route": "SCRUB",
+            },
+            {
+                "checkpoint_seq": 2,
+                "checkpoint_id": "cp-2",
+                "previous_checkpoint_id": "cp-1",
+                "previous_checkpoint_status": "AVAILABLE",
+                "boundary": "AFTER_OPERATION",
+                "semantic_state_hash": "abc",
+                "diff_from_previous": {
+                    "before_hash": "abc",
+                    "after_hash": "abc",
+                    "changed": False,
+                    "changes": [],
+                },
+                "replay_step_id": "semantic:0001",
+                "replay_step_index": 1,
+                "replay_action_kind": "SCRUB",
+                "replay_action_route": "SCRUB",
+            },
         ],
         "timeline": [],
         "runtime_identity": {
@@ -163,6 +197,15 @@ def test_bb9_exit_mapping_is_clean_good_exact_bad_and_uncertain_skip():
     assert trial.map_verdict("UNAVAILABLE")[0] == 125
 
 
+def test_initial_receipt_accepts_argparse_string_paths(workspace_tmp):
+    args = _args(workspace_tmp)
+    args.trial_dir = str(args.trial_dir)
+    args.bootstrap = str(args.bootstrap)
+    receipt = trial._initial_receipt(args, [])
+    assert receipt["trial_id"] == "trial"
+    assert receipt["commit_sha"] == COMMIT
+
+
 def test_bb9_clean_complete_candidate_returns_good_zero(workspace_tmp, monkeypatch):
     args = _args(workspace_tmp)
     _install_successful_trial(monkeypatch, args)
@@ -178,28 +221,15 @@ def test_bb9_exact_target_failure_returns_bad_one(workspace_tmp, monkeypatch):
     _install_successful_trial(monkeypatch, args)
     expected_signature = trial.reduction_failure_signature(_oracle())
     exact = _clean_result()
-    exact["checkpoints"] = [
-        {
-            "checkpoint_seq": 1,
-            "checkpoint_id": "before",
-            "boundary": "BEFORE_OPERATION",
-            "semantic_state_hash": "previous",
-        },
-        {
-            "checkpoint_seq": 2,
-            "checkpoint_id": "after",
-            "previous_checkpoint_id": "before",
-            "previous_checkpoint_status": "AVAILABLE",
-            "boundary": "AFTER_OPERATION",
-            "semantic_state_hash": "current",
-            "diff_from_previous": {
-                "before_hash": "previous",
-                "after_hash": "wrong",
-                "changed": True,
-                "changes": [{"path": "/stable/value"}],
-            },
-        },
-    ]
+    exact["checkpoints"][0]["semantic_state_hash"] = "previous"
+    exact["checkpoints"][1]["semantic_state_hash"] = "current"
+    exact["checkpoints"][1]["diff_from_previous"] = {
+        "before_hash": "previous",
+        "after_hash": "wrong",
+        "changed": True,
+        "changes": [{"path": "/stable/value"}],
+    }
+
     def execute(_blender, env, trial_dir, *_args, **_kwargs):
         actual_digest = trial.sha256_tree(
             trial_dir
@@ -370,6 +400,39 @@ def test_bb9_gui_input_without_foreground_event_simulation_is_skip(workspace_tmp
     receipt = json.loads((args.trial_dir / "receipt.json").read_text(encoding="utf-8"))
     assert receipt["reason"] == "GUI_INPUT_REQUIRES_FOREGROUND_EVENT_SIMULATION"
     assert receipt["exit_code"] == 125
+
+
+def test_bb9_parse_args_preserves_path_types(workspace_tmp):
+    candidate = workspace_tmp / "candidate"
+    trial_dir = workspace_tmp / "trial"
+    replay = workspace_tmp / "replay.json"
+    baseline = workspace_tmp / "baseline.blend"
+    blender = workspace_tmp / "blender.exe"
+    bootstrap = workspace_tmp / "bootstrap.py"
+    args = trial.parse_args(
+        [
+            "--candidate-root",
+            str(candidate),
+            "--expected-commit",
+            COMMIT,
+            "--trial-dir",
+            str(trial_dir),
+            "--replay",
+            str(replay),
+            "--baseline-master",
+            str(baseline),
+            "--blender",
+            str(blender),
+            "--bootstrap",
+            str(bootstrap),
+        ]
+    )
+    assert args.candidate_root == candidate
+    assert args.trial_dir == trial_dir
+    assert args.replay == replay
+    assert args.baseline_master == baseline
+    assert args.blender == blender
+    assert args.bootstrap == bootstrap
 
 
 def test_bb9_matching_first_divergence_ignores_checkpoint_sequence():
