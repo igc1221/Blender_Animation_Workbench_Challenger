@@ -314,6 +314,7 @@ def test_capture_generic_live_incident_is_immutable_and_fresh(tmp_path: Path):
     state_checkpoints = json.loads(
         (incident / "state_checkpoints.json").read_text(encoding="utf-8")
     )
+    divergences = json.loads((incident / "divergences.json").read_text(encoding="utf-8"))
     replay = json.loads((incident / "replay.json").read_text(encoding="utf-8"))
 
     assert manifest["schema"] == "awb-debug-incident-manifest/v1"
@@ -332,7 +333,12 @@ def test_capture_generic_live_incident_is_immutable_and_fresh(tmp_path: Path):
     assert analysis["state_checkpoints_status"] == "AVAILABLE"
     assert analysis["state_checkpoint_count"] == 2
     assert analysis["first_changed_checkpoint"].endswith(":checkpoint:0002")
+    assert analysis["divergences_status"] == "AVAILABLE"
+    assert analysis["divergence_violation_count"] == 0
+    assert analysis["divergence_error_count"] == 0
+    assert analysis["first_divergence"] is None
     assert manifest["artifacts"]["state_checkpoints"]["status"] == "PRESENT"
+    assert manifest["artifacts"]["divergences"]["status"] == "PRESENT"
     assert analysis["viewport"]["reason"] == "NO_SAFE_READ_ONLY_CAPTURE_PATH_BB1"
     assert not (incident / "viewport.png").exists()
 
@@ -355,13 +361,25 @@ def test_capture_generic_live_incident_is_immutable_and_fresh(tmp_path: Path):
     assert state_checkpoints["schema"] == "awb-debug-state-checkpoints/v1"
     assert state_checkpoints["checkpoint_count"] == 2
     before_checkpoint, failure_checkpoint = state_checkpoints["checkpoints"]
+    assert before_checkpoint["checkpoint_seq"] == 1
     assert before_checkpoint["runtime_checkpoint_id"] == "runtime:before"
+    assert before_checkpoint["previous_checkpoint_status"] == "NONE"
     assert before_checkpoint["semantic_state_hash"] == "hash-before"
+    assert failure_checkpoint["checkpoint_seq"] == 2
     assert failure_checkpoint["runtime_checkpoint_id"] == "runtime:failure"
+    assert failure_checkpoint["previous_runtime_checkpoint_id"] == "runtime:before"
+    assert failure_checkpoint["previous_checkpoint_status"] == "RESOLVED"
     assert failure_checkpoint["previous_checkpoint_id"] == before_checkpoint["checkpoint_id"]
     assert failure_checkpoint["semantic_state_hash"] == "hash-failure"
     assert failure_checkpoint["diff_from_previous"]["changes"][0]["path"] == "/native_state/cube_x"
     assert state_checkpoints["first_changed_checkpoint_id"] == failure_checkpoint["checkpoint_id"]
+
+    assert divergences["schema"] == "awb-debug-divergences/v1"
+    assert divergences["status"] == "AVAILABLE"
+    assert divergences["checkpoint_count"] == 2
+    assert divergences["violation_count"] == 0
+    assert divergences["error_count"] == 0
+    assert divergences["first_divergence"] is None
 
     timeline_rows = [
         json.loads(line)
@@ -797,6 +815,7 @@ def test_schemas_are_generic_and_do_not_require_rigped():
         "AWB_INCIDENT_TIMELINE_V1.schema.json",
         "AWB_DEBUG_CHECKPOINT_V1.schema.json",
         "AWB_DEBUG_STATE_CHECKPOINTS_V1.schema.json",
+        "AWB_DEBUG_DIVERGENCES_V1.schema.json",
     ):
         payload = json.loads((ROOT / "docs" / "DEBUG" / "schemas" / name).read_text(encoding="utf-8"))
         lowered = json.dumps(payload, ensure_ascii=False).lower()
