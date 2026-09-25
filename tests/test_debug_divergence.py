@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+from typing import get_type_hints
+
+from scripts import awb_debug_rigped_invariants as rigped_invariants
 from scripts.awb_debug_divergence import (
     RESULT_ERROR,
     RESULT_SKIP,
@@ -427,3 +431,231 @@ def test_rigped_pack_uses_only_explicit_frozen_claims():
     assert first["scope"] == "domain"
     assert first["invariant_id"] == "rigped.explicit_claims.v1"
     assert first["reason"] == "RIGPED_TEST_CLAIM"
+
+
+def test_first_divergence_survives_exhausted_findings_budget():
+    registry = InvariantRegistry()
+
+    def late_violation(checkpoint, _context, _timeline):
+        if checkpoint.get("checkpoint_seq") == 40:
+            return InvariantOutcome(
+                result=RESULT_VIOLATION,
+                reason="LATE_VIOLATION",
+                message="Late violation must survive bounded finding storage.",
+            )
+        return InvariantOutcome(result=RESULT_SKIP, reason="BENIGN_SKIP")
+
+    registry.register(
+        InvariantSpec("test.late.v1", "1", "ERROR", "generic", late_violation)
+    )
+    checkpoints = [_checkpoint(index) for index in range(1, 41)]
+
+    result = evaluate_incident_divergences(
+        incident_id="INC-test",
+        checkpoint_bundle=_bundle(*checkpoints),
+        timeline_records=[],
+        registry=registry,
+        max_findings=3,
+        max_findings_per_checkpoint=1,
+    )
+
+    assert result["finding_count"] == 3
+    assert result["truncated"] is True
+    assert result["skip_count"] == 39
+    assert result["violation_count"] == 1
+    assert result["first_divergence"]["checkpoint_seq"] == 40
+    assert result["first_divergence"]["reason"] == "LATE_VIOLATION"
+
+
+def test_nested_list_outcome_is_json_serializable():
+    registry = InvariantRegistry()
+
+    def nested(checkpoint, _context, _timeline):
+        return InvariantOutcome(
+            result=RESULT_VIOLATION,
+            reason="NESTED",
+            message="nested",
+            expected=[checkpoint],
+            observed=[{"nested": checkpoint}],
+        )
+
+    registry.register(
+        InvariantSpec("test.nested.v1", "1", "ERROR", "generic", nested)
+    )
+    result = evaluate_incident_divergences(
+        incident_id="INC-test",
+        checkpoint_bundle=_bundle(_checkpoint(1)),
+        timeline_records=[],
+        registry=registry,
+    )
+
+    json.dumps(result)
+    assert isinstance(result["first_divergence"]["expected"][0], dict)
+    assert isinstance(result["first_divergence"]["observed"][0]["nested"], dict)
+
+
+def test_rigped_type_hints_resolve():
+    hints = get_type_hints(rigped_invariants._rigped_explicit_claims)
+    assert "checkpoint" in hints
+    assert "return" in hints
+
+
+def test_rigped_error_claim_is_error_not_pass():
+    registry = default_generic_registry()
+    register_rigped_invariants(registry)
+    checkpoint = _checkpoint(
+        1,
+        domain_probes=[
+            {
+                "name": "rigped",
+                "status": "AVAILABLE",
+                "state": {
+                    "invariant_schema": "awb-rigped-invariant-claims/v1",
+                    "invariant_claims": [
+                        {
+                            "status": "ERROR",
+                            "reason": "RIGPED_TEST_ERROR",
+                            "message": "Could not evaluate frozen claim.",
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    result = evaluate_incident_divergences(
+        incident_id="INC-test",
+        checkpoint_bundle=_bundle(checkpoint),
+        timeline_records=[],
+        registry=registry,
+    )
+
+    assert result["error_count"] == 1
+    assert result["violation_count"] == 0
+    assert result["first_divergence"] is None
+    assert any(
+        item["result"] == RESULT_ERROR and item["reason"] == "RIGPED_TEST_ERROR"
+        for item in result["findings"]
+    )
+
+
+def test_terminal_boundary_status_mismatch_is_violation():
+    checkpoint = _checkpoint(
+        1,
+        boundary="AFTER_OPERATION",
+        state_hash="hash-a",
+    )
+    result = evaluate_incident_divergences(
+        incident_id="INC-test",
+        checkpoint_bundle=_bundle(checkpoint),
+        timeline_records=[_terminal(terminal_status="FAILED")],
+    )
+
+    assert result["first_divergence"] is not None
+    assert result["first_divergence"]["reason"] == "TERMINAL_STATUS_BOUNDARY_MISMATCH"
+
+
+def test_terminal_pairing_uses_operation_before_child_span():
+    checkpoint = _checkpoint(
+        1,
+        boundary="AFTER_OPERATION",
+        state_hash="hash-a",
+        span_id="child-span",
+        operation_id="op-1",
+    )
+    terminal = _terminal(
+        span_id="root-span",
+        operation_id="op-1",
+        terminal_status="FINISHED",
+    )
+    result = evaluate_incident_divergences(
+        incident_id="INC-test",
+        checkpoint_bundle=_bundle(checkpoint),
+        timeline_records=[terminal],
+    )
+
+    assert result["violation_count"] == 0
+    assert not any(
+        item["reason"] == "TERMINAL_TRACE_EVENT_MISSING"
+        for item in result["findings"]
+    )
+
+
+def test_diff_flag_and_paths_must_agree():
+    before = _checkpoint(1, state_hash="hash-a")
+    changed_without_paths = _checkpoint(
+        2,
+        boundary="AFTER_OPERATION",
+        previous_id="cp-1",
+        previous_status="RESOLVED",
+        state_hash="hash-b",
+        diff={
+            "changed": True,
+            "before_hash": "hash-a",
+            "after_hash": "hash-b",
+            "changes": [],
+        },
+    )
+    result = evaluate_incident_divergences(
+        incident_id="INC-test",
+        checkpoint_bundle=_bundle(before, changed_without_paths),
+        timeline_records=[_terminal()],
+    )
+    assert any(
+        item["reason"] == "DIFF_CHANGED_WITHOUT_PATHS"
+        for item in result["findings"]
+    )
+
+    unchanged_with_paths = _checkpoint(
+        2,
+        boundary="AFTER_OPERATION",
+        previous_id="cp-1",
+        previous_status="RESOLVED",
+        state_hash="hash-a",
+        diff={
+            "changed": False,
+            "before_hash": "hash-a",
+            "after_hash": "hash-a",
+            "changes": [{"path": "/x"}],
+        },
+    )
+    result = evaluate_incident_divergences(
+        incident_id="INC-test",
+        checkpoint_bundle=_bundle(before, unchanged_with_paths),
+        timeline_records=[_terminal()],
+    )
+    assert any(
+        item["reason"] == "DIFF_UNCHANGED_WITH_PATHS"
+        for item in result["findings"]
+    )
+
+
+def test_first_divergence_tie_breaks_by_registration_order():
+    registry = InvariantRegistry()
+
+    def violate_a(_checkpoint, _context, _timeline):
+        return InvariantOutcome(
+            result=RESULT_VIOLATION,
+            reason="A",
+            message="a",
+        )
+
+    def violate_b(_checkpoint, _context, _timeline):
+        return InvariantOutcome(
+            result=RESULT_VIOLATION,
+            reason="B",
+            message="b",
+        )
+
+    registry.register(InvariantSpec("test.a.v1", "1", "ERROR", "generic", violate_a))
+    registry.register(InvariantSpec("test.b.v1", "1", "ERROR", "generic", violate_b))
+    result = evaluate_incident_divergences(
+        incident_id="INC-test",
+        checkpoint_bundle=_bundle(_checkpoint(1)),
+        timeline_records=[],
+        registry=registry,
+    )
+
+    assert result["violation_count"] == 2
+    assert result["first_divergence"]["invariant_id"] == "test.a.v1"
+    assert result["first_divergence"]["registration_order"] == 1
