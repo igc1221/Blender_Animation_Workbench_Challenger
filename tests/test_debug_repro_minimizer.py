@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
@@ -456,3 +457,36 @@ def test_bb7_incident_runner_resets_verified_baseline_before_candidate_replay(
     assert "bpy.ops.wm.open_mainfile" in calls[0]
     assert result["reset_identity"]["baseline_sha256"] == runner.sha256_file(baseline)
     assert result["execution_status"] == "EXECUTED"
+
+
+def test_bb7_source_identity_ignores_runtime_artifacts_but_not_source_changes(
+    monkeypatch,
+    tmp_path,
+):
+    import scripts.replay_awb_incident as runner
+
+    status_text = {
+        "value": (
+            "?? debug/awb_interaction_trace.jsonl\n"
+            "?? debug/runtime_error_log/runtime.jsonl\n"
+            "?? build/candidate.json\n"
+            "?? external_workers/request.md\n"
+        )
+    }
+
+    def fake_run(args, **_kwargs):
+        if args[:3] == ["git", "rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout="commit-fixed\n")
+        assert args[:3] == ["git", "status", "--porcelain"]
+        assert "--untracked-files=all" in args
+        return SimpleNamespace(returncode=0, stdout=status_text["value"])
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    identity = runner._git_identity(tmp_path)
+    assert identity["commit"] == "commit-fixed"
+    assert identity["dirty"] is False
+
+    status_text["value"] += "?? scripts/new_source_helper.py\n"
+    identity = runner._git_identity(tmp_path)
+    assert identity["dirty"] is True
