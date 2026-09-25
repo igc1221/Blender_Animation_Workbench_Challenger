@@ -1646,6 +1646,28 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
             context=context,
             requested_mode=self.mode,
         )
+        def _finish(result: set[str]) -> set[str]:
+            cancelled = "CANCELLED" in result
+            trace_lifecycle_event(
+                "TRANSFORM_TOOL_TERMINAL",
+                subsystem="operator",
+                phase="cancel" if cancelled else "commit",
+                causal=causal_root,
+                terminal_status=(
+                    TraceTerminalStatus.CANCELLED
+                    if cancelled
+                    else TraceTerminalStatus.FINISHED
+                ),
+                route_outcome=(
+                    TraceRouteOutcome.REJECTED
+                    if cancelled
+                    else TraceRouteOutcome.CLAIMED
+                ),
+                context=context,
+                requested_mode=self.mode,
+            )
+            return result
+
         semantic_mode_before = str(getattr(scene, "baw_rigped_semantic_transform_mode", "NONE"))
         trace_event(
             "INPUT",
@@ -1671,7 +1693,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
             if hasattr(context.space_data, "show_gizmo_tool"):
                 context.space_data.show_gizmo_tool = False
             context.area.tag_redraw()
-            return {"FINISHED"}
+            return _finish({"FINISHED"})
 
         fit_host_present = fit_ui_state_present(context)
         fit_state = fit_ui_state(context)
@@ -1692,7 +1714,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                     requested_mode=self.mode,
                     issues=("FIT_F3_SESSION_MISSING",),
                 )
-                return {"CANCELLED"}
+                return _finish({"CANCELLED"})
             issues = validate_fit_semantic_session(context, session)
             if issues:
                 set_fit_transform_mode(context, "NONE")
@@ -1703,7 +1725,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                     requested_mode=self.mode,
                     issues=issues,
                 )
-                return {"CANCELLED"}
+                return _finish({"CANCELLED"})
             fit_mode_before = fit_transform_mode(context)
             deactivate_rigped_semantic_tool(context)
             context.space_data.show_gizmo = True
@@ -1711,7 +1733,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
             if self.mode in {"MOVE", "ROTATE", "SCALE"}:
                 if not _activate_awb_transform_workspace_tool(context, self.mode):
                     set_fit_transform_mode(context, "NONE")
-                    return {"CANCELLED"}
+                    return _finish({"CANCELLED"})
                 set_fit_transform_mode(context, self.mode)
                 if fit_mode_before == self.mode:
                     current = fit_orientation_mode(context)
@@ -1738,7 +1760,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                     context=context,
                     requested_mode=self.mode,
                 )
-            return {"FINISHED"}
+            return _finish({"FINISHED"})
 
         if fit_host_present:
             # Figure is Object-hosted. Any externally forced non-Object mode is
@@ -1756,7 +1778,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                 requested_mode=self.mode,
                 host_mode=str(context.mode),
             )
-            return {"FINISHED"}
+            return _finish({"FINISHED"})
 
         rigped_decision = _rigped_transform_decision(context, self.mode)
         trace_event(
@@ -1788,7 +1810,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                     orientation_after=next_orientation,
                     route_override="MIXED_ROTATE",
                 )
-                return {"FINISHED"}
+                return _finish({"FINISHED"})
             scene.baw_rigped_semantic_transform_mode = direct_mode
             context.space_data.show_gizmo = True
             if not _activate_awb_transform_workspace_tool(context, self.mode):
@@ -1801,7 +1823,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                     route_override="MIXED_ROTATE",
                 )
                 scene.baw_rigped_semantic_transform_mode = "NONE"
-                return {"CANCELLED"}
+                return _finish({"CANCELLED"})
             _hide_native_tool_gizmo(context)
             trace_event(
                 "INPUT",
@@ -1812,28 +1834,28 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                 cycled_orientation=False,
                 route_override="MIXED_ROTATE",
             )
-            return {"FINISHED"}
+            return _finish({"FINISHED"})
         if isinstance(rigped_decision, str):
             deactivate_rigped_semantic_tool(context)
             _hide_native_tool_gizmo(context)
             self.report({"WARNING"}, text("rigped.transform.refused", context))
-            return {"FINISHED"}
+            return _finish({"FINISHED"})
         if rigped_decision is not None:
             if self.mode == "MOVE":
                 if semantic_mode_before == "FK_MOVE" and activate_rigped_fk_joint_move_tool(context):
                     if not _activate_awb_transform_workspace_tool(context, "MOVE"):
                         deactivate_rigped_semantic_tool(context)
-                        return {"CANCELLED"}
+                        return _finish({"CANCELLED"})
                     _cycle_transform_orientation_preserving_semantic_mode(
                         context,
                         "FK_MOVE",
                     )
-                    return {"FINISHED"}
+                    return _finish({"FINISHED"})
                 if activate_rigped_fk_joint_move_tool(context):
                     if not _activate_awb_transform_workspace_tool(context, "MOVE"):
                         deactivate_rigped_semantic_tool(context)
-                        return {"CANCELLED"}
-                    return {"FINISHED"}
+                        return _finish({"CANCELLED"})
+                    return _finish({"FINISHED"})
                 # Multi-selection Sliding is resolved by the semantic Move
                 # operator itself. The older I16 transform contract refuses
                 # semantic multi-selection before that operator gets a chance
@@ -1841,22 +1863,22 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                 if semantic_mode_before == "MOVE" and activate_rigped_semantic_move_tool(context):
                     if not _activate_awb_transform_workspace_tool(context, "MOVE"):
                         deactivate_rigped_semantic_tool(context)
-                        return {"CANCELLED"}
+                        return _finish({"CANCELLED"})
                     _cycle_transform_orientation_preserving_semantic_mode(
                         context,
                         "MOVE",
                     )
-                    return {"FINISHED"}
+                    return _finish({"FINISHED"})
                 if activate_rigped_semantic_move_tool(context):
                     if not _activate_awb_transform_workspace_tool(context, "MOVE"):
                         deactivate_rigped_semantic_tool(context)
-                        return {"CANCELLED"}
-                    return {"FINISHED"}
+                        return _finish({"CANCELLED"})
+                    return _finish({"FINISHED"})
             if rigped_decision.route == RigpedTransformRoute.REFUSE:
                 deactivate_rigped_semantic_tool(context)
                 _hide_native_tool_gizmo(context)
                 self.report({"WARNING"}, text("rigped.transform.refused", context))
-                return {"FINISHED"}
+                return _finish({"FINISHED"})
             if rigped_decision.route in {
                 RigpedTransformRoute.SEMANTIC_KINEMATIC,
                 RigpedTransformRoute.SEMANTIC_CONTACT,
@@ -1865,21 +1887,21 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                     if semantic_mode_before == "MOVE" and activate_rigped_semantic_move_tool(context):
                         if not _activate_awb_transform_workspace_tool(context, "MOVE"):
                             deactivate_rigped_semantic_tool(context)
-                            return {"CANCELLED"}
+                            return _finish({"CANCELLED"})
                         _cycle_transform_orientation_preserving_semantic_mode(
                             context,
                             "MOVE",
                         )
-                        return {"FINISHED"}
+                        return _finish({"FINISHED"})
                     if activate_rigped_semantic_move_tool(context):
                         if not _activate_awb_transform_workspace_tool(context, "MOVE"):
                             deactivate_rigped_semantic_tool(context)
-                            return {"CANCELLED"}
-                        return {"FINISHED"}
+                            return _finish({"CANCELLED"})
+                        return _finish({"FINISHED"})
                 deactivate_rigped_semantic_tool(context)
                 _hide_native_tool_gizmo(context)
                 self.report({"WARNING"}, text("rigped.transform.semantic_move", context))
-                return {"FINISHED"}
+                return _finish({"FINISHED"})
             if rigped_decision.route == RigpedTransformRoute.NATIVE and self.mode in {"MOVE", "ROTATE"}:
                 direct_mode = "DIRECT_MOVE" if self.mode == "MOVE" else "DIRECT_ROTATE"
                 if semantic_mode_before == direct_mode:
@@ -1896,7 +1918,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                         cycled_orientation=True,
                         orientation_after=next_orientation,
                     )
-                    return {"FINISHED"}
+                    return _finish({"FINISHED"})
                 scene.baw_rigped_semantic_transform_mode = direct_mode
                 context.space_data.show_gizmo = True
                 if not _activate_awb_transform_workspace_tool(context, self.mode):
@@ -1908,7 +1930,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                         semantic_mode=direct_mode,
                     )
                     scene.baw_rigped_semantic_transform_mode = "NONE"
-                    return {"CANCELLED"}
+                    return _finish({"CANCELLED"})
                 _hide_native_tool_gizmo(context)
                 trace_event(
                     "INPUT",
@@ -1918,7 +1940,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                     semantic_mode=direct_mode,
                     cycled_orientation=False,
                 )
-                return {"FINISHED"}
+                return _finish({"FINISHED"})
 
         route_causal = new_trace_causal_child(
             causal_root,

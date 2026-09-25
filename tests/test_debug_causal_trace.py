@@ -546,3 +546,244 @@ def test_generic_selection_modal_has_explicit_ingress_route_and_terminal():
     assert "TraceRouteOutcome.NATIVE_FALLTHROUGH" in source
     assert "terminal_status=TraceTerminalStatus.FINISHED" in source
     assert "terminal_status=TraceTerminalStatus.CANCELLED" in source
+
+
+def test_bb3_normalization_and_hash_are_deterministic(monkeypatch):
+    module = _load_trace_module(monkeypatch)
+
+    first = {
+        "b": {3, 1, 2},
+        "a": [1.0000000004, -0.0],
+    }
+    second = {
+        "a": [1.0, 0.0],
+        "b": {2, 3, 1},
+    }
+
+    assert module.normalize_debug_state(first) == module.normalize_debug_state(second)
+    assert module.stable_debug_state_hash(first) == module.stable_debug_state_hash(second)
+
+
+def test_bb3_structured_diff_reports_bounded_changed_path(monkeypatch):
+    module = _load_trace_module(monkeypatch)
+
+    diff = module.structured_debug_state_diff(
+        {"native_state": {"pose_bones": [{"bone": "Foot.L", "x": 1.0}]}},
+        {"native_state": {"pose_bones": [{"bone": "Foot.L", "x": 2.0}]}},
+    )
+
+    assert diff["changed"] is True
+    assert diff["truncated"] is False
+    assert diff["changes"] == [
+        {
+            "path": "/native_state/pose_bones/0/x",
+            "kind": "CHANGED",
+            "before": 1.0,
+            "after": 2.0,
+        }
+    ]
+
+
+def test_bb3_checkpoint_registry_pairs_before_after_and_finds_first_change(monkeypatch):
+    module = _load_trace_module(monkeypatch)
+    module.reset_debug_state_checkpoints()
+    mutable_native = {"status": "AVAILABLE", "value": 1.0}
+
+    monkeypatch.setattr(module, "_debug_context_identity", lambda _context: {"area_type": "VIEW_3D"})
+    monkeypatch.setattr(module, "_generic_blender_state", lambda _context: {"frame": 10})
+    monkeypatch.setattr(module, "_native_state_probe", lambda _context: dict(mutable_native))
+    monkeypatch.setattr(module, "_action_fcurve_probe", lambda _context: {"status": "AVAILABLE"})
+    monkeypatch.setattr(module, "_depsgraph_state_probe", lambda _context: {"status": "AVAILABLE"})
+
+    before = module.capture_debug_state_checkpoint(
+        "BEFORE_OPERATION",
+        source_event="TRANSFORM_BEGIN",
+        trace_id="trace-1",
+        operation_id="op-1",
+    )
+    mutable_native["value"] = 2.0
+    after = module.capture_debug_state_checkpoint(
+        "AFTER_OPERATION",
+        source_event="TRANSFORM_COMMIT",
+        trace_id="trace-1",
+        operation_id="op-1",
+    )
+
+    assert before["semantic_state_hash"] != after["semantic_state_hash"]
+    assert after["previous_checkpoint_id"] == before["checkpoint_id"]
+    assert after["diff_from_previous"]["changed"] is True
+    assert after["diff_from_previous"]["changes"][0]["path"] == "/native_state/value"
+    assert module.first_changed_state_checkpoint()["checkpoint_id"] == after["checkpoint_id"]
+
+
+def test_bb3_domain_probe_is_pluggable_and_probe_failure_is_non_blocking(monkeypatch):
+    module = _load_trace_module(monkeypatch)
+    module.reset_debug_state_checkpoints()
+    monkeypatch.setattr(module, "_debug_context_identity", lambda _context: {})
+    monkeypatch.setattr(module, "_generic_blender_state", lambda _context: {})
+    monkeypatch.setattr(module, "_native_state_probe", lambda _context: {"status": "AVAILABLE"})
+    monkeypatch.setattr(module, "_action_fcurve_probe", lambda _context: {"status": "AVAILABLE"})
+    monkeypatch.setattr(module, "_depsgraph_state_probe", lambda _context: {"status": "AVAILABLE"})
+
+    module.register_debug_state_probe("rigped", lambda _context: {"contact": "SLIDING"})
+
+    def broken_probe(_context):
+        raise RuntimeError("synthetic probe failure")
+
+    module.register_debug_state_probe("broken", broken_probe)
+    checkpoint = module.capture_debug_state_checkpoint("CAPTURE_TIME")
+
+    probes = {item["name"]: item for item in checkpoint["domain_probes"]}
+    assert probes["rigped"]["status"] == "AVAILABLE"
+    assert probes["rigped"]["state"]["contact"] == "SLIDING"
+    assert probes["broken"]["status"] == "ERROR"
+    assert checkpoint["status"] == "AVAILABLE"
+
+
+def test_bb3_trace_event_embeds_operation_boundary_checkpoints(tmp_path: Path, monkeypatch):
+    module = _load_trace_module(monkeypatch)
+    trace_path = _configure_trace_io(module, tmp_path, monkeypatch)
+    module.reset_debug_state_checkpoints()
+    state = {"value": 1.0}
+    monkeypatch.setattr(module, "_debug_context_identity", lambda _context: {})
+    monkeypatch.setattr(module, "_generic_blender_state", lambda _context: {})
+    monkeypatch.setattr(module, "_native_state_probe", lambda _context: dict(state))
+    monkeypatch.setattr(module, "_action_fcurve_probe", lambda _context: {})
+    monkeypatch.setattr(module, "_depsgraph_state_probe", lambda _context: {})
+
+    root = module.new_trace_causal_root("bb3")
+    module.bind_operation_causal_context("op-1", root)
+    module.trace_event("OPERATION", "TRANSFORM_BEGIN", operation_id="op-1")
+    state["value"] = 3.0
+    module.trace_event("OPERATION", "TRANSFORM_COMMIT", operation_id="op-1")
+
+    rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["checkpoint"]["boundary"] == "BEFORE_OPERATION"
+    assert rows[1]["checkpoint"]["boundary"] == "AFTER_OPERATION"
+    assert rows[1]["checkpoint"]["diff_from_previous"]["changed"] is True
+
+
+def _configure_bb3_probe_stubs(module, monkeypatch, native_state=None):
+    monkeypatch.setattr(module, "_debug_context_identity", lambda _context: {})
+    monkeypatch.setattr(module, "_generic_blender_state", lambda _context: {})
+    monkeypatch.setattr(
+        module,
+        "_native_state_probe",
+        lambda _context: dict(native_state or {"status": "AVAILABLE"}),
+    )
+    monkeypatch.setattr(module, "_action_fcurve_probe", lambda _context: {"status": "AVAILABLE"})
+    monkeypatch.setattr(module, "_depsgraph_state_probe", lambda _context: {"status": "AVAILABLE"})
+
+
+def test_bb3_boundary_classification_uses_explicit_contract_not_event_suffix(monkeypatch):
+    module = _load_trace_module(monkeypatch)
+
+    assert module._state_checkpoint_boundary_for_event("TRANSFORM_TOOL_INGRESS", None) == "BEFORE_OPERATION"
+    assert module._state_checkpoint_boundary_for_event("SELECTION_CLICK_INGRESS", None) == "BEFORE_OPERATION"
+    assert module._state_checkpoint_boundary_for_event("TRANSFORM_BEGIN", None) == "BEFORE_OPERATION"
+    assert module._state_checkpoint_boundary_for_event("SYNTHETIC_BEGIN", None) is None
+    assert (
+        module._state_checkpoint_boundary_for_event(
+            "SYNTHETIC_TERMINAL",
+            module.TraceTerminalStatus.FINISHED.value,
+        )
+        == "AFTER_OPERATION"
+    )
+    assert (
+        module._state_checkpoint_boundary_for_event(
+            "SYNTHETIC_TERMINAL",
+            module.TraceTerminalStatus.FAILED.value,
+        )
+        == "FAILURE"
+    )
+
+
+def test_bb3_capture_time_can_be_non_recording(monkeypatch):
+    module = _load_trace_module(monkeypatch)
+    module.reset_debug_state_checkpoints()
+    _configure_bb3_probe_stubs(module, monkeypatch)
+
+    sequence_before = module._STATE_CHECKPOINT_SEQUENCE
+    checkpoint = module.capture_debug_state_checkpoint(
+        "CAPTURE_TIME",
+        source_event="INCIDENT_CAPTURE",
+        record=False,
+    )
+
+    assert module._STATE_CHECKPOINT_SEQUENCE == sequence_before
+    assert ":ephemeral:" in checkpoint["checkpoint_id"]
+    assert checkpoint["status"] == "AVAILABLE"
+    assert checkpoint["semantic_state_hash"]
+    assert module.read_recent_state_checkpoints() == []
+
+
+def test_bb3_checkpoint_registry_is_bounded(monkeypatch):
+    module = _load_trace_module(monkeypatch)
+    module.reset_debug_state_checkpoints()
+    _configure_bb3_probe_stubs(module, monkeypatch)
+    monkeypatch.setattr(module, "_STATE_CHECKPOINT_MAX", 2)
+
+    for index in range(3):
+        module.capture_debug_state_checkpoint(
+            "BEFORE_OPERATION",
+            source_event="TRANSFORM_BEGIN",
+            operation_id=f"op-{index}",
+        )
+
+    checkpoints = module.read_recent_state_checkpoints(10)
+    assert len(checkpoints) == 2
+    assert checkpoints[0]["operation_id"] == "op-1"
+    assert checkpoints[1]["operation_id"] == "op-2"
+
+
+def test_bb3_depsgraph_probe_reads_only_cached_handler_sample(monkeypatch):
+    module = _load_trace_module(monkeypatch)
+    module.reset_debug_state_checkpoints()
+
+    class Context:
+        def evaluated_depsgraph_get(self):
+            raise AssertionError("checkpoint probe must not force depsgraph evaluation")
+
+    unavailable = module._depsgraph_state_probe(Context())
+    assert unavailable["status"] == "UNAVAILABLE"
+
+    depsgraph = types.SimpleNamespace(mode="VIEWPORT", updates=())
+    module._remember_depsgraph_state(depsgraph, phase="post_handler")
+    sampled = module._depsgraph_state_probe(Context())
+
+    assert sampled["status"] == "AVAILABLE"
+    assert sampled["phase"] == "post_handler"
+    assert sampled["updates"] == []
+
+
+def test_bb3_action_probe_prefers_assigned_channelbag(monkeypatch):
+    module = _load_trace_module(monkeypatch)
+    layered_curve = types.SimpleNamespace(data_path="pose.bones[\"Foot.L\"].location", array_index=0)
+    legacy_curve = types.SimpleNamespace(data_path="legacy", array_index=0)
+    channelbag = types.SimpleNamespace(fcurves=[layered_curve])
+    action = types.SimpleNamespace(fcurves=[legacy_curve], layers=())
+    owner = object()
+    monkeypatch.setattr(module, "assigned_channelbag", lambda _owner: channelbag)
+
+    curves = module._iter_action_fcurves(action, owner=owner)
+
+    assert curves == (layered_curve,)
+
+
+def test_bb3_rigped_is_registered_as_domain_probe_not_core_dependency():
+    rigped_source = (
+        ROOT
+        / "extension"
+        / "blender_animation_workbench"
+        / "rigped_transform.py"
+    ).read_text(encoding="utf-8")
+    trace_source = (
+        ROOT
+        / "extension"
+        / "blender_animation_workbench"
+        / "debug_trace.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'register_debug_state_probe("rigped", _rigped_debug_state_probe)' in rigped_source
+    assert 'unregister_debug_state_probe("rigped")' in rigped_source
+    assert "RIGPED_SETUP_PROPERTY" not in trace_source

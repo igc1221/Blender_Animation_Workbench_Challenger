@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sys
 import threading
 import traceback
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic_ns
@@ -26,6 +28,7 @@ from .debug_causal import (
     validate_trace_lifecycle_phase,
     validate_trace_subsystem,
 )
+from .semantic_adapter import assigned_channelbag
 
 _TRACE_FILENAME = "awb_interaction_trace.jsonl"
 _PRECISION_TRACE_FILENAME = "awb_precision_trace.jsonl"
@@ -38,6 +41,20 @@ _TRACE_MAX_BYTES = 4 * 1024 * 1024
 _PRECISION_TRACE_MAX_BYTES = 2 * 1024 * 1024
 _TAIL_READ_CHUNK_BYTES = 64 * 1024
 _RUNTIME_ERROR_CAUSAL_MAX_AGE_NS = 5_000_000_000
+_STATE_CHECKPOINT_EVENT_BOUNDARIES: dict[str, str] = {
+    "TRANSFORM_TOOL_INGRESS": "BEFORE_OPERATION",
+    "SELECTION_CLICK_INGRESS": "BEFORE_OPERATION",
+    "TRANSFORM_BEGIN": "BEFORE_OPERATION",
+    "CONTACT_BEGIN": "BEFORE_OPERATION",
+    "CONTACT_WRITE_BEGIN": "BEFORE_OPERATION",
+    "CONTACT_BATCH_WRITE_BEGIN": "BEFORE_OPERATION",
+    "DIRECT_WRITE_BEGIN": "BEFORE_OPERATION",
+    "FILE_LOAD_PRE": "BEFORE_OPERATION",
+    "FILE_SAVE_PRE": "BEFORE_OPERATION",
+    "UNDO_PRE": "BEFORE_OPERATION",
+    "REDO_PRE": "BEFORE_OPERATION",
+    "OPERATOR_ERROR": "FAILURE",
+}
 _EXPLICIT_TERMINAL_EVENTS: dict[
     str,
     tuple[TraceTerminalStatus, str, TraceRouteOutcome],
@@ -114,9 +131,23 @@ _DEPSGRAPH_TRACE_SAMPLE_NS = 100_000_000
 _DEPSGRAPH_LAST_TRACE_NS = 0
 _DEPSGRAPH_DROPPED_SAMPLES = 0
 _DEPSGRAPH_SAMPLE_ACTIVE = False
+_LAST_DEPSGRAPH_STATE: dict[str, Any] | None = None
 _SCRUB_STATE: dict[str, Any] | None = None
 _PRECISION_PREVIOUS_BONES: dict[tuple[str, str], dict[str, Any]] = {}
 _LAST_TRACE_RECORD: dict[str, Any] | None = None
+_STATE_CHECKPOINT_SCHEMA = "awb-debug-checkpoint/v1"
+_STATE_NORMALIZATION_SCHEMA = "awb-debug-state-normalized/v1"
+_STATE_HASH_SCHEMA = "awb-debug-state-hash/sha256-v1"
+_STATE_CHECKPOINT_MAX = 256
+_STATE_DIFF_MAX_ENTRIES = 64
+_STATE_FLOAT_DECIMALS = 9
+_STATE_OBJECT_LIMIT = 32
+_STATE_POSE_BONE_LIMIT = 32
+_STATE_FCURVE_LIMIT = 96
+_STATE_DEPSGRAPH_UPDATE_LIMIT = 64
+_STATE_CHECKPOINT_SEQUENCE = 0
+_STATE_CHECKPOINTS: list[dict[str, Any]] = []
+_STATE_DOMAIN_PROBES: dict[str, Callable[[Any], Any]] = {}
 _ORIGINAL_SYS_EXCEPTHOOK = sys.excepthook
 _ORIGINAL_THREADING_EXCEPTHOOK = getattr(threading, "excepthook", None)
 
@@ -804,6 +835,744 @@ def _json_safe(value: Any):
         return str(value)
 
 
+def normalize_debug_state(value: Any) -> Any:
+    """Return a deterministic JSON-safe representation for debugger state."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0.0 else "-Infinity"
+        rounded = round(float(value), _STATE_FLOAT_DECIMALS)
+        return 0.0 if rounded == 0.0 else rounded
+    enum_value = getattr(value, "value", None)
+    if isinstance(enum_value, (str, int, float, bool)):
+        return normalize_debug_state(enum_value)
+    if isinstance(value, dict):
+        return {
+            str(key): normalize_debug_state(value[key])
+            for key in sorted(value, key=lambda item: str(item))
+        }
+    if isinstance(value, (set, frozenset)):
+        items = [normalize_debug_state(item) for item in value]
+        return sorted(
+            items,
+            key=lambda item: json.dumps(
+                item,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+    if isinstance(value, (tuple, list)):
+        return [normalize_debug_state(item) for item in value]
+    return normalize_debug_state(_json_safe(value))
+
+
+def stable_debug_state_hash(value: Any) -> str:
+    normalized = normalize_debug_state(value)
+    encoded = json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _state_diff_preview(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            "kind": "object",
+            "size": len(value),
+            "hash": stable_debug_state_hash(value),
+        }
+    if isinstance(value, list):
+        return {
+            "kind": "array",
+            "size": len(value),
+            "hash": stable_debug_state_hash(value),
+        }
+    return value
+
+
+def structured_debug_state_diff(
+    before: Any,
+    after: Any,
+    *,
+    max_entries: int = _STATE_DIFF_MAX_ENTRIES,
+) -> dict[str, Any]:
+    """Build a bounded path-level diff between two normalized debugger states."""
+    normalized_before = normalize_debug_state(before)
+    normalized_after = normalize_debug_state(after)
+    limit = max(1, int(max_entries))
+    changes: list[dict[str, Any]] = []
+    truncated = False
+
+    def add_change(path: str, kind: str, old_value: Any, new_value: Any) -> None:
+        nonlocal truncated
+        if len(changes) >= limit:
+            truncated = True
+            return
+        changes.append(
+            {
+                "path": path or "/",
+                "kind": kind,
+                "before": _state_diff_preview(old_value),
+                "after": _state_diff_preview(new_value),
+            }
+        )
+
+    def walk(path: str, old_value: Any, new_value: Any) -> None:
+        nonlocal truncated
+        if truncated:
+            return
+        if type(old_value) is not type(new_value):
+            add_change(path, "CHANGED", old_value, new_value)
+            return
+        if isinstance(old_value, dict):
+            old_keys = set(old_value)
+            new_keys = set(new_value)
+            for key in sorted(old_keys | new_keys):
+                escaped = str(key).replace("~", "~0").replace("/", "~1")
+                child_path = f"{path}/{escaped}"
+                if key not in old_value:
+                    add_change(child_path, "ADDED", None, new_value[key])
+                elif key not in new_value:
+                    add_change(child_path, "REMOVED", old_value[key], None)
+                else:
+                    walk(child_path, old_value[key], new_value[key])
+                if truncated:
+                    return
+            return
+        if isinstance(old_value, list):
+            common = min(len(old_value), len(new_value))
+            for index in range(common):
+                walk(f"{path}/{index}", old_value[index], new_value[index])
+                if truncated:
+                    return
+            for index in range(common, len(old_value)):
+                add_change(f"{path}/{index}", "REMOVED", old_value[index], None)
+                if truncated:
+                    return
+            for index in range(common, len(new_value)):
+                add_change(f"{path}/{index}", "ADDED", None, new_value[index])
+                if truncated:
+                    return
+            return
+        if old_value != new_value:
+            add_change(path, "CHANGED", old_value, new_value)
+
+    walk("", normalized_before, normalized_after)
+    return {
+        "schema": "awb-debug-state-diff/v1",
+        "normalization_schema": _STATE_NORMALIZATION_SCHEMA,
+        "before_hash": stable_debug_state_hash(normalized_before),
+        "after_hash": stable_debug_state_hash(normalized_after),
+        "changed": bool(changes) or truncated,
+        "change_count": len(changes),
+        "truncated": bool(truncated),
+        "changes": changes,
+    }
+
+
+def _state_safe_name(value: Any) -> str | None:
+    try:
+        name = getattr(value, "name", None)
+    except (ReferenceError, RuntimeError):
+        return None
+    return str(name) if name is not None else None
+
+
+def _state_float_sequence(value: Any, *, limit: int = 16) -> list[float] | None:
+    try:
+        items = tuple(value)
+    except (TypeError, ReferenceError, RuntimeError):
+        return None
+    result: list[float] = []
+    for item in items[: max(0, int(limit))]:
+        try:
+            result.append(float(item))
+        except (TypeError, ValueError):
+            return None
+    return result
+
+
+def _state_matrix(value: Any) -> list[list[float]] | None:
+    try:
+        rows = tuple(value)
+    except (TypeError, ReferenceError, RuntimeError):
+        return None
+    result: list[list[float]] = []
+    for row in rows[:4]:
+        values = _state_float_sequence(row, limit=4)
+        if values is None:
+            return None
+        result.append(values)
+    return result
+
+
+def _state_transform_payload(value: Any, *, matrices: tuple[str, ...]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for name in ("location", "scale", "rotation_quaternion", "rotation_euler"):
+        try:
+            resolved = getattr(value, name, None)
+        except (ReferenceError, RuntimeError):
+            resolved = None
+        sequence = _state_float_sequence(resolved, limit=4) if resolved is not None else None
+        if sequence is not None:
+            payload[name] = sequence
+    try:
+        payload["rotation_mode"] = str(getattr(value, "rotation_mode", "") or "")
+    except (ReferenceError, RuntimeError):
+        payload["rotation_mode"] = ""
+    for name in matrices:
+        try:
+            resolved = getattr(value, name, None)
+        except (ReferenceError, RuntimeError):
+            resolved = None
+        matrix = _state_matrix(resolved) if resolved is not None else None
+        if matrix is not None:
+            payload[name] = matrix
+    return payload
+
+
+def _state_selected_objects(context: Any) -> tuple[Any, ...]:
+    if context is None:
+        return ()
+    values: list[Any] = []
+    seen: set[int] = set()
+    active = getattr(context, "active_object", None)
+    candidates: list[Any] = []
+    if active is not None:
+        candidates.append(active)
+    try:
+        candidates.extend(tuple(getattr(context, "selected_objects", ()) or ()))
+    except (ReferenceError, RuntimeError):
+        pass
+    for value in candidates:
+        marker = id(value)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        values.append(value)
+    values.sort(key=lambda value: _state_safe_name(value) or "")
+    return tuple(values)
+
+
+def _debug_context_identity(context: Any) -> dict[str, Any]:
+    context = context or getattr(bpy, "context", None)
+    if context is None:
+        return {}
+    window = getattr(context, "window", None)
+    screen = getattr(context, "screen", None)
+    workspace = getattr(context, "workspace", None)
+    area = getattr(context, "area", None)
+    region = getattr(context, "region", None)
+    return {
+        "window": "ACTIVE_WINDOW" if window is not None else None,
+        "screen": _state_safe_name(screen),
+        "workspace": _state_safe_name(workspace),
+        "area_type": str(getattr(area, "type", "") or "") if area is not None else None,
+        "region_type": str(getattr(region, "type", "") or "") if region is not None else None,
+    }
+
+
+def _generic_blender_state(context: Any) -> dict[str, Any]:
+    context = context or getattr(bpy, "context", None)
+    scene = getattr(context, "scene", None) if context is not None else None
+    active = getattr(context, "active_object", None) if context is not None else None
+    tool_settings = getattr(scene, "tool_settings", None) if scene is not None else None
+    selected_objects = [
+        {
+            "name": _state_safe_name(obj),
+            "type": str(getattr(obj, "type", "") or ""),
+        }
+        for obj in _state_selected_objects(context)[:_STATE_OBJECT_LIMIT]
+    ]
+    selected_pose_bones: list[dict[str, Any]] = []
+    if context is not None:
+        try:
+            pose_bones = tuple(getattr(context, "selected_pose_bones", ()) or ())
+        except (ReferenceError, RuntimeError):
+            pose_bones = ()
+        owner_name = _state_safe_name(active)
+        for bone in sorted(pose_bones, key=lambda item: _state_safe_name(item) or "")[
+            :_STATE_POSE_BONE_LIMIT
+        ]:
+            selected_pose_bones.append(
+                {"object": owner_name, "bone": _state_safe_name(bone)}
+            )
+    return {
+        "blend_file": str(getattr(bpy.data, "filepath", "") or ""),
+        "mode": str(getattr(context, "mode", "") or "") if context is not None else "",
+        "frame": int(getattr(scene, "frame_current", 0)) if scene is not None else None,
+        "subframe": float(getattr(scene, "frame_subframe", 0.0)) if scene is not None else None,
+        "active_object": {
+            "name": _state_safe_name(active),
+            "type": str(getattr(active, "type", "") or ""),
+        } if active is not None else None,
+        "selected_objects": selected_objects,
+        "selected_pose_bones": selected_pose_bones,
+        "native_auto_key": bool(getattr(tool_settings, "use_keyframe_insert_auto", False)),
+    }
+
+
+def _native_state_probe(context: Any) -> dict[str, Any]:
+    context = context or getattr(bpy, "context", None)
+    objects = _state_selected_objects(context)
+    object_rows: list[dict[str, Any]] = []
+    for obj in objects[:_STATE_OBJECT_LIMIT]:
+        row = {
+            "name": _state_safe_name(obj),
+            "type": str(getattr(obj, "type", "") or ""),
+            "transform": _state_transform_payload(
+                obj,
+                matrices=("matrix_world", "matrix_local", "matrix_basis"),
+            ),
+        }
+        object_rows.append(row)
+
+    pose_rows: list[dict[str, Any]] = []
+    active = getattr(context, "active_object", None) if context is not None else None
+    if context is not None:
+        try:
+            pose_bones = tuple(getattr(context, "selected_pose_bones", ()) or ())
+        except (ReferenceError, RuntimeError):
+            pose_bones = ()
+        ordered = sorted(pose_bones, key=lambda item: _state_safe_name(item) or "")
+        for bone in ordered[:_STATE_POSE_BONE_LIMIT]:
+            pose_rows.append(
+                {
+                    "object": _state_safe_name(active),
+                    "bone": _state_safe_name(bone),
+                    "transform": _state_transform_payload(
+                        bone,
+                        matrices=("matrix", "matrix_basis"),
+                    ),
+                }
+            )
+    return {
+        "status": "AVAILABLE",
+        "objects": object_rows,
+        "pose_bones": pose_rows,
+        "objects_truncated": len(objects) > _STATE_OBJECT_LIMIT,
+        "pose_bones_truncated": len(pose_rows) >= _STATE_POSE_BONE_LIMIT,
+    }
+
+
+def _iter_action_fcurves(action: Any, *, owner: Any = None) -> tuple[Any, ...]:
+    fcurves: list[Any] = []
+    seen: set[int] = set()
+
+    def add_many(values: Any) -> None:
+        try:
+            items = tuple(values or ())
+        except (TypeError, ReferenceError, RuntimeError):
+            return
+        for curve in items:
+            marker = id(curve)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            fcurves.append(curve)
+
+    if owner is not None:
+        try:
+            channelbag = assigned_channelbag(owner)
+        except (ImportError, AttributeError, ReferenceError, RuntimeError, TypeError):
+            channelbag = None
+        if channelbag is not None:
+            add_many(getattr(channelbag, "fcurves", None))
+            fcurves.sort(
+                key=lambda curve: (
+                    str(getattr(curve, "data_path", "") or ""),
+                    int(getattr(curve, "array_index", 0)),
+                )
+            )
+            return tuple(fcurves)
+
+    add_many(getattr(action, "fcurves", None))
+    try:
+        layers = tuple(getattr(action, "layers", ()) or ())
+    except (TypeError, ReferenceError, RuntimeError):
+        layers = ()
+    for layer in layers:
+        try:
+            strips = tuple(getattr(layer, "strips", ()) or ())
+        except (TypeError, ReferenceError, RuntimeError):
+            strips = ()
+        for strip in strips:
+            add_many(getattr(strip, "fcurves", None))
+            try:
+                channelbags = tuple(getattr(strip, "channelbags", ()) or ())
+            except (TypeError, ReferenceError, RuntimeError):
+                channelbags = ()
+            for channelbag in channelbags:
+                add_many(getattr(channelbag, "fcurves", None))
+    fcurves.sort(
+        key=lambda curve: (
+            str(getattr(curve, "data_path", "") or ""),
+            int(getattr(curve, "array_index", 0)),
+        )
+    )
+    return tuple(fcurves)
+
+
+def _action_fcurve_probe(context: Any) -> dict[str, Any]:
+    context = context or getattr(bpy, "context", None)
+    scene = getattr(context, "scene", None) if context is not None else None
+    frame = (
+        float(getattr(scene, "frame_current", 0))
+        + float(getattr(scene, "frame_subframe", 0.0))
+        if scene is not None
+        else 0.0
+    )
+    result: list[dict[str, Any]] = []
+    total_curves = 0
+    for obj in _state_selected_objects(context)[:_STATE_OBJECT_LIMIT]:
+        animation_data = getattr(obj, "animation_data", None)
+        action = getattr(animation_data, "action", None) if animation_data is not None else None
+        if action is None:
+            continue
+        curves = _iter_action_fcurves(action, owner=obj)
+        rows: list[dict[str, Any]] = []
+        for curve in curves:
+            if total_curves >= _STATE_FCURVE_LIMIT:
+                break
+            total_curves += 1
+            keyframe_points = getattr(curve, "keyframe_points", ())
+            try:
+                points = tuple(keyframe_points or ())
+            except (TypeError, ReferenceError, RuntimeError):
+                points = ()
+            first = _state_float_sequence(getattr(points[0], "co", ()), limit=2) if points else None
+            last = _state_float_sequence(getattr(points[-1], "co", ()), limit=2) if points else None
+            exact_keys = []
+            for point in points:
+                co = _state_float_sequence(getattr(point, "co", ()), limit=2)
+                if co is not None and len(co) >= 2 and abs(co[0] - frame) <= 1e-6:
+                    exact_keys.append(co)
+                    if len(exact_keys) >= 4:
+                        break
+            try:
+                evaluated = float(curve.evaluate(frame))
+            except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
+                evaluated = None
+            group = getattr(curve, "group", None)
+            rows.append(
+                {
+                    "data_path": str(getattr(curve, "data_path", "") or ""),
+                    "array_index": int(getattr(curve, "array_index", 0)),
+                    "group": _state_safe_name(group),
+                    "mute": bool(getattr(curve, "mute", False)),
+                    "keyframe_count": len(points),
+                    "first_key": first,
+                    "last_key": last,
+                    "current_keys": exact_keys,
+                    "evaluated": evaluated,
+                }
+            )
+        slot = getattr(animation_data, "action_slot", None)
+        result.append(
+            {
+                "object": _state_safe_name(obj),
+                "action": _state_safe_name(action),
+                "slot": _state_safe_name(slot),
+                "fcurves": rows,
+                "fcurve_count_observed": len(curves),
+            }
+        )
+        if total_curves >= _STATE_FCURVE_LIMIT:
+            break
+    return {
+        "status": "AVAILABLE",
+        "frame": frame,
+        "objects": result,
+        "fcurve_limit": _STATE_FCURVE_LIMIT,
+        "truncated": total_curves >= _STATE_FCURVE_LIMIT,
+    }
+
+
+def _depsgraph_state_from_value(depsgraph: Any, *, phase: str) -> dict[str, Any]:
+    if depsgraph is None:
+        return {
+            "status": "UNAVAILABLE",
+            "reason": "NO_SAMPLED_DEPSGRAPH_STATE",
+            "phase": str(phase),
+        }
+    try:
+        updates = tuple(getattr(depsgraph, "updates", ()) or ())
+    except (ReferenceError, RuntimeError, TypeError):
+        updates = ()
+    rows: list[dict[str, Any]] = []
+    for update in updates[:_STATE_DEPSGRAPH_UPDATE_LIMIT]:
+        updated_id = getattr(update, "id", None)
+        identifier = getattr(getattr(updated_id, "bl_rna", None), "identifier", None)
+        rows.append(
+            {
+                "id_name": str(
+                    getattr(updated_id, "name_full", None)
+                    or getattr(updated_id, "name", None)
+                    or ""
+                ),
+                "id_type": str(identifier or type(updated_id).__name__),
+                "geometry": bool(getattr(update, "is_updated_geometry", False)),
+                "transform": bool(getattr(update, "is_updated_transform", False)),
+                "shading": bool(getattr(update, "is_updated_shading", False)),
+            }
+        )
+    rows.sort(key=lambda row: (row["id_type"], row["id_name"]))
+    return {
+        "status": "AVAILABLE",
+        "phase": str(phase),
+        "mode": str(getattr(depsgraph, "mode", "") or ""),
+        "updates": rows,
+        "update_count_observed": len(updates),
+        "truncated": len(updates) > _STATE_DEPSGRAPH_UPDATE_LIMIT,
+    }
+
+
+def _remember_depsgraph_state(depsgraph: Any, *, phase: str) -> None:
+    global _LAST_DEPSGRAPH_STATE
+    _LAST_DEPSGRAPH_STATE = _depsgraph_state_from_value(depsgraph, phase=phase)
+
+
+def _depsgraph_state_probe(_context: Any) -> dict[str, Any]:
+    if _LAST_DEPSGRAPH_STATE is None:
+        return {
+            "status": "UNAVAILABLE",
+            "reason": "NO_SAMPLED_DEPSGRAPH_STATE",
+            "trace_enabled": bool(_DEPSGRAPH_TRACE_ENABLED),
+        }
+    return normalize_debug_state(_LAST_DEPSGRAPH_STATE)
+
+
+def register_debug_state_probe(name: str, probe: Callable[[Any], Any]) -> None:
+    key = str(name).strip()
+    if not key:
+        raise ValueError("debug state probe name must be non-empty")
+    if not callable(probe):
+        raise TypeError("debug state probe must be callable")
+    _STATE_DOMAIN_PROBES[key] = probe
+
+
+def unregister_debug_state_probe(name: str) -> None:
+    _STATE_DOMAIN_PROBES.pop(str(name).strip(), None)
+
+
+def _domain_state_probes(context: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for name in sorted(_STATE_DOMAIN_PROBES):
+        probe = _STATE_DOMAIN_PROBES[name]
+        try:
+            state = probe(context)
+        except Exception as exc:  # noqa: BLE001 -- probes are diagnostic-only
+            result.append(
+                {
+                    "name": name,
+                    "status": "ERROR",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+            continue
+        if state is None:
+            continue
+        result.append(
+            {
+                "name": name,
+                "status": "AVAILABLE",
+                "state": normalize_debug_state(state),
+            }
+        )
+    return result
+
+
+def _checkpoint_state_payload(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "context_identity": checkpoint.get("context_identity") or {},
+        "blender_state": checkpoint.get("blender_state") or {},
+        "native_state": checkpoint.get("native_state") or {},
+        "action_fcurves": checkpoint.get("action_fcurves") or {},
+        "depsgraph_state": checkpoint.get("depsgraph_state") or {},
+        "domain_probes": checkpoint.get("domain_probes") or [],
+    }
+
+
+def _previous_state_checkpoint(
+    *,
+    operation_id: str | None,
+    trace_id: str | None,
+) -> dict[str, Any] | None:
+    for checkpoint in reversed(_STATE_CHECKPOINTS):
+        if operation_id is not None and checkpoint.get("operation_id") == operation_id:
+            return checkpoint
+        if operation_id is None and trace_id is not None and checkpoint.get("trace_id") == trace_id:
+            return checkpoint
+    return None
+
+
+def reset_debug_state_checkpoints() -> None:
+    global _LAST_DEPSGRAPH_STATE, _STATE_CHECKPOINT_SEQUENCE
+    _STATE_CHECKPOINT_SEQUENCE = 0
+    _STATE_CHECKPOINTS.clear()
+    _LAST_DEPSGRAPH_STATE = None
+
+
+def read_recent_state_checkpoints(limit: int = 64) -> list[dict[str, Any]]:
+    bounded = max(0, int(limit))
+    if bounded <= 0:
+        return []
+    return [normalize_debug_state(item) for item in _STATE_CHECKPOINTS[-bounded:]]
+
+
+def first_changed_state_checkpoint(
+    checkpoints: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    values = checkpoints if checkpoints is not None else _STATE_CHECKPOINTS
+    for checkpoint in values:
+        diff = checkpoint.get("diff_from_previous")
+        if isinstance(diff, dict) and diff.get("changed"):
+            return checkpoint
+    return None
+
+
+def _state_checkpoint_boundary_for_event(
+    event: str,
+    terminal_status: str | None,
+) -> str | None:
+    if terminal_status in {
+        TraceTerminalStatus.FAILED.value,
+        TraceTerminalStatus.ERROR.value,
+    }:
+        return "FAILURE"
+    if terminal_status in {
+        TraceTerminalStatus.FINISHED.value,
+        TraceTerminalStatus.CANCELLED.value,
+    }:
+        return "AFTER_OPERATION"
+    return _STATE_CHECKPOINT_EVENT_BOUNDARIES.get(str(event))
+
+
+def capture_debug_state_checkpoint(
+    boundary: str,
+    *,
+    context: Any = None,
+    source_event: str | None = None,
+    trace_id: str | None = None,
+    span_id: str | None = None,
+    parent_span_id: str | None = None,
+    operation_id: str | None = None,
+    parent_operation_id: str | None = None,
+    subsystem: str | None = None,
+    lifecycle_phase: str | None = None,
+    evaluation_phase: str | None = None,
+    record: bool = True,
+) -> dict[str, Any]:
+    """Capture one bounded debugger checkpoint without changing product behavior."""
+    global _STATE_CHECKPOINT_SEQUENCE
+    if record:
+        _STATE_CHECKPOINT_SEQUENCE += 1
+        checkpoint_id = (
+            f"{_SESSION_ID}:state:{_STATE_CHECKPOINT_SEQUENCE}:{str(boundary).lower()}"
+        )
+    else:
+        checkpoint_id = (
+            f"{_SESSION_ID}:state:ephemeral:{uuid4().hex}:{str(boundary).lower()}"
+        )
+    try:
+        resolved_context = context or getattr(bpy, "context", None)
+        checkpoint = {
+            "schema": _STATE_CHECKPOINT_SCHEMA,
+            "incident_id": None,
+            "checkpoint_id": checkpoint_id,
+            "boundary": str(boundary),
+            "status": "AVAILABLE",
+            "confidence": "OBSERVED_LIVE",
+            "source": {"event": source_event} if source_event else None,
+            "trace_id": trace_id,
+            "span_id": span_id,
+            "parent_span_id": parent_span_id,
+            "operation_id": operation_id,
+            "parent_operation_id": parent_operation_id,
+            "subsystem": subsystem,
+            "lifecycle_phase": lifecycle_phase,
+            "evaluation_phase": evaluation_phase,
+            "context_identity": normalize_debug_state(
+                _debug_context_identity(resolved_context)
+            ),
+            "blender_state": normalize_debug_state(
+                _generic_blender_state(resolved_context)
+            ),
+            "native_state": normalize_debug_state(
+                _native_state_probe(resolved_context)
+            ),
+            "action_fcurves": normalize_debug_state(
+                _action_fcurve_probe(resolved_context)
+            ),
+            "depsgraph_state": normalize_debug_state(
+                _depsgraph_state_probe(resolved_context)
+            ),
+            "domain_probes": _domain_state_probes(resolved_context),
+            "semantic_state_hash": None,
+            "hash_schema": _STATE_HASH_SCHEMA,
+            "normalization_schema": _STATE_NORMALIZATION_SCHEMA,
+            "previous_checkpoint_id": None,
+            "diff_from_previous": None,
+            "unavailable_reason": None,
+        }
+        state_payload = _checkpoint_state_payload(checkpoint)
+        checkpoint["semantic_state_hash"] = stable_debug_state_hash(state_payload)
+        previous = _previous_state_checkpoint(
+            operation_id=operation_id,
+            trace_id=trace_id,
+        )
+        if previous is not None:
+            checkpoint["previous_checkpoint_id"] = previous.get("checkpoint_id")
+            checkpoint["diff_from_previous"] = structured_debug_state_diff(
+                _checkpoint_state_payload(previous),
+                state_payload,
+            )
+    except Exception as exc:  # noqa: BLE001 -- state capture must never break AWB
+        checkpoint = {
+            "schema": _STATE_CHECKPOINT_SCHEMA,
+            "incident_id": None,
+            "checkpoint_id": checkpoint_id,
+            "boundary": str(boundary),
+            "status": "ERROR",
+            "confidence": "NONE",
+            "source": {"event": source_event} if source_event else None,
+            "trace_id": trace_id,
+            "span_id": span_id,
+            "parent_span_id": parent_span_id,
+            "operation_id": operation_id,
+            "parent_operation_id": parent_operation_id,
+            "subsystem": subsystem,
+            "lifecycle_phase": lifecycle_phase,
+            "evaluation_phase": evaluation_phase,
+            "context_identity": {},
+            "blender_state": {},
+            "native_state": {},
+            "action_fcurves": {},
+            "depsgraph_state": {},
+            "domain_probes": [],
+            "semantic_state_hash": None,
+            "hash_schema": _STATE_HASH_SCHEMA,
+            "normalization_schema": _STATE_NORMALIZATION_SCHEMA,
+            "previous_checkpoint_id": None,
+            "diff_from_previous": None,
+            "unavailable_reason": f"{type(exc).__name__}: {exc}",
+        }
+    if record:
+        _STATE_CHECKPOINTS.append(checkpoint)
+        if len(_STATE_CHECKPOINTS) > _STATE_CHECKPOINT_MAX:
+            del _STATE_CHECKPOINTS[: len(_STATE_CHECKPOINTS) - _STATE_CHECKPOINT_MAX]
+    return checkpoint
+
+
 def _context_snapshot(context) -> dict[str, Any]:
     context = context or getattr(bpy, "context", None)
     scene = getattr(context, "scene", None) if context is not None else None
@@ -1190,6 +1959,29 @@ def trace_event(
             if isinstance(route_outcome, TraceRouteOutcome)
             else (str(route_outcome) if route_outcome is not None else None)
         )
+        checkpoint_boundary = _state_checkpoint_boundary_for_event(
+            str(event),
+            resolved_terminal,
+        )
+        state_checkpoint = None
+        if checkpoint_boundary is not None:
+            state_checkpoint = capture_debug_state_checkpoint(
+                checkpoint_boundary,
+                context=context,
+                source_event=str(event),
+                trace_id=resolved_trace_id,
+                span_id=resolved_span_id,
+                parent_span_id=resolved_parent_span_id,
+                operation_id=operation_id,
+                parent_operation_id=resolved_parent,
+                subsystem=str(subsystem) if subsystem is not None else None,
+                lifecycle_phase=(
+                    str(lifecycle_phase) if lifecycle_phase is not None else None
+                ),
+                evaluation_phase=(
+                    str(evaluation_phase) if evaluation_phase is not None else None
+                ),
+            )
         record = {
             "schema": "awb-interaction-trace/v1",
             "session_id": _SESSION_ID,
@@ -1215,6 +2007,7 @@ def trace_event(
             "dropped": int(dropped) if dropped is not None else None,
             "truncated": bool(truncated) if truncated is not None else None,
             "state": _context_snapshot(context),
+            "checkpoint": state_checkpoint,
             "data": _json_safe(data),
         }
         with path.open("a", encoding="utf-8", newline="\n") as handle:
@@ -1348,11 +2141,13 @@ def _trace_load_pre(*_args) -> None:
         evaluation_phase="pre_handler",
     )
     _OPERATION_CAUSAL.reset()
+    reset_debug_state_checkpoints()
 
 
 @persistent
 def _trace_load_post_fail(*_args) -> None:
     _OPERATION_CAUSAL.reset()
+    reset_debug_state_checkpoints()
     _trace_standalone_handler_event(
         "FILE_LOAD_FAIL",
         phase="fail",
@@ -1441,6 +2236,11 @@ def _trace_depsgraph_update_pre(*_args) -> None:
     _DEPSGRAPH_LAST_TRACE_NS = now
     dropped = _DEPSGRAPH_DROPPED_SAMPLES
     _DEPSGRAPH_DROPPED_SAMPLES = 0
+    depsgraph = next(
+        (value for value in reversed(_args) if hasattr(value, "updates")),
+        None,
+    )
+    _remember_depsgraph_state(depsgraph, phase="pre_handler")
     if not _LIFECYCLE_HANDLER_GUARD.enter():
         return
     _DEPSGRAPH_SAMPLE_ACTIVE = True
@@ -1463,6 +2263,11 @@ def _trace_depsgraph_update_post(*_args) -> None:
     if not _DEPSGRAPH_TRACE_ENABLED or not _DEPSGRAPH_SAMPLE_ACTIVE:
         return
     _DEPSGRAPH_SAMPLE_ACTIVE = False
+    depsgraph = next(
+        (value for value in reversed(_args) if hasattr(value, "updates")),
+        None,
+    )
+    _remember_depsgraph_state(depsgraph, phase="post_handler")
     if not _LIFECYCLE_HANDLER_GUARD.enter():
         return
     try:
@@ -1518,6 +2323,7 @@ def _trace_load_post(*_args) -> None:
     global _LAST_FRAME, _LAST_TRACE_RECORD, _SCRUB_STATE
     _SCRUB_STATE = None
     _OPERATION_CAUSAL.reset()
+    reset_debug_state_checkpoints()
     # At addon registration time Blender may not yet expose the target .blend
     # filepath, so the initial trace path can live under the temp directory.
     # Once load_post fires, preserve and rotate any existing trace beside the
@@ -1567,6 +2373,7 @@ def register_debug_trace_handlers() -> None:
     _archive_runtime_errors_for_new_session()
     _LAST_TRACE_RECORD = None
     _OPERATION_CAUSAL.reset()
+    reset_debug_state_checkpoints()
     _PRECISION_PREVIOUS_BONES.clear()
     scene = getattr(bpy.context, "scene", None)
     _LAST_FRAME = (
@@ -1622,6 +2429,7 @@ def unregister_debug_trace_handlers() -> None:
     _unregister_handler_list("redo_post", _trace_redo_post)
     set_depsgraph_trace_enabled(False)
     _OPERATION_CAUSAL.reset()
+    reset_debug_state_checkpoints()
     if sys.excepthook is _runtime_excepthook:
         sys.excepthook = _ORIGINAL_SYS_EXCEPTHOOK
     if (

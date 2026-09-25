@@ -19,8 +19,10 @@ from .debug_trace import (
     link_trace_operation,
     new_trace_causal_root,
     new_trace_operation_id,
+    register_debug_state_probe,
     trace_event,
     trace_exception,
+    unregister_debug_state_probe,
 )
 from .gizmo_preferences import (
     MAX_LINEAR_ROTATION_RADIANS_PER_PIXEL,
@@ -742,7 +744,52 @@ def _sync_rigped_replay_load_post(*_args: object) -> None:
     _sync_rigped_joint_limits(scene)
 
 
+def _rigped_debug_state_probe(context) -> dict[str, Any] | None:
+    """Return bounded Rigped semantic state for the generic debugger."""
+    context = context or getattr(bpy, "context", None)
+    active = getattr(context, "active_object", None) if context is not None else None
+    if (
+        active is None
+        or getattr(active, "type", None) != "ARMATURE"
+        or not hasattr(active, "get")
+        or active.get(RIGPED_SETUP_PROPERTY) is None
+    ):
+        return None
+
+    scene = getattr(context, "scene", None)
+    try:
+        selected = tuple(getattr(context, "selected_pose_bones", ()) or ())
+    except (ReferenceError, RuntimeError):
+        selected = ()
+    bones: list[dict[str, Any]] = []
+    for bone in sorted(selected, key=lambda item: str(getattr(item, "name", "") or ""))[:32]:
+        row: dict[str, Any] = {"bone": str(getattr(bone, "name", "") or "")}
+        try:
+            if AWB_CONTACT_STATE_PROPERTY in bone:
+                raw = float(bone[AWB_CONTACT_STATE_PROPERTY])
+                row["contact_state_raw"] = raw
+                row["contact_type"] = type_for_state_value(raw).value
+        except (ReferenceError, RuntimeError, TypeError, ValueError):
+            row["contact_state_unavailable"] = True
+        bones.append(row)
+
+    setup = active.get(RIGPED_SETUP_PROPERTY)
+    getter = getattr(setup, "get", None)
+    character_id = str(getter("character_id", "") or "") if callable(getter) else ""
+    return {
+        "rig_object": str(getattr(active, "name", "") or ""),
+        "character_id": character_id or None,
+        "semantic_transform_mode": (
+            str(getattr(scene, "baw_rigped_semantic_transform_mode", "NONE") or "NONE")
+            if scene is not None
+            else "NONE"
+        ),
+        "selected_pose_bones": bones,
+    }
+
+
 def register_rigped_sliding_replay_handler() -> None:
+    register_debug_state_probe("rigped", _rigped_debug_state_probe)
     frame_handlers = bpy.app.handlers.frame_change_post
     if _sync_rigped_sliding_replay_display not in frame_handlers:
         frame_handlers.append(_sync_rigped_sliding_replay_display)
@@ -763,6 +810,7 @@ def register_rigped_sliding_replay_handler() -> None:
 
 
 def unregister_rigped_sliding_replay_handler() -> None:
+    unregister_debug_state_probe("rigped")
     frame_handlers = bpy.app.handlers.frame_change_post
     if _sync_rigped_sliding_replay_display in frame_handlers:
         frame_handlers.remove(_sync_rigped_sliding_replay_display)

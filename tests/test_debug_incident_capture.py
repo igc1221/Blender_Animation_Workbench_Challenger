@@ -211,6 +211,79 @@ def _prepare_project_root(tmp_path: Path, *, external_debug: bool = False):
                 "modal_owner": None,
             },
         },
+        "state_checkpoints": [
+            {
+                "schema": "awb-debug-checkpoint/v1",
+                "incident_id": None,
+                "checkpoint_id": "runtime:before",
+                "boundary": "BEFORE_OPERATION",
+                "status": "AVAILABLE",
+                "confidence": "OBSERVED_LIVE",
+                "source": {"event": "TRANSFORM_BEGIN"},
+                "trace_id": "trace:synthetic",
+                "span_id": "span:ingress",
+                "parent_span_id": None,
+                "operation_id": "op-1",
+                "parent_operation_id": None,
+                "subsystem": "operator",
+                "lifecycle_phase": "invoke",
+                "evaluation_phase": "live_context",
+                "context_identity": {"area_type": "VIEW_3D"},
+                "blender_state": {"frame": 4},
+                "native_state": {"cube_x": 0.0},
+                "action_fcurves": {"status": "AVAILABLE"},
+                "depsgraph_state": {"status": "UNAVAILABLE"},
+                "domain_probes": [],
+                "semantic_state_hash": "hash-before",
+                "hash_schema": "awb-debug-state-hash/sha256-v1",
+                "normalization_schema": "awb-debug-state-normalized/v1",
+                "previous_checkpoint_id": None,
+                "diff_from_previous": None,
+                "unavailable_reason": None,
+            },
+            {
+                "schema": "awb-debug-checkpoint/v1",
+                "incident_id": None,
+                "checkpoint_id": "runtime:failure",
+                "boundary": "FAILURE",
+                "status": "AVAILABLE",
+                "confidence": "OBSERVED_LIVE",
+                "source": {"event": "TRANSFORM_FAIL"},
+                "trace_id": "trace:synthetic",
+                "span_id": "span:operator",
+                "parent_span_id": "span:ingress",
+                "operation_id": "op-1",
+                "parent_operation_id": None,
+                "subsystem": "operator",
+                "lifecycle_phase": "fail",
+                "evaluation_phase": "live_context",
+                "context_identity": {"area_type": "VIEW_3D"},
+                "blender_state": {"frame": 4},
+                "native_state": {"cube_x": 1.0},
+                "action_fcurves": {"status": "AVAILABLE"},
+                "depsgraph_state": {"status": "UNAVAILABLE"},
+                "domain_probes": [],
+                "semantic_state_hash": "hash-failure",
+                "hash_schema": "awb-debug-state-hash/sha256-v1",
+                "normalization_schema": "awb-debug-state-normalized/v1",
+                "previous_checkpoint_id": "runtime:before",
+                "diff_from_previous": {
+                    "schema": "awb-debug-state-diff/v1",
+                    "changed": True,
+                    "change_count": 1,
+                    "truncated": False,
+                    "changes": [
+                        {
+                            "path": "/native_state/cube_x",
+                            "kind": "CHANGED",
+                            "before": 0.0,
+                            "after": 1.0,
+                        }
+                    ],
+                },
+                "unavailable_reason": None,
+            },
+        ],
     }
 
     source_bytes = {
@@ -238,6 +311,9 @@ def test_capture_generic_live_incident_is_immutable_and_fresh(tmp_path: Path):
     analysis = json.loads((incident / "analysis.json").read_text(encoding="utf-8"))
     state_before = json.loads((incident / "state_before.json").read_text(encoding="utf-8"))
     state_failure = json.loads((incident / "state_failure.json").read_text(encoding="utf-8"))
+    state_checkpoints = json.loads(
+        (incident / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
     replay = json.loads((incident / "replay.json").read_text(encoding="utf-8"))
 
     assert manifest["schema"] == "awb-debug-incident-manifest/v1"
@@ -253,6 +329,10 @@ def test_capture_generic_live_incident_is_immutable_and_fresh(tmp_path: Path):
     assert manifest["artifacts"]["blender_runtime_current"]["source_authority"] == "project_launcher"
     assert manifest["artifacts"]["blender_runtime_current"]["live_blend_match"] is True
     assert analysis["live_probe_status"] == "AVAILABLE"
+    assert analysis["state_checkpoints_status"] == "AVAILABLE"
+    assert analysis["state_checkpoint_count"] == 2
+    assert analysis["first_changed_checkpoint"].endswith(":checkpoint:0002")
+    assert manifest["artifacts"]["state_checkpoints"]["status"] == "PRESENT"
     assert analysis["viewport"]["reason"] == "NO_SAFE_READ_ONLY_CAPTURE_PATH_BB1"
     assert not (incident / "viewport.png").exists()
 
@@ -271,6 +351,17 @@ def test_capture_generic_live_incident_is_immutable_and_fresh(tmp_path: Path):
     assert state_failure["evaluation_phase"] == "live_context"
     assert state_failure["domain_probes"] == []
     assert "rigped" not in json.dumps(state_failure, ensure_ascii=False).lower()
+
+    assert state_checkpoints["schema"] == "awb-debug-state-checkpoints/v1"
+    assert state_checkpoints["checkpoint_count"] == 2
+    before_checkpoint, failure_checkpoint = state_checkpoints["checkpoints"]
+    assert before_checkpoint["runtime_checkpoint_id"] == "runtime:before"
+    assert before_checkpoint["semantic_state_hash"] == "hash-before"
+    assert failure_checkpoint["runtime_checkpoint_id"] == "runtime:failure"
+    assert failure_checkpoint["previous_checkpoint_id"] == before_checkpoint["checkpoint_id"]
+    assert failure_checkpoint["semantic_state_hash"] == "hash-failure"
+    assert failure_checkpoint["diff_from_previous"]["changes"][0]["path"] == "/native_state/cube_x"
+    assert state_checkpoints["first_changed_checkpoint_id"] == failure_checkpoint["checkpoint_id"]
 
     timeline_rows = [
         json.loads(line)
@@ -615,7 +706,74 @@ def test_state_before_keeps_domain_specific_legacy_state_out_of_core_blender_sta
     assert checkpoint["source"]["legacy_state"]["rigped_transform_drag"] is True
 
 
-def test_live_probe_payload_is_read_only_and_bb2_fields_are_not_fabricated():
+def test_state_before_pairs_trace_only_bb3_checkpoint():
+    module = _load_module()
+    before = {
+        "schema": "awb-debug-checkpoint/v1",
+        "incident_id": None,
+        "checkpoint_id": "runtime-before",
+        "boundary": "BEFORE_OPERATION",
+        "status": "AVAILABLE",
+        "confidence": "OBSERVED_LIVE",
+        "source": {"event": "TRANSFORM_TOOL_INGRESS"},
+        "trace_id": "trace-only",
+        "span_id": "root-span",
+        "parent_span_id": None,
+        "operation_id": None,
+        "parent_operation_id": None,
+        "subsystem": "keymap",
+        "lifecycle_phase": "ingress",
+        "evaluation_phase": None,
+        "context_identity": {"area_type": "VIEW_3D"},
+        "blender_state": {"frame": 4},
+        "native_state": {"value": 1},
+        "action_fcurves": {},
+        "depsgraph_state": {},
+        "domain_probes": [],
+        "semantic_state_hash": "before-hash",
+        "hash_schema": "awb-debug-state-hash/sha256-v1",
+        "normalization_schema": "awb-debug-state-normalized/v1",
+        "previous_checkpoint_id": None,
+        "diff_from_previous": None,
+        "unavailable_reason": None,
+    }
+    records = [
+        {
+            "session_id": "current",
+            "seq": 1,
+            "event": "TRANSFORM_TOOL_INGRESS",
+            "trace_id": "trace-only",
+            "operation_id": None,
+            "checkpoint": before,
+        },
+        {
+            "session_id": "current",
+            "seq": 2,
+            "event": "TRANSFORM_TOOL_TERMINAL",
+            "trace_id": "trace-only",
+            "operation_id": None,
+            "terminal_status": "FINISHED",
+            "checkpoint": {
+                "schema": "awb-debug-checkpoint/v1",
+                "boundary": "AFTER_OPERATION",
+            },
+        },
+    ]
+
+    checkpoint = module._state_before_checkpoint(
+        "INC-test",
+        records,
+        current_session_id="current",
+    )
+
+    assert checkpoint["status"] == "AVAILABLE"
+    assert checkpoint["trace_id"] == "trace-only"
+    assert checkpoint["semantic_state_hash"] == "before-hash"
+    assert checkpoint["checkpoint_id"] == "INC-test:before-operation"
+    assert checkpoint["source"]["runtime_checkpoint_id"] == "runtime-before"
+
+
+def test_live_probe_payload_is_read_only_and_bb3_state_capture_is_non_recording():
     module = _load_module()
     code = module.LIVE_PROBE_CODE
     forbidden = (
@@ -628,7 +786,9 @@ def test_live_probe_payload_is_read_only_and_bb2_fields_are_not_fabricated():
     )
     for token in forbidden:
         assert token not in code
-    assert '"status": "UNAVAILABLE_BB2"' in code
+    assert "capture_debug_state_checkpoint" in code
+    assert "read_recent_state_checkpoints" in code
+    assert "record=False" in code
 
 
 def test_schemas_are_generic_and_do_not_require_rigped():
@@ -636,6 +796,7 @@ def test_schemas_are_generic_and_do_not_require_rigped():
         "AWB_INCIDENT_MANIFEST_V1.schema.json",
         "AWB_INCIDENT_TIMELINE_V1.schema.json",
         "AWB_DEBUG_CHECKPOINT_V1.schema.json",
+        "AWB_DEBUG_STATE_CHECKPOINTS_V1.schema.json",
     ):
         payload = json.loads((ROOT / "docs" / "DEBUG" / "schemas" / name).read_text(encoding="utf-8"))
         lowered = json.dumps(payload, ensure_ascii=False).lower()
