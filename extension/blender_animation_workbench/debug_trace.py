@@ -37,6 +37,7 @@ _RUNTIME_ERRORS_FILENAME = "awb_runtime_errors.jsonl"
 _TRACE_MAX_BYTES = 4 * 1024 * 1024
 _PRECISION_TRACE_MAX_BYTES = 2 * 1024 * 1024
 _TAIL_READ_CHUNK_BYTES = 64 * 1024
+_RUNTIME_ERROR_CAUSAL_MAX_AGE_NS = 5_000_000_000
 _EXPLICIT_TERMINAL_EVENTS: dict[
     str,
     tuple[TraceTerminalStatus, str, TraceRouteOutcome],
@@ -66,6 +67,36 @@ _EXPLICIT_TERMINAL_EVENTS: dict[
         "fail",
         TraceRouteOutcome.CLAIMED,
     ),
+    "CONTACT_WRITE_COMMIT": (
+        TraceTerminalStatus.FINISHED,
+        "commit",
+        TraceRouteOutcome.CLAIMED,
+    ),
+    "CONTACT_WRITE_FAIL": (
+        TraceTerminalStatus.FAILED,
+        "fail",
+        TraceRouteOutcome.CLAIMED,
+    ),
+    "CONTACT_BATCH_WRITE_COMMIT": (
+        TraceTerminalStatus.FINISHED,
+        "commit",
+        TraceRouteOutcome.CLAIMED,
+    ),
+    "CONTACT_BATCH_WRITE_FAIL": (
+        TraceTerminalStatus.FAILED,
+        "fail",
+        TraceRouteOutcome.CLAIMED,
+    ),
+    "DIRECT_WRITE_COMMIT": (
+        TraceTerminalStatus.FINISHED,
+        "commit",
+        TraceRouteOutcome.CLAIMED,
+    ),
+    "DIRECT_WRITE_FAIL": (
+        TraceTerminalStatus.FAILED,
+        "fail",
+        TraceRouteOutcome.CLAIMED,
+    ),
 }
 
 _SESSION_ID = uuid4().hex
@@ -75,7 +106,7 @@ _LAST_FRAME: tuple[int, float] | None = None
 _WRITE_GUARD = False
 _PRECISION_WRITE_GUARD = False
 _REPLAY_EXECUTION_ACTIVE = False
-_OPERATION_PARENTS: dict[str, str] = {}
+
 _OPERATION_CAUSAL = OperationCausalRegistry(max_bindings=2048)
 _LIFECYCLE_HANDLER_GUARD = LifecycleHandlerRecursionGuard()
 _DEPSGRAPH_TRACE_ENABLED = False
@@ -131,9 +162,7 @@ def operation_causal_context(operation_id: str | None) -> TraceCausalContext | N
 
 
 def release_operation_causal_context(operation_id: str | None) -> None:
-    _OPERATION_CAUSAL.forget(operation_id)
-    if operation_id is not None:
-        _OPERATION_PARENTS.pop(str(operation_id), None)
+    _OPERATION_CAUSAL.retire(operation_id)
 
 
 def set_depsgraph_trace_enabled(enabled: bool) -> None:
@@ -161,14 +190,9 @@ def link_trace_operation(
     child_operation_id: str | None,
     parent_operation_id: str | None,
 ) -> TraceCausalContext | None:
-    if not child_operation_id or not parent_operation_id or child_operation_id == parent_operation_id:
-        return None
-    child_id = str(child_operation_id)
-    parent_id = str(parent_operation_id)
-    _OPERATION_PARENTS[child_id] = parent_id
     return _OPERATION_CAUSAL.link(
-        child_id,
-        parent_id,
+        child_operation_id,
+        parent_operation_id,
         child_prefix="operation",
     )
 
@@ -315,6 +339,57 @@ def _write_runtime_context_snapshot(record: dict[str, Any]) -> None:
         pass
 
 
+def _runtime_error_correlation_candidate() -> tuple[dict[str, Any], dict[str, Any]]:
+    candidate = _LAST_TRACE_RECORD
+    if not isinstance(candidate, dict) or not candidate:
+        return {}, {
+            "status": "NO_TRACE",
+            "max_age_ns": _RUNTIME_ERROR_CAUSAL_MAX_AGE_NS,
+        }
+
+    candidate_session = candidate.get("session_id")
+    candidate_seq = candidate.get("seq")
+    candidate_event = candidate.get("event")
+    if candidate_session != _SESSION_ID:
+        return {}, {
+            "status": "SESSION_MISMATCH",
+            "max_age_ns": _RUNTIME_ERROR_CAUSAL_MAX_AGE_NS,
+            "candidate_session_id": candidate_session,
+            "candidate_seq": candidate_seq,
+            "candidate_event": candidate_event,
+        }
+
+    observed_ns = candidate.get("monotonic_ns")
+    if not isinstance(observed_ns, int):
+        return {}, {
+            "status": "MISSING_MONOTONIC",
+            "max_age_ns": _RUNTIME_ERROR_CAUSAL_MAX_AGE_NS,
+            "candidate_session_id": candidate_session,
+            "candidate_seq": candidate_seq,
+            "candidate_event": candidate_event,
+        }
+
+    age_ns = monotonic_ns() - observed_ns
+    if age_ns < 0 or age_ns > _RUNTIME_ERROR_CAUSAL_MAX_AGE_NS:
+        return {}, {
+            "status": "STALE",
+            "age_ns": age_ns,
+            "max_age_ns": _RUNTIME_ERROR_CAUSAL_MAX_AGE_NS,
+            "candidate_session_id": candidate_session,
+            "candidate_seq": candidate_seq,
+            "candidate_event": candidate_event,
+        }
+
+    return candidate, {
+        "status": "FRESH",
+        "age_ns": age_ns,
+        "max_age_ns": _RUNTIME_ERROR_CAUSAL_MAX_AGE_NS,
+        "candidate_session_id": candidate_session,
+        "candidate_seq": candidate_seq,
+        "candidate_event": candidate_event,
+    }
+
+
 def _append_runtime_error_record(
     source: str,
     exc_type: str,
@@ -324,7 +399,7 @@ def _append_runtime_error_record(
     context=None,
 ) -> None:
     try:
-        last_trace = _LAST_TRACE_RECORD or {}
+        last_trace, causal_correlation = _runtime_error_correlation_candidate()
         record = {
             "schema": "awb-runtime-error/v1",
             "utc": datetime.now(UTC).isoformat(timespec="milliseconds"),
@@ -334,6 +409,7 @@ def _append_runtime_error_record(
             "error": str(message),
             "traceback": str(traceback_text),
             "state": _context_snapshot(context),
+            "causal_correlation": causal_correlation,
             "last_trace": {
                 "seq": last_trace.get("seq"),
                 "channel": last_trace.get("channel"),
@@ -1065,7 +1141,13 @@ def trace_event(
     **data,
 ) -> None:
     global _LAST_TRACE_RECORD, _SEQUENCE, _WRITE_GUARD
+    terminal_contract = _EXPLICIT_TERMINAL_EVENTS.get(str(event))
+    retire_operation = operation_id is not None and (
+        terminal_status is not None or terminal_contract is not None
+    )
     if _WRITE_GUARD:
+        if retire_operation:
+            _OPERATION_CAUSAL.retire(operation_id)
         return
     _WRITE_GUARD = True
     try:
@@ -1075,7 +1157,7 @@ def trace_event(
         _SEQUENCE += 1
         resolved_parent = parent_operation_id
         if resolved_parent is None and operation_id is not None:
-            resolved_parent = _OPERATION_PARENTS.get(str(operation_id))
+            resolved_parent = _OPERATION_CAUSAL.parent(operation_id)
         bound_causal = causal or operation_causal_context(operation_id)
         resolved_trace_id = trace_id if trace_id is not None else (
             bound_causal.trace_id if bound_causal is not None else None
@@ -1088,7 +1170,6 @@ def trace_event(
             if parent_span_id is not None
             else (bound_causal.parent_span_id if bound_causal is not None else None)
         )
-        terminal_contract = _EXPLICIT_TERMINAL_EVENTS.get(str(event))
         if terminal_contract is not None:
             mapped_terminal, mapped_phase, mapped_route = terminal_contract
             if terminal_status is None:
@@ -1151,13 +1232,12 @@ def trace_event(
             }
         ):
             persist_latest_replay_script()
-        if terminal_status is not None and operation_id is not None:
-            _OPERATION_CAUSAL.forget(operation_id)
-            _OPERATION_PARENTS.pop(str(operation_id), None)
     except Exception:  # noqa: BLE001, S110 -- trace persistence is strictly non-blocking
         # Never let diagnostics alter the user's Blender operation.
         pass
     finally:
+        if retire_operation:
+            _OPERATION_CAUSAL.retire(operation_id)
         _WRITE_GUARD = False
 
 
@@ -1177,32 +1257,34 @@ def trace_lifecycle_event(
     context=None,
     **data,
 ) -> None:
-    resolved_subsystem = validate_trace_subsystem(subsystem)
-    resolved_phase = validate_trace_lifecycle_phase(phase)
-    resolved_evaluation = validate_trace_evaluation_phase(evaluation_phase)
-    if terminal_status is not None and not isinstance(terminal_status, TraceTerminalStatus):
-        raise TypeError("terminal_status must be TraceTerminalStatus or None")
-    if route_outcome is not None and not isinstance(route_outcome, TraceRouteOutcome):
-        raise TypeError("route_outcome must be TraceRouteOutcome or None")
-    trace_event(
-        "LIFECYCLE",
-        event,
-        operation_id=operation_id,
-        parent_operation_id=parent_operation_id,
-        causal=causal,
-        subsystem=resolved_subsystem,
-        lifecycle_phase=resolved_phase,
-        evaluation_phase=resolved_evaluation,
-        terminal_status=terminal_status,
-        route_outcome=route_outcome,
-        dropped=dropped,
-        truncated=truncated,
-        context=context,
-        **data,
-    )
-    if terminal_status is not None and operation_id is not None:
-        _OPERATION_CAUSAL.forget(operation_id)
-        _OPERATION_PARENTS.pop(str(operation_id), None)
+    retire_operation = terminal_status is not None and operation_id is not None
+    try:
+        resolved_subsystem = validate_trace_subsystem(subsystem)
+        resolved_phase = validate_trace_lifecycle_phase(phase)
+        resolved_evaluation = validate_trace_evaluation_phase(evaluation_phase)
+        if terminal_status is not None and not isinstance(terminal_status, TraceTerminalStatus):
+            raise TypeError("terminal_status must be TraceTerminalStatus or None")
+        if route_outcome is not None and not isinstance(route_outcome, TraceRouteOutcome):
+            raise TypeError("route_outcome must be TraceRouteOutcome or None")
+        trace_event(
+            "LIFECYCLE",
+            event,
+            operation_id=operation_id,
+            parent_operation_id=parent_operation_id,
+            causal=causal,
+            subsystem=resolved_subsystem,
+            lifecycle_phase=resolved_phase,
+            evaluation_phase=resolved_evaluation,
+            terminal_status=terminal_status,
+            route_outcome=route_outcome,
+            dropped=dropped,
+            truncated=truncated,
+            context=context,
+            **data,
+        )
+    finally:
+        if retire_operation:
+            _OPERATION_CAUSAL.retire(operation_id)
 
 
 def trace_exception(
@@ -1265,13 +1347,11 @@ def _trace_load_pre(*_args) -> None:
         phase="handler_pre",
         evaluation_phase="pre_handler",
     )
-    _OPERATION_PARENTS.clear()
     _OPERATION_CAUSAL.reset()
 
 
 @persistent
 def _trace_load_post_fail(*_args) -> None:
-    _OPERATION_PARENTS.clear()
     _OPERATION_CAUSAL.reset()
     _trace_standalone_handler_event(
         "FILE_LOAD_FAIL",
@@ -1435,9 +1515,8 @@ def _trace_frame_change_post(scene, *_args) -> None:
 
 @persistent
 def _trace_load_post(*_args) -> None:
-    global _LAST_FRAME, _SCRUB_STATE
+    global _LAST_FRAME, _LAST_TRACE_RECORD, _SCRUB_STATE
     _SCRUB_STATE = None
-    _OPERATION_PARENTS.clear()
     _OPERATION_CAUSAL.reset()
     # At addon registration time Blender may not yet expose the target .blend
     # filepath, so the initial trace path can live under the temp directory.
@@ -1447,6 +1526,7 @@ def _trace_load_post(*_args) -> None:
     _archive_existing_session_file(_trace_path())
     _archive_existing_session_file(_precision_trace_path())
     _archive_runtime_errors_for_new_session()
+    _LAST_TRACE_RECORD = None
     _PRECISION_PREVIOUS_BONES.clear()
     scene = getattr(bpy.context, "scene", None)
     _LAST_FRAME = (
@@ -1476,7 +1556,7 @@ def _unregister_handler_list(name: str, callback) -> None:
 
 
 def register_debug_trace_handlers() -> None:
-    global _LAST_FRAME
+    global _LAST_FRAME, _LAST_TRACE_RECORD
     # Preserve the outgoing session's semantic replay before rotating its
     # bounded trace files. Replay-only sessions produce zero user actions, and
     # persist_latest_replay_script() deliberately leaves an existing compact
@@ -1485,7 +1565,7 @@ def register_debug_trace_handlers() -> None:
     _archive_existing_session_file(_trace_path())
     _archive_existing_session_file(_precision_trace_path())
     _archive_runtime_errors_for_new_session()
-    _OPERATION_PARENTS.clear()
+    _LAST_TRACE_RECORD = None
     _OPERATION_CAUSAL.reset()
     _PRECISION_PREVIOUS_BONES.clear()
     scene = getattr(bpy.context, "scene", None)

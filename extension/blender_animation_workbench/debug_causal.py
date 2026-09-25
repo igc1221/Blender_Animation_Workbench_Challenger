@@ -114,17 +114,19 @@ def new_trace_child(
 
 
 class OperationCausalRegistry:
-    """Session/epoch-scoped operation -> causal-context bindings.
+    """Epoch-scoped operation causal bindings plus parent/child lifetime.
 
-    There is deliberately no implicit "current trace". Callers must name the
-    operation or pass an explicit TraceCausalContext. This makes interleaved
-    modal operators and nested writers fail closed instead of cross-linking.
+    There is deliberately no implicit "current trace". Parent links exist only
+    when the named parent is live in the current epoch. Retiring an operation
+    also retires its descendants so writer/modal children cannot survive their
+    owning gesture and later cross-link a new operation.
     """
 
     def __init__(self, *, max_bindings: int = 2048) -> None:
         self._max_bindings = max(16, int(max_bindings))
         self._epoch = uuid4().hex
         self._bindings: dict[tuple[str, str], TraceCausalContext] = {}
+        self._parents: dict[tuple[str, str], str] = {}
 
     @property
     def epoch(self) -> str:
@@ -132,11 +134,36 @@ class OperationCausalRegistry:
 
     def reset(self, *, epoch: str | None = None) -> str:
         self._bindings.clear()
+        self._parents.clear()
         self._epoch = str(epoch or uuid4().hex)
         return self._epoch
 
     def _key(self, operation_id: str) -> tuple[str, str]:
         return (self._epoch, str(operation_id))
+
+    def _descendant_ids(self, operation_id: str) -> set[str]:
+        descendants = {str(operation_id)}
+        pending = [str(operation_id)]
+        while pending:
+            parent_id = pending.pop()
+            for (epoch, child_id), linked_parent in tuple(self._parents.items()):
+                if (
+                    epoch == self._epoch
+                    and linked_parent == parent_id
+                    and child_id not in descendants
+                ):
+                    descendants.add(child_id)
+                    pending.append(child_id)
+        return descendants
+
+    def _enforce_bound(self) -> None:
+        while len(self._bindings) > self._max_bindings:
+            oldest_epoch, oldest_id = next(iter(self._bindings))
+            if oldest_epoch != self._epoch:
+                self._bindings.pop((oldest_epoch, oldest_id), None)
+                self._parents.pop((oldest_epoch, oldest_id), None)
+                continue
+            self.retire(oldest_id)
 
     def bind(
         self,
@@ -146,16 +173,22 @@ class OperationCausalRegistry:
         if not operation_id:
             return None
         key = self._key(str(operation_id))
+        # Rebinding starts a new explicit lifetime for this operation id.
+        self._bindings.pop(key, None)
+        self._parents.pop(key, None)
         self._bindings[key] = causal
-        while len(self._bindings) > self._max_bindings:
-            oldest = next(iter(self._bindings))
-            self._bindings.pop(oldest, None)
+        self._enforce_bound()
         return causal
 
     def get(self, operation_id: str | None) -> TraceCausalContext | None:
         if not operation_id:
             return None
         return self._bindings.get(self._key(str(operation_id)))
+
+    def parent(self, operation_id: str | None) -> str | None:
+        if not operation_id:
+            return None
+        return self._parents.get(self._key(str(operation_id)))
 
     def link(
         self,
@@ -170,23 +203,38 @@ class OperationCausalRegistry:
             or str(child_operation_id) == str(parent_operation_id)
         ):
             return None
-        existing = self.get(str(child_operation_id))
-        if existing is not None:
-            return existing
-        parent = self.get(str(parent_operation_id))
+        child_id = str(child_operation_id)
+        parent_id = str(parent_operation_id)
+        parent = self.get(parent_id)
         if parent is None:
+            # Fail closed: never retain a parent relation without a live parent.
             return None
-        child = new_trace_child(
-            parent,
-            child_prefix,
-            origin="AUTO_OPERATION_LINK",
-        )
-        return self.bind(str(child_operation_id), child)
+
+        existing = self.get(child_id)
+        if existing is None:
+            existing = new_trace_child(
+                parent,
+                child_prefix,
+                origin="AUTO_OPERATION_LINK",
+            )
+            self.bind(child_id, existing)
+
+        self._parents[self._key(child_id)] = parent_id
+        self._enforce_bound()
+        return existing
+
+    def retire(self, operation_id: str | None) -> tuple[str, ...]:
+        if not operation_id:
+            return ()
+        retired = self._descendant_ids(str(operation_id))
+        for retired_id in retired:
+            key = self._key(retired_id)
+            self._bindings.pop(key, None)
+            self._parents.pop(key, None)
+        return tuple(sorted(retired))
 
     def forget(self, operation_id: str | None) -> None:
-        if not operation_id:
-            return
-        self._bindings.pop(self._key(str(operation_id)), None)
+        self.retire(operation_id)
 
     def __len__(self) -> int:
         return len(self._bindings)
