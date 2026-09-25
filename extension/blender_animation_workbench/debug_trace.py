@@ -1261,6 +1261,20 @@ def _trace_load_pre(*_args) -> None:
         phase="handler_pre",
         evaluation_phase="pre_handler",
     )
+    _OPERATION_PARENTS.clear()
+    _OPERATION_CAUSAL.reset()
+
+
+@persistent
+def _trace_load_post_fail(*_args) -> None:
+    _OPERATION_PARENTS.clear()
+    _OPERATION_CAUSAL.reset()
+    _trace_standalone_handler_event(
+        "FILE_LOAD_FAIL",
+        phase="fail",
+        evaluation_phase="post_handler",
+        terminal_status=TraceTerminalStatus.FAILED,
+    )
 
 
 @persistent
@@ -1382,29 +1396,37 @@ def _trace_depsgraph_update_post(*_args) -> None:
 @persistent
 def _trace_frame_change_post(scene, *_args) -> None:
     global _LAST_FRAME
-    current = (
-        int(getattr(scene, "frame_current", 0)),
-        float(getattr(scene, "frame_subframe", 0.0)),
-    )
-    previous = _LAST_FRAME
-    _LAST_FRAME = current
-    if previous is None or previous == current:
+    if not _LIFECYCLE_HANDLER_GUARD.enter():
         return
-    if _SCRUB_STATE is not None:
-        _SCRUB_STATE["frame_change_count"] = int(_SCRUB_STATE["frame_change_count"]) + 1
-        _SCRUB_STATE["min_frame"] = min(int(_SCRUB_STATE["min_frame"]), current[0])
-        _SCRUB_STATE["max_frame"] = max(int(_SCRUB_STATE["max_frame"]), current[0])
-        _precision_frame_sample(scene)
-        return
-    trace_event(
-        "INPUT",
-        "FRAME_CHANGE",
-        context=bpy.context,
-        from_frame=previous[0],
-        from_subframe=previous[1],
-        to_frame=current[0],
-        to_subframe=current[1],
-    )
+    try:
+        current = (
+            int(getattr(scene, "frame_current", 0)),
+            float(getattr(scene, "frame_subframe", 0.0)),
+        )
+        previous = _LAST_FRAME
+        _LAST_FRAME = current
+        if previous is None or previous == current:
+            return
+        if _SCRUB_STATE is not None:
+            _SCRUB_STATE["frame_change_count"] = int(_SCRUB_STATE["frame_change_count"]) + 1
+            _SCRUB_STATE["min_frame"] = min(int(_SCRUB_STATE["min_frame"]), current[0])
+            _SCRUB_STATE["max_frame"] = max(int(_SCRUB_STATE["max_frame"]), current[0])
+            _precision_frame_sample(scene)
+            return
+        trace_event(
+            "INPUT",
+            "FRAME_CHANGE",
+            subsystem="animation",
+            lifecycle_phase="handler_post",
+            evaluation_phase="post_handler",
+            context=bpy.context,
+            from_frame=previous[0],
+            from_subframe=previous[1],
+            to_frame=current[0],
+            to_subframe=current[1],
+        )
+    finally:
+        _LIFECYCLE_HANDLER_GUARD.exit()
 
 
 @persistent
@@ -1470,6 +1492,7 @@ def register_debug_trace_handlers() -> None:
     _register_handler_list("frame_change_post", _trace_frame_change_post)
     _register_handler_list("load_pre", _trace_load_pre)
     _register_handler_list("load_post", _trace_load_post)
+    _register_handler_list("load_post_fail", _trace_load_post_fail)
     _register_handler_list("save_pre", _trace_save_pre)
     _register_handler_list("save_post", _trace_save_post)
     _register_handler_list("save_post_fail", _trace_save_post_fail)
@@ -1505,6 +1528,7 @@ def unregister_debug_trace_handlers() -> None:
     _unregister_handler_list("frame_change_post", _trace_frame_change_post)
     _unregister_handler_list("load_pre", _trace_load_pre)
     _unregister_handler_list("load_post", _trace_load_post)
+    _unregister_handler_list("load_post_fail", _trace_load_post_fail)
     _unregister_handler_list("save_pre", _trace_save_pre)
     _unregister_handler_list("save_post", _trace_save_post)
     _unregister_handler_list("save_post_fail", _trace_save_post_fail)

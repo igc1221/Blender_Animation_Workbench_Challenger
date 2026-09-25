@@ -12,7 +12,12 @@ from mathutils import Vector
 
 from .character_query import characters_for_context
 from .debug_causal import TraceRouteOutcome, TraceTerminalStatus
-from .debug_trace import new_trace_causal_root, trace_event, trace_lifecycle_event
+from .debug_trace import (
+    new_trace_causal_child,
+    new_trace_causal_root,
+    trace_event,
+    trace_lifecycle_event,
+)
 from .phase4_contact_ui import transform_orientation_cycle
 from .rigped_box_wire_overlay import (
     box_display_names,
@@ -1631,10 +1636,23 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
 
     def execute(self, context):
         scene = context.scene
+        causal_root = new_trace_causal_root("transform-tool")
+        trace_lifecycle_event(
+            "TRANSFORM_TOOL_INGRESS",
+            subsystem="keymap",
+            phase="ingress",
+            causal=causal_root,
+            route_outcome=TraceRouteOutcome.CLAIMED,
+            context=context,
+            requested_mode=self.mode,
+        )
         semantic_mode_before = str(getattr(scene, "baw_rigped_semantic_transform_mode", "NONE"))
         trace_event(
             "INPUT",
             "TRANSFORM_TOOL_REQUEST",
+            causal=causal_root,
+            subsystem="input",
+            lifecycle_phase="ingress",
             context=context,
             requested_mode=self.mode,
             semantic_mode_before=semantic_mode_before,
@@ -1902,6 +1920,20 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
                 )
                 return {"FINISHED"}
 
+        route_causal = new_trace_causal_child(
+            causal_root,
+            "transform-tool-route",
+        )
+        trace_lifecycle_event(
+            "TRANSFORM_TOOL_GENERIC_ROUTE",
+            subsystem="operator",
+            phase="routing",
+            causal=route_causal,
+            route_outcome=TraceRouteOutcome.CLAIMED,
+            context=context,
+            requested_mode=self.mode,
+            route="GENERIC_WORKSPACE_TOOL",
+        )
         tool_id = _awb_transform_workspace_tool_id(context, self.mode)
         active_tool_before = _active_native_transform_tool_id(context)
         deactivate_rigped_semantic_tool(context)
@@ -1910,6 +1942,18 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
             context.space_data.show_gizmo_tool = False
         if semantic_mode_before == "NONE" and active_tool_before == tool_id:
             _cycle_transform_orientation(context)
+            trace_lifecycle_event(
+                "TRANSFORM_TOOL_GENERIC_FINISHED",
+                subsystem="operator",
+                phase="commit",
+                causal=route_causal,
+                terminal_status=TraceTerminalStatus.FINISHED,
+                route_outcome=TraceRouteOutcome.CLAIMED,
+                context=context,
+                requested_mode=self.mode,
+                route="GENERIC_WORKSPACE_TOOL",
+                cycled_orientation=True,
+            )
             return {"FINISHED"}
         if not _activate_awb_transform_workspace_tool(context, self.mode):
             return {"CANCELLED"}
