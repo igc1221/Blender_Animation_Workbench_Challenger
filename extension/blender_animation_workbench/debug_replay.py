@@ -13,6 +13,7 @@ import bpy
 from mathutils import Matrix, Quaternion, Vector
 
 from .debug_trace import (
+    capture_debug_state_checkpoint,
     read_recent_trace_events,
     replay_execution_active,
     replay_path,
@@ -1299,6 +1300,54 @@ def _execute_scrub_action(
     }
 
 
+def _semantic_replay_action_route(
+    action: dict[str, Any],
+    *,
+    replay_mode: ReplayMode,
+) -> str:
+    kind = str(action.get("kind") or "")
+    if kind == "AUTO_KEY":
+        return "AUTO_KEY"
+    if kind == "CONTACT":
+        return f"CONTACT_{replay_mode.value}"
+    if kind == "ROTATE":
+        return "FREE_DIRECT_ROTATE"
+    if kind == "MOVE":
+        route = str(action.get("route") or "")
+        if route in {"SLIDING_MOVE", "HYBRID_MOVE", "DIRECT_MOVE"}:
+            return route
+        return "FREE_FK_MOVE"
+    if kind == "SCRUB":
+        return "SCRUB"
+    raise RuntimeError(f"AWB semantic replay v1 does not support action kind {kind!r}.")
+
+
+def _semantic_replay_step_manifest(
+    actions: tuple[Any, ...],
+    *,
+    replay_mode: ReplayMode,
+) -> list[dict[str, Any]]:
+    manifest: list[dict[str, Any]] = []
+    for step_index, action in enumerate(actions, start=1):
+        if not isinstance(action, dict):
+            raise TypeError(
+                f"AWB semantic replay action {step_index} is not a mapping; stable alignment is unavailable."
+            )
+        kind = str(action.get("kind") or "")
+        route = _semantic_replay_action_route(action, replay_mode=replay_mode)
+        manifest.append(
+            {
+                "step_index": step_index,
+                "step_id": f"semantic:{step_index:04d}",
+                "source_seq": action.get("source_seq"),
+                "action_kind": kind,
+                "action_route": route,
+                "checkpoint_boundaries": ["BEFORE_OPERATION", "AFTER_OPERATION"],
+            }
+        )
+    return manifest
+
+
 def run_semantic_replay(
     context=None,
     *,
@@ -1311,9 +1360,10 @@ def run_semantic_replay(
 ) -> dict[str, Any]:
     """Execute replay-grade user intent against the current clean scene.
 
-    v1 deliberately supports the minimal production path needed by the current
-    Free replay regression: Auto Key, explicit Contact, single-control Free
-    direct Rotate, and Track Bar scrub. Unsupported action kinds fail closed.
+    BB-6 alignment is authored here, at execution time: every semantic action
+    gets a stable step manifest entry plus explicit BEFORE/AFTER checkpoints.
+    Runtime UUIDs remain provenance only and are never required for cross-run
+    equality/alignment.
     """
 
     context = context or bpy.context
@@ -1328,50 +1378,82 @@ def run_semantic_replay(
     if len(actions) > int(max_actions):
         raise RuntimeError("AWB semantic replay exceeded its bounded action budget.")
 
+    step_manifest = _semantic_replay_step_manifest(
+        actions,
+        replay_mode=resolved_replay_mode,
+    )
+    execution_id = str(replay_execution_id or f"semantic-replay:{uuid4().hex}")
     results: list[dict[str, Any]] = []
     frame_budget = [0]
     set_replay_execution_active(
         True,
-        execution_id=replay_execution_id,
+        execution_id=execution_id,
     )
     try:
-        for action in actions:
-            if not isinstance(action, dict):
-                continue
-            kind = str(action.get("kind") or "")
-            if kind == "AUTO_KEY":
-                results.append(_execute_auto_key_action(context, action))
-            elif kind == "CONTACT":
-                results.append(
-                    _execute_contact_action(
+        for action, step in zip(actions, step_manifest, strict=True):
+            checkpoint_args = {
+                "context": context,
+                "source_event": "SEMANTIC_REPLAY_STEP",
+                "subsystem": "replay",
+                "evaluation_phase": "semantic_replay",
+                "replay_execution_id": execution_id,
+                "replay_step_id": step["step_id"],
+                "replay_step_index": step["step_index"],
+                "replay_action_kind": step["action_kind"],
+                "replay_action_route": step["action_route"],
+                "replay_boundary_ordinal": 1,
+            }
+            capture_debug_state_checkpoint(
+                "BEFORE_OPERATION",
+                lifecycle_phase="before",
+                **checkpoint_args,
+            )
+            try:
+                kind = str(action.get("kind") or "")
+                if kind == "AUTO_KEY":
+                    result = _execute_auto_key_action(context, action)
+                elif kind == "CONTACT":
+                    result = _execute_contact_action(
                         context,
                         action,
                         replay_mode=resolved_replay_mode,
                     )
-                )
-            elif kind == "ROTATE":
-                results.append(_execute_free_direct_rotate_action(context, action))
-            elif kind == "MOVE":
-                route = str(action.get("route") or "")
-                if route == "SLIDING_MOVE":
-                    results.append(_execute_sliding_move_action(context, action))
-                elif route == "HYBRID_MOVE":
-                    results.append(_execute_hybrid_move_action(context, action))
-                elif route == "DIRECT_MOVE":
-                    results.append(_execute_direct_move_action(context, action))
-                else:
-                    results.append(_execute_free_fk_move_action(context, action))
-            elif kind == "SCRUB":
-                results.append(
-                    _execute_scrub_action(
+                elif kind == "ROTATE":
+                    result = _execute_free_direct_rotate_action(context, action)
+                elif kind == "MOVE":
+                    route = str(action.get("route") or "")
+                    if route == "SLIDING_MOVE":
+                        result = _execute_sliding_move_action(context, action)
+                    elif route == "HYBRID_MOVE":
+                        result = _execute_hybrid_move_action(context, action)
+                    elif route == "DIRECT_MOVE":
+                        result = _execute_direct_move_action(context, action)
+                    else:
+                        result = _execute_free_fk_move_action(context, action)
+                elif kind == "SCRUB":
+                    result = _execute_scrub_action(
                         context,
                         action,
                         frame_budget=frame_budget,
                         max_frames=max_frames,
                     )
+                else:
+                    raise RuntimeError(
+                        f"AWB semantic replay v1 does not support action kind {kind!r}."
+                    )
+            except Exception:
+                capture_debug_state_checkpoint(
+                    "FAILURE",
+                    lifecycle_phase="fail",
+                    **checkpoint_args,
                 )
-            else:
-                raise RuntimeError(f"AWB semantic replay v1 does not support action kind {kind!r}.")
+                raise
+            results.append(result)
+            capture_debug_state_checkpoint(
+                "AFTER_OPERATION",
+                lifecycle_phase="after",
+                **checkpoint_args,
+            )
     finally:
         set_replay_execution_active(False)
 
@@ -1379,10 +1461,13 @@ def run_semantic_replay(
         "schema": "awb-semantic-replay-result/v1",
         "source_session_id": replay.get("source_session_id"),
         "replay_mode": resolved_replay_mode.value,
+        "replay_execution_id": execution_id,
         "action_count": len(actions),
         "executed_frame_count": frame_budget[0],
+        "step_manifest": step_manifest,
         "results": results,
     }
+
 
 
 def run_checkpoint_scrub_replay(

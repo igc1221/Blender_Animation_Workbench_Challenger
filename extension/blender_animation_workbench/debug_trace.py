@@ -1484,6 +1484,12 @@ def capture_debug_state_checkpoint(
     subsystem: str | None = None,
     lifecycle_phase: str | None = None,
     evaluation_phase: str | None = None,
+    replay_execution_id: str | None = None,
+    replay_step_id: str | None = None,
+    replay_step_index: int | None = None,
+    replay_action_kind: str | None = None,
+    replay_action_route: str | None = None,
+    replay_boundary_ordinal: int | None = None,
     record: bool = True,
 ) -> dict[str, Any]:
     """Capture one bounded debugger checkpoint without changing product behavior."""
@@ -1516,6 +1522,12 @@ def capture_debug_state_checkpoint(
             "subsystem": subsystem,
             "lifecycle_phase": lifecycle_phase,
             "evaluation_phase": evaluation_phase,
+            "replay_execution_id": replay_execution_id,
+            "replay_step_id": replay_step_id,
+            "replay_step_index": replay_step_index,
+            "replay_action_kind": replay_action_kind,
+            "replay_action_route": replay_action_route,
+            "replay_boundary_ordinal": replay_boundary_ordinal,
             "context_identity": normalize_debug_state(
                 _debug_context_identity(resolved_context)
             ),
@@ -1569,6 +1581,12 @@ def capture_debug_state_checkpoint(
             "subsystem": subsystem,
             "lifecycle_phase": lifecycle_phase,
             "evaluation_phase": evaluation_phase,
+            "replay_execution_id": replay_execution_id,
+            "replay_step_id": replay_step_id,
+            "replay_step_index": replay_step_index,
+            "replay_action_kind": replay_action_kind,
+            "replay_action_route": replay_action_route,
+            "replay_boundary_ordinal": replay_boundary_ordinal,
             "context_identity": {},
             "blender_state": {},
             "native_state": {},
