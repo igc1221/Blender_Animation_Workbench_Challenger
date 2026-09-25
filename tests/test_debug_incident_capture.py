@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).parents[1]
 MODULE_PATH = ROOT / "scripts" / "capture_awb_incident.py"
 
@@ -136,7 +135,12 @@ def _prepare_project_root(tmp_path: Path, *, external_debug: bool = False):
     )
 
     raw_runtime = runtime / "blender_runtime.log"
-    raw_runtime_bytes = b"AWB synthetic runtime log\n"
+    raw_runtime_bytes = (
+        "\n=== AWB BLENDER RUNTIME SESSION "
+        "2026-09-25T00:00:00.000+00:00 "
+        f"blend={root / 'sample.blend'} ===\n"
+        "AWB synthetic runtime log\n"
+    ).encode()
     raw_runtime.write_bytes(raw_runtime_bytes)
 
     live = {
@@ -219,7 +223,13 @@ def test_capture_generic_live_incident_is_immutable_and_fresh(tmp_path: Path):
     assert result["evidence_status"] == "COMPLETE"
     assert manifest["source_identity"]["debug_root_source"] == "live_query"
     assert manifest["source_identity"]["debug_root"] == live["source_paths"]["debug_root"]
+    assert manifest["source_identity"]["raw_runtime_root_source"] == "project_launcher"
+    assert Path(manifest["source_identity"]["raw_runtime_root"]) == (
+        root / "debug" / "runtime_error_log"
+    ).resolve()
     assert manifest["source_identity"]["blender"]["blend_file"] == live["blend_file"]
+    assert manifest["artifacts"]["blender_runtime_current"]["source_authority"] == "project_launcher"
+    assert manifest["artifacts"]["blender_runtime_current"]["live_blend_match"] is True
     assert analysis["live_probe_status"] == "AVAILABLE"
     assert analysis["viewport"]["reason"] == "NO_SAFE_READ_ONLY_CAPTURE_PATH_BB1"
     assert not (incident / "viewport.png").exists()
@@ -315,6 +325,13 @@ def test_failed_capture_is_not_published_as_complete(tmp_path: Path):
     assert len(staging) == 1
     partial = json.loads((staging[0] / "capture_partial.json").read_text(encoding="utf-8"))
     assert partial["capture_status"] == "PARTIAL"
+    assert (incidents / f".reserve-{incident_id}").is_file()
+    with pytest.raises(FileExistsError, match="already reserved"):
+        module.capture_incident(
+            root=root,
+            live_probe=lambda _root: live,
+            incident_id=incident_id,
+        )
 
 
 def test_bounded_jsonl_tail_is_line_aligned_and_records_truncation(tmp_path: Path):
@@ -360,7 +377,11 @@ def test_state_before_requires_same_session_operation_begin_pair():
             "state": {"mode": "OBJECT"},
         },
     ]
-    checkpoint = module._state_before_checkpoint("INC-test", records)
+    checkpoint = module._state_before_checkpoint(
+        "INC-test",
+        records,
+        current_session_id="s2",
+    )
     assert checkpoint["status"] == "UNAVAILABLE"
     assert checkpoint["unavailable_reason"] == "NO_MATCHING_BEGIN"
 
@@ -370,6 +391,7 @@ def test_optional_precision_and_error_logs_do_not_downgrade_live_capture(tmp_pat
     root, live, _source_bytes = _prepare_project_root(tmp_path)
     Path(live["source_paths"]["precision_trace"]).unlink()
     Path(live["source_paths"]["runtime_errors"]).unlink()
+    Path(live["source_paths"]["replay"]).unlink()
 
     result = module.capture_incident(
         root=root,
@@ -383,6 +405,170 @@ def test_optional_precision_and_error_logs_do_not_downgrade_live_capture(tmp_pat
     assert manifest["evidence_status"] == "COMPLETE"
     assert manifest["artifacts"]["precision_current"]["status"] == "MISSING"
     assert manifest["artifacts"]["runtime_errors_current"]["status"] == "MISSING"
+    assert manifest["artifacts"]["replay_on_disk_current"]["status"] == "MISSING"
+
+
+def test_state_before_never_falls_back_to_previous_session_terminal():
+    module = _load_module()
+    records = [
+        {
+            "session_id": "previous",
+            "seq": 1,
+            "event": "TRANSFORM_BEGIN",
+            "operation_id": "old-op",
+            "state": {"mode": "OBJECT"},
+        },
+        {
+            "session_id": "previous",
+            "seq": 2,
+            "event": "TRANSFORM_FAIL",
+            "operation_id": "old-op",
+            "state": {"mode": "OBJECT"},
+        },
+        {
+            "session_id": "current",
+            "seq": 1,
+            "event": "TRANSFORM_BEGIN",
+            "operation_id": "new-op",
+            "state": {"mode": "OBJECT"},
+        },
+    ]
+
+    checkpoint = module._state_before_checkpoint(
+        "INC-test",
+        records,
+        current_session_id="current",
+    )
+    assert checkpoint["status"] == "UNAVAILABLE"
+    assert (
+        checkpoint["unavailable_reason"]
+        == "NO_TERMINAL_OPERATION_IN_CURRENT_SESSION"
+    )
+
+
+def test_invalid_incident_id_cannot_escape_incident_root(tmp_path: Path):
+    module = _load_module()
+    root, live, _source_bytes = _prepare_project_root(tmp_path)
+
+    with pytest.raises(ValueError, match="Invalid incident id"):
+        module.capture_incident(
+            root=root,
+            live_probe=lambda _root: live,
+            incident_id="../outside",
+        )
+    assert not (root / "outside").exists()
+
+
+def test_post_publish_result_write_failure_does_not_recreate_staging(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_module()
+    root, live, _source_bytes = _prepare_project_root(tmp_path)
+    incident_id = "INC-20260925-120005-1234abcd"
+
+    monkeypatch.setattr(module, "ROOT", root)
+    result_path = root / "build" / "awb_debug_capture_result.json"
+    monkeypatch.setattr(module, "RESULT_PATH", result_path)
+    original_atomic_write = module._atomic_write_json
+
+    def fail_only_result(path, payload):
+        if Path(path) == result_path:
+            raise OSError("synthetic result write failure")
+        return original_atomic_write(path, payload)
+
+    monkeypatch.setattr(module, "_atomic_write_json", fail_only_result)
+
+    result = module.capture_incident(
+        root=root,
+        live_probe=lambda _root: live,
+        incident_id=incident_id,
+    )
+
+    incidents = root / "debug" / "incidents"
+    assert result["ok"] is True
+    assert "synthetic result write failure" in result["result_write_error"]
+    assert (incidents / incident_id / "manifest.json").is_file()
+    assert list(incidents.glob(f".staging-{incident_id}-*")) == []
+    assert not (incidents / f".reserve-{incident_id}").exists()
+
+
+def test_malformed_live_probe_degrades_to_file_only_capture(tmp_path: Path):
+    module = _load_module()
+    root, _live, _source_bytes = _prepare_project_root(tmp_path)
+
+    result = module.capture_incident(
+        root=root,
+        live_probe=lambda _root: {},
+        incident_id="INC-20260925-120006-1234abcd",
+    )
+
+    incident = Path(result["incident_path"])
+    analysis = json.loads((incident / "analysis.json").read_text(encoding="utf-8"))
+    assert result["evidence_status"] == "PARTIAL"
+    assert analysis["live_probe_status"] == "UNAVAILABLE"
+    assert "live probe schema" in analysis["live_probe_error"]
+
+
+def test_stale_launcher_runtime_log_prevents_complete_evidence(tmp_path: Path):
+    module = _load_module()
+    root, live, _source_bytes = _prepare_project_root(tmp_path)
+    raw_runtime = root / "debug" / "runtime_error_log" / "blender_runtime.log"
+    raw_runtime.write_text(
+        "\n=== AWB BLENDER RUNTIME SESSION "
+        "2026-09-25T00:00:00.000+00:00 "
+        f"blend={root / 'different.blend'} ===\n",
+        encoding="utf-8",
+    )
+
+    result = module.capture_incident(
+        root=root,
+        live_probe=lambda _root: live,
+        incident_id="INC-20260925-120007-1234abcd",
+    )
+
+    incident = Path(result["incident_path"])
+    manifest = json.loads((incident / "manifest.json").read_text(encoding="utf-8"))
+    assert result["evidence_status"] == "PARTIAL"
+    assert manifest["artifacts"]["blender_runtime_current"]["live_blend_match"] is False
+
+
+def test_state_before_keeps_domain_specific_legacy_state_out_of_core_blender_state():
+    module = _load_module()
+    records = [
+        {
+            "session_id": "current",
+            "seq": 1,
+            "event": "TRANSFORM_BEGIN",
+            "operation_id": "op",
+            "state": {
+                "mode": "POSE",
+                "frame": 7,
+                "active_object": "Rig",
+                "selected_objects": ["Rig"],
+                "selected_pose_bones": ["Bone"],
+                "rigped_transform_drag": True,
+                "semantic_transform_mode": "ROTATE",
+            },
+        },
+        {
+            "session_id": "current",
+            "seq": 2,
+            "event": "TRANSFORM_FAIL",
+            "operation_id": "op",
+            "state": {"mode": "POSE"},
+        },
+    ]
+
+    checkpoint = module._state_before_checkpoint(
+        "INC-test",
+        records,
+        current_session_id="current",
+    )
+    assert checkpoint["status"] == "AVAILABLE"
+    assert "rigped_transform_drag" not in checkpoint["blender_state"]
+    assert "semantic_transform_mode" not in checkpoint["blender_state"]
+    assert checkpoint["source"]["legacy_state"]["rigped_transform_drag"] is True
 
 
 def test_live_probe_payload_is_read_only_and_bb2_fields_are_not_fabricated():
