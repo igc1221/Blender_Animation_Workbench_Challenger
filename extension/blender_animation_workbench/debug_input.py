@@ -669,6 +669,13 @@ def _observer_reconcile_timer() -> float | None:
         windows = tuple(getattr(wm, "windows", ()) or ())
     except Exception:
         windows = ()
+    live_tokens: set[int] = set()
+    for window in windows:
+        try:
+            live_tokens.add(int(window.as_pointer()))
+        except Exception:
+            live_tokens.add(id(window))
+    _OBSERVER_WINDOW_TOKENS.intersection_update(live_tokens)
     for window in windows:
         _invoke_observer_for_window(window)
     return 1.0

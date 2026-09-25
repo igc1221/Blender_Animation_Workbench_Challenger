@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -207,9 +208,9 @@ def test_competing_matches_need_an_authoritative_winner():
     )
 
     raw["keymap_probe"].update(winner_authoritative=True, winner_binding_id="wm.native")
-    assert module.analyze_input_routing([raw], _expected())["classification"] == (
-        "OPERATOR_NOT_STARTED"
-    )
+    shadowed = module.analyze_input_routing([raw], _expected())
+    assert shadowed["classification"] == "UNCLASSIFIED"
+    assert shadowed["reason"] == "KEYMAP_SHADOWED_BY_EXTERNAL_WINNER"
 
 
 def test_operator_not_started_requires_enabled_eligible_awb_binding_and_no_ingress():
@@ -284,6 +285,18 @@ def test_valid_modal_route_is_routed_and_invalid_modal_route_fails():
     assert failed["classification"] == "MODAL_ROUTING_FAILURE"
 
 
+def test_modal_raw_owner_id_field_is_accepted():
+    module = _load_module()
+    expected = _expected(modal_owner_id="modal-1")
+    records = _modal_records(route={"valid": True})
+    raw = records[1]
+    raw["owner_id"] = raw.pop("modal_owner_id")
+
+    result = module.analyze_input_routing(records, expected)
+
+    assert result["classification"] == "ROUTED"
+
+
 def test_dropped_evidence_prevents_absence_based_operator_classification():
     module = _load_module()
     raw = _raw(dropped=1)
@@ -311,6 +324,28 @@ def test_duplicate_matching_events_require_explicit_sequence():
     )
     assert non_monotonic["classification"] == "UNCLASSIFIED"
     assert non_monotonic["reason"] == "RAW_INPUT_SEQUENCE_INVALID"
+
+
+def test_read_raw_jsonl_skips_interaction_timeline_envelopes(tmp_path):
+    module = _load_module()
+    raw = _raw()
+    timeline = tmp_path / "timeline.jsonl"
+    interaction_envelope = {
+        "schema": "awb-debug-incident-timeline/v1",
+        "incident_id": "INC-BB8-TEST",
+        "record": {"schema": "awb-interaction-trace/v1", "event": "IGNORED"},
+    }
+    raw_envelope = {
+        "schema": "awb-debug-raw-input-timeline/v1",
+        "incident_id": "INC-BB8-TEST",
+        "record": raw,
+    }
+    timeline.write_text(
+        json.dumps(interaction_envelope) + "\n" + json.dumps(raw_envelope) + "\n",
+        encoding="utf-8",
+    )
+
+    assert module._read_raw_jsonl(timeline) == [raw]
 
 
 def test_oversized_raw_stream_fails_closed():

@@ -338,6 +338,18 @@ def test_workspace_tool_probe_is_head_idempotent_and_restored(monkeypatch):
     assert module.BAW_OT_raw_input_probe().invoke(None, _event()) == {"PASS_THROUGH"}
 
 
+def test_observer_reconcile_prunes_closed_window_tokens(monkeypatch):
+    module, _, bpy_module = _load_module(monkeypatch)
+    live_window = types.SimpleNamespace(as_pointer=lambda: 101)
+    bpy_module.context.window_manager = types.SimpleNamespace(windows=(live_window,))
+    module._OBSERVER_ENABLED = True
+    module._OBSERVER_WINDOW_TOKENS.update({101, 202})
+    monkeypatch.setattr(module, "_invoke_observer_for_window", lambda _window: True)
+
+    assert module._observer_reconcile_timer() == 1.0
+    assert module._OBSERVER_WINDOW_TOKENS == {101}
+
+
 def test_modal_exception_emits_failure_and_reraises(monkeypatch):
     module, _, _ = _load_module(monkeypatch)
 
