@@ -233,7 +233,7 @@ Permanent policy and milestone execution plans are separate.
 
 For every large work unit, create or update exactly one plan under:
 
-`docs/AGENT/OPERATIONS_PLANS/`
+`docs/PHASE4/planning/orchestrator/`
 
 That plan owns the unit's:
 
@@ -250,7 +250,7 @@ Do not grow this permanent policy with RC-, feature-, or milestone-specific work
 
 Current plan index:
 
-`docs/AGENT/OPERATIONS_PLANS/README.md`
+`docs/PHASE4/planning/orchestrator/README.md`
 
 ## 11. Verification and repair
 
@@ -296,6 +296,6 @@ Supporting documents:
 - `../DEBUG/BUG_FIXING_GUIDE.md` — subordinate SMALL/MEDIUM/LARGE bug-fix routing;
 - `../DEBUG/AWB_DEBUG_FLIGHT_RECORDER.md` — General Debugger operational detail;
 - `WORKER_PROFILES/*` — current Goose and External Web provider profiles.
-- `OPERATIONS_PLANS/*` — per-major-unit execution/workforce plans.
+- `../PHASE4/planning/orchestrator/*` — current Phase 4 major-unit execution/workforce plans.
 
 Older OpenCode/Luna-first routing, fixed eight-lane occupancy, two-reviewer PRE/POST minimums, and PRE2/POST2-style review practice are superseded by this document.
