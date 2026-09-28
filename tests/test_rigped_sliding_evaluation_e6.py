@@ -160,6 +160,11 @@ def test_e6_public_result_paths_use_native_conversion_service() -> None:
         TRANSFORM_SOURCE,
         _function(TRANSFORM_TREE, "_sliding_public_display_from_result"),
     )
+    overlay = _source(
+        TRANSFORM_SOURCE,
+        _function(TRANSFORM_TREE, "_compose_forearm_post_solve_roll_overlay"),
+    )
+
     sync = _source(
         TRANSFORM_SOURCE,
         _function(TRANSFORM_TREE, "_sync_sliding_public_pose_from_result"),
@@ -170,7 +175,8 @@ def test_e6_public_result_paths_use_native_conversion_service() -> None:
     assert "native_pose_basis_from_matrix(" in replay
     assert "parent_rest" not in replay
     assert "derive_public_display(capability, solved_result)" in display
-    assert "native_pose_basis_from_matrix(" in display
+    assert "_compose_forearm_post_solve_roll_overlay(" in display
+    assert "native_pose_basis_from_matrix(" in overlay
     assert "capture_native_solved_result(capability)" in sync
     assert "_sliding_public_display_from_result(" in sync
     assert "public_display.first_basis" in sync

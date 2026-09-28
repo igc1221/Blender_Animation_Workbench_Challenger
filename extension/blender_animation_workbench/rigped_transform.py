@@ -55,11 +55,6 @@ from .phase4_representation_snap import (
     LimbRepresentationCapability,
     SnapControlState,
     SnapDirection,
-    _canonical_generated_rigped_pole,
-    _derived_pole_angle,
-    _generated_lower_hinge_x_angle,
-    _generated_rigped_hinge_branch,
-    _initial_pole_solution,
     build_representation_snap_payload,
     execute_representation_snap,
     resolve_limb_representation_capability,
@@ -108,6 +103,21 @@ from .rigped_sliding_evaluation import (
     capture_sliding_authored_reference,
     derive_public_display,
     native_pose_basis_from_matrix,
+)
+from .rigped_solver_geometry import (
+    canonical_generated_rigped_pole as _canonical_generated_rigped_pole,
+)
+from .rigped_solver_geometry import (
+    derived_pole_angle as _derived_pole_angle,
+)
+from .rigped_solver_geometry import (
+    generated_lower_hinge_x_angle as _generated_lower_hinge_x_angle,
+)
+from .rigped_solver_geometry import (
+    generated_rigped_hinge_branch as _generated_rigped_hinge_branch,
+)
+from .rigped_solver_geometry import (
+    initial_pole_solution as _initial_pole_solution,
 )
 from .semantic_adapter import (
     ResolvedControl,
@@ -2540,16 +2550,16 @@ def _basis_with_local_y_twist(
     )
 
 
-def _sliding_public_display_from_result(
+def _compose_forearm_post_solve_roll_overlay(
     capability: LimbRepresentationCapability,
     solved_result,
+    public_display,
     *,
     authored_lower_basis: Matrix | None = None,
     preserve_forearm_roll: bool = False,
 ):
-    """Derive Sliding display, optionally preserving ForeArm Y post-solve."""
+    """Compose authored ForeArm LOCAL-Y roll on an already-derived public display."""
 
-    public_display = derive_public_display(capability, solved_result)
     public_lower = capability.fk_controls[1].target
     if (
         str(getattr(public_lower, "name", "")) not in {"ForeArm.L", "ForeArm.R"}
@@ -2584,6 +2594,25 @@ def _sliding_public_display_from_result(
         public_display,
         second_basis=second_basis,
         terminal_basis=terminal_basis,
+    )
+
+
+def _sliding_public_display_from_result(
+    capability: LimbRepresentationCapability,
+    solved_result,
+    *,
+    authored_lower_basis: Matrix | None = None,
+    preserve_forearm_roll: bool = False,
+):
+    """Derive passive native display first, then compose authored ForeArm overlay."""
+
+    public_display = derive_public_display(capability, solved_result)
+    return _compose_forearm_post_solve_roll_overlay(
+        capability,
+        solved_result,
+        public_display,
+        authored_lower_basis=authored_lower_basis,
+        preserve_forearm_roll=preserve_forearm_roll,
     )
 
 

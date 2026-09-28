@@ -12,6 +12,7 @@ BUILDER_SOURCE = (EXT / "rigped_humanoid_builder.py").read_text(encoding="utf-8"
 AUTO_KEY_SOURCE = (EXT / "rigped_auto_key.py").read_text(encoding="utf-8")
 FIT_COMMIT_SOURCE = (EXT / "rigped_fit_commit.py").read_text(encoding="utf-8")
 SNAP_SOURCE = (EXT / "phase4_representation_snap.py").read_text(encoding="utf-8")
+SOLVER_GEOMETRY_SOURCE = (EXT / "rigped_solver_geometry.py").read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
 
 
@@ -120,8 +121,8 @@ def test_rc1_lower_limb_axis_contract_is_x_hinge_y_roll_z_swivel() -> None:
     assert "owner.lock_ik_z = True" in BUILDER_SOURCE
     assert "owner.use_ik_limit_x = True" in BUILDER_SOURCE
     assert 'return -1 if str(owner_role) in {"MCH_FOREARM.L", "MCH_FOREARM.R"} else 1' in BUILDER_SOURCE
-    assert "axis_index = 0" in SNAP_SOURCE
-    assert "fallback = -1" in SNAP_SOURCE
+    assert "axis_index = 0" in SOLVER_GEOMETRY_SOURCE
+    assert "fallback = -1" in SOLVER_GEOMETRY_SOURCE
 
 
 def test_rc1_lower_link_local_y_mirrors_as_axial_rotation_axis() -> None:
@@ -201,11 +202,14 @@ def test_rc1_sliding_forearm_local_y_uses_post_solve_overlay_not_native_ik_roll(
     assert '"ForeArm.L"' not in replay
 
     display = _source(_function("_sliding_public_display_from_result"))
-    assert '{"ForeArm.L", "ForeArm.R"}' in display
-    assert "_basis_with_local_y_twist(" in display
-    assert "solved_result.first_pose" in display
-    assert "solved_result.terminal_pose" in display
-    assert "parent_pose_matrix=second_pose" in display
+    overlay_compose = _source(_function("_compose_forearm_post_solve_roll_overlay"))
+    assert "derive_public_display(capability, solved_result)" in display
+    assert "_compose_forearm_post_solve_roll_overlay(" in display
+    assert '{"ForeArm.L", "ForeArm.R"}' in overlay_compose
+    assert "_basis_with_local_y_twist(" in overlay_compose
+    assert "solved_result.first_pose" in overlay_compose
+    assert "solved_result.terminal_pose" in overlay_compose
+    assert "parent_pose_matrix=second_pose" in overlay_compose
 
     preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
     assert "sliding_forearm_pair_local_y = (" in preview

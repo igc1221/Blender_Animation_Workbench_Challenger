@@ -29,6 +29,7 @@ semantic_model = _load_module("semantic_model")
 semantic_adapter = _load_module("semantic_adapter")
 character_model = _load_module("character_model")
 kinematic_runtime = _load_module("kinematic_runtime")
+solver_geometry = _load_module("rigped_solver_geometry")
 representation_snap = _load_module("phase4_representation_snap")
 
 
@@ -435,7 +436,7 @@ def test_generated_lower_hinge_branch_ignores_compound_roll_swivel_sign_alias() 
         )
     )
     raw_angle = 2.0 * math.atan2(quaternion.x, quaternion.w)
-    hinge_angle = representation_snap._generated_lower_hinge_x_angle(quaternion)
+    hinge_angle = solver_geometry.generated_lower_hinge_x_angle(quaternion)
     assert raw_angle > 0.0
     assert hinge_angle < 0.0
 
@@ -471,7 +472,7 @@ def test_generated_rigped_hinge_branch_tracks_authored_fk_and_uses_mapping_fallb
         fk_controls=(None, SimpleNamespace(target=authored_fk)),
     )
 
-    assert representation_snap._generated_rigped_hinge_branch(capability) == expected
+    assert solver_geometry.generated_rigped_hinge_branch(capability) == expected
 
 
 class _DiagnosticQuaternion(tuple):
@@ -553,7 +554,116 @@ def test_fk_to_ik_residual_trace_is_bounded_and_contains_snap_comparison(monkeyp
 
 
 def test_generated_rigped_canonical_pole_preserves_solved_gauge() -> None:
-    source = inspect.getsource(representation_snap._canonical_generated_rigped_pole)
+    source = inspect.getsource(solver_geometry.canonical_generated_rigped_pole)
     assert "return tuple(float(value) for value in pole_world_position), float(pole_angle)" in source
     assert "mirrored" not in source
     assert "+ math.pi" not in source
+
+def test_shared_generated_pole_angle_preserves_snap_error_contract(monkeypatch) -> None:
+    message = "I12_SINGULAR_POLE_ANGLE: cannot derive a stable pole angle."
+
+    def fail(_capability, _pole_world_position):
+        raise solver_geometry.RigpedSolverGeometryError(message)
+
+    monkeypatch.setattr(representation_snap, "_shared_derived_pole_angle", fail)
+    with pytest.raises(
+        representation_snap.RepresentationSnapError,
+        match="I12_SINGULAR_POLE_ANGLE: cannot derive a stable pole angle",
+    ):
+        representation_snap._derived_pole_angle(
+            SimpleNamespace(),
+            (0.0, 1.0, 0.0),
+        )
+
+    source = inspect.getsource(solver_geometry.derived_pole_angle)
+    assert message in source
+    assert "RigpedSolverGeometryError" in source
+
+
+def test_shared_initial_pole_solution_preserves_singular_result_without_authored_pole(
+    monkeypatch,
+) -> None:
+    native_ik = SimpleNamespace(pole_target=None)
+    capability = SimpleNamespace(native_ik=native_ik)
+    singular = kinematic_runtime.TwoBonePoleSolution(
+        None,
+        "SINGULAR_TWO_BONE_POLE",
+    )
+    monkeypatch.setattr(
+        solver_geometry,
+        "two_bone_world_points",
+        lambda _native: ((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 2.0, 0.0)),
+    )
+    monkeypatch.setattr(
+        solver_geometry,
+        "solve_capability_pole_position",
+        lambda _native, *, distance, epsilon: singular,
+    )
+    assert solver_geometry.initial_pole_solution(capability) is singular
+
+    source = inspect.getsource(solver_geometry.initial_pole_solution)
+    assert "pole_target = capability.native_ik.pole_target" in source
+    assert "reference = pole_world - joint_v" in source
+    assert "perpendicular = reference - axis * reference.dot(axis)" in source
+
+def test_h2a_solver_geometry_ownership_stays_read_only_and_separate() -> None:
+    solver_source = (
+        PACKAGE_PATH / "rigped_solver_geometry.py"
+    ).read_text(encoding="utf-8")
+    transform_source = (
+        PACKAGE_PATH / "rigped_transform.py"
+    ).read_text(encoding="utf-8")
+    snap_source = (
+        PACKAGE_PATH / "phase4_representation_snap.py"
+    ).read_text(encoding="utf-8")
+    sliding_source = (
+        PACKAGE_PATH / "rigped_sliding_evaluation.py"
+    ).read_text(encoding="utf-8")
+
+    assert "from .rigped_solver_geometry import (" in transform_source
+    assert "from .rigped_solver_geometry import (" in snap_source
+    assert "from .phase4_representation_snap import (" in transform_source
+    transform_snap_import = transform_source.split(
+        "from .phase4_representation_snap import (",
+        1,
+    )[1].split(")", 1)[0]
+    for helper in (
+        "_canonical_generated_rigped_pole",
+        "_derived_pole_angle",
+        "_generated_lower_hinge_x_angle",
+        "_generated_rigped_hinge_branch",
+        "_initial_pole_solution",
+    ):
+        assert helper not in transform_snap_import
+
+    assert "from .phase4_representation_snap import" not in solver_source
+    assert "from .rigped_transform import" not in solver_source
+    for forbidden in (
+        "view_layer.update",
+        "MutationJournal",
+        "commit_rigped_auto",
+        "execute_contact",
+    ):
+        assert forbidden not in solver_source
+
+    for moved_helper in (
+        "def derived_pole_angle(",
+        "def generated_lower_hinge_x_angle(",
+        "def generated_rigped_hinge_branch(",
+        "def canonical_generated_rigped_pole(",
+        "def initial_pole_solution(",
+    ):
+        assert moved_helper not in sliding_source
+
+    rotate_sync_start = transform_source.index(
+        "def _apply_direct_rotate_sliding_sync("
+    )
+    rotate_sync_end = transform_source.index(
+        "def _apply_direct_rotate_sliding_syncs(",
+        rotate_sync_start,
+    )
+    rotate_sync = transform_source[rotate_sync_start:rotate_sync_end]
+    assert "derived_pole_angle(" in rotate_sync
+    assert "except Exception as exc:" in rotate_sync
+    assert "raise RigpedSemanticMoveError(str(exc)) from exc" in rotate_sync
+

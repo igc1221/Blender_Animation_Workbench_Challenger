@@ -89,6 +89,21 @@ Important rules:
 - workers never recursively create an uncontrolled agent tree;
 - Main continues productive critical-path work while Goose lanes run.
 
+### AWB active-project invariant for worker orchestration
+
+While Main is executing an AWB task, the selected/active Harness project remains `blender_animation_workbench` for the whole AWB session, including Goose/Hive worker launch, status polling, result/history collection, review, and approval handling.
+
+Do **not** switch the selected project to `aiprojectharness_lite` merely to use Harness Lite as the orchestration runtime. Harness Lite is the orchestration engine; AWB is the task project and must remain the active project.
+
+When a worker launch needs Harness Lite code/runtime, invoke it explicitly while AWB stays selected:
+
+- pass `project_id="blender_animation_workbench"` as the worker target;
+- use explicit/absolute Harness Lite runner, interpreter, or runtime paths when a local launcher is required;
+- bind Goose G1-G8 workspaces, worker status/history, and approvals to the AWB target project;
+- keep source mutation, verification, Git state, and Main integration rooted in the AWB workspace.
+
+Switch the selected project to `aiprojectharness_lite` only when the task is actually to inspect, modify, test, or repair Harness Lite itself. That is a separate project task, not normal AWB worker orchestration.
+
 Parallelism is **aggressive where independent, conservative where ownership overlaps**.
 
 ## 4. Planning and research policy

@@ -10,10 +10,23 @@ from .kinematic_runtime import (
     KinematicRuntimeIssue,
     KinematicRuntimeSeverity,
     NativeIKCapability,
-    TwoBonePoleSolution,
     resolve_native_ik_capability,
-    solve_capability_pole_position,
-    two_bone_world_points,
+)
+from .rigped_solver_geometry import RigpedSolverGeometryError
+from .rigped_solver_geometry import (
+    canonical_generated_rigped_pole as _shared_canonical_generated_rigped_pole,
+)
+from .rigped_solver_geometry import (
+    derived_pole_angle as _shared_derived_pole_angle,
+)
+from .rigped_solver_geometry import (
+    generated_lower_hinge_x_angle as _shared_generated_lower_hinge_x_angle,
+)
+from .rigped_solver_geometry import (
+    generated_rigped_hinge_branch as _shared_generated_rigped_hinge_branch,
+)
+from .rigped_solver_geometry import (
+    initial_pole_solution as _shared_initial_pole_solution,
 )
 from .semantic_adapter import ResolvedControl, rotation_property, runtime_control_key
 from .semantic_model import AWBControlKind
@@ -505,6 +518,44 @@ class RepresentationSnapError(RuntimeError):
     pass
 
 
+def _derived_pole_angle(
+    capability: LimbRepresentationCapability,
+    pole_world_position: tuple[float, float, float],
+) -> float:
+    try:
+        return _shared_derived_pole_angle(capability, pole_world_position)
+    except RigpedSolverGeometryError as exc:
+        raise RepresentationSnapError(str(exc)) from exc
+
+
+def _generated_lower_hinge_x_angle(quaternion: Any) -> float:
+    return _shared_generated_lower_hinge_x_angle(quaternion)
+
+
+def _generated_rigped_hinge_branch(
+    capability: LimbRepresentationCapability,
+) -> int | None:
+    return _shared_generated_rigped_hinge_branch(capability)
+
+
+def _canonical_generated_rigped_pole(
+    capability: LimbRepresentationCapability,
+    pole_world_position: tuple[float, float, float],
+    pole_angle: float,
+    branch_sign: int | None,
+) -> tuple[tuple[float, float, float], float]:
+    return _shared_canonical_generated_rigped_pole(
+        capability,
+        pole_world_position,
+        pole_angle,
+        branch_sign,
+    )
+
+
+def _initial_pole_solution(capability: LimbRepresentationCapability):
+    return _shared_initial_pole_solution(capability)
+
+
 @dataclass(frozen=True, slots=True)
 class SnapControlState:
     runtime_key: tuple[int, int]
@@ -610,108 +661,8 @@ def _residuals_within_tolerance(
     )
 
 
-def _signed_angle_on_axis(vector_u, vector_v, axis) -> float:
-    u = vector_u.normalized()
-    v = vector_v.normalized()
-    n = axis.normalized()
-    return math.atan2(float(n.dot(u.cross(v))), float(u.dot(v)))
-
-
-def _derived_pole_angle(
-    capability: LimbRepresentationCapability,
-    pole_world_position: tuple[float, float, float],
-) -> float:
-    from mathutils import Vector
-
-    base_bone = capability.result_controls[0].target
-    tip_bone = capability.result_controls[1].target
-    owner_inverse = capability.native_ik.solver_owner.owner_object.matrix_world.inverted()
-    pole_position = owner_inverse @ Vector(pole_world_position)
-    chain_axis = tip_bone.tail - base_bone.head
-    pole_normal = chain_axis.cross(pole_position - base_bone.head)
-    projected_pole_axis = pole_normal.cross(base_bone.tail - base_bone.head)
-    if (
-        chain_axis.length <= 1e-9
-        or pole_normal.length <= 1e-9
-        or projected_pole_axis.length <= 1e-9
-    ):
-        raise RepresentationSnapError(
-            "I12_SINGULAR_POLE_ANGLE: cannot derive a stable pole angle."
-        )
-    return -_signed_angle_on_axis(
-        base_bone.x_axis,
-        projected_pole_axis,
-        base_bone.tail - base_bone.head,
-    )
-
-
 def _nearest_angle_about(angle: float, center: float) -> float:
     return float(center + ((float(angle) - center + math.pi) % (2.0 * math.pi) - math.pi))
-
-
-def _generated_lower_hinge_x_angle(quaternion: Any) -> float:
-    """Extract lower-link local-X hinge twist after removing local-Y roll."""
-
-    q = quaternion.normalized()
-    w, x, y, z = (
-        float(q.w),
-        float(q.x),
-        float(q.y),
-        float(q.z),
-    )
-    if w < 0.0:
-        w, x, y, z = (-w, -x, -y, -z)
-
-    # Match Rigped's authored decomposition: remove the long-axis Y twist
-    # first, then read the signed X twist from the remaining swing/hinge
-    # rotation. Reading raw quaternion.x/w is not invariant under compound
-    # LOCAL-Z swivel + Y roll and can select the opposite knee branch.
-    long_norm = math.hypot(w, y)
-    if long_norm > 1e-12:
-        twist_w = w / long_norm
-        twist_y = y / long_norm
-        without_long_w = w * twist_w + y * twist_y
-        without_long_x = x * twist_w + z * twist_y
-    else:
-        without_long_w = w
-        without_long_x = x
-
-    if without_long_w < 0.0:
-        without_long_w = -without_long_w
-        without_long_x = -without_long_x
-    angle = 2.0 * math.atan2(without_long_x, without_long_w)
-    return ((angle + math.pi) % (2.0 * math.pi)) - math.pi
-
-
-def _generated_rigped_hinge_branch(capability: LimbRepresentationCapability) -> int | None:
-    """Resolve the authored FK lower-joint branch for the generated hidden solver.
-
-    The lower public FK control stores the local joint rotation.  Extract only
-    the twist component around the generated hinge axis so unrelated swing/twist
-    on the limb does not force a left/right hard-coded branch.
-    """
-
-    solver_name = str(getattr(capability.native_ik.solver_owner.target, "name", ""))
-    if solver_name in {"MCH_ForeArm.L", "MCH_ForeArm.R"}:
-        axis_index = 0
-        fallback = -1
-    elif solver_name in {"MCH_Calf.L", "MCH_Calf.R"}:
-        axis_index = 0
-        fallback = 1
-    else:
-        return None
-
-    quaternion = capability.fk_controls[1].target.matrix_basis.to_quaternion()
-    if axis_index != 0:
-        return None
-    angle = _generated_lower_hinge_x_angle(quaternion)
-    # Only an effectively straight authored hinge is branch-ambiguous.
-    # A wider dead-zone can misclassify a real near-straight bend onto the
-    # opposite solver branch (for example Calf.L at -0.2349 degrees), which
-    # produces millimeter-scale FK->IK residuals even though the pose is valid.
-    if abs(angle) <= math.radians(0.01):
-        return fallback
-    return 1 if angle > 0.0 else -1
 
 
 def _snap_pose_diagnostic_summary(matrix: Any) -> dict[str, tuple[float, ...]]:
@@ -832,69 +783,6 @@ def _restore_generated_rigped_hinge_settings(owner, snapshot: tuple[Any, ...]) -
         owner.ik_min_z,
         owner.ik_max_z,
     ) = snapshot
-
-
-def _canonical_generated_rigped_pole(
-    capability: LimbRepresentationCapability,
-    pole_world_position: tuple[float, float, float],
-    pole_angle: float,
-    branch_sign: int | None,
-) -> tuple[tuple[float, float, float], float]:
-    """Preserve the pole gauge derived from the evaluated generated limb.
-
-    With constrained generated arm IK, mirroring the pole across the root-tip
-    axis and adding pi to pole_angle is not solver-equivalent: it can preserve
-    the terminal while selecting a different shoulder/elbow chain. The current
-    evaluated chain is already the authoring authority for FK->IK snap, so keep
-    its directly solved pole position/angle unchanged.
-    """
-
-    del capability, branch_sign
-    return tuple(float(value) for value in pole_world_position), float(pole_angle)
-
-
-def _initial_pole_solution(capability: LimbRepresentationCapability):
-    from mathutils import Vector
-
-    points = two_bone_world_points(capability.native_ik)
-    if points is None:
-        return None
-    root, joint, end = points
-    upper_length = math.dist(root, joint)
-    lower_length = math.dist(joint, end)
-    pole_distance = max(upper_length, lower_length, 1e-6)
-    epsilon = max(1e-9, pole_distance * 1e-8)
-    solution = solve_capability_pole_position(
-        capability.native_ik,
-        distance=pole_distance,
-        epsilon=epsilon,
-    )
-    if solution.ok or solution.issue_code != "SINGULAR_TWO_BONE_POLE":
-        return solution
-
-    # A perfectly straight generated limb has no geometric bend plane, but the
-    # Rigped generator already authors a stable pole target for that limb. Use
-    # that authored direction as the singular fallback instead of inventing an
-    # arbitrary axis. This keeps the default straight leg eligible for the first
-    # Free -> Sliding Contact transition while preserving deterministic knee side.
-    pole_target = capability.native_ik.pole_target
-    if pole_target is None:
-        return solution
-    root_v = Vector(root)
-    joint_v = Vector(joint)
-    end_v = Vector(end)
-    axis = end_v - root_v
-    if axis.length <= epsilon:
-        return solution
-    axis.normalize()
-    pole_world = pole_target.owner_object.matrix_world @ pole_target.target.matrix.translation
-    reference = pole_world - joint_v
-    perpendicular = reference - axis * reference.dot(axis)
-    if perpendicular.length <= epsilon:
-        return solution
-    perpendicular.normalize()
-    position = joint_v + perpendicular * pole_distance
-    return TwoBonePoleSolution(tuple(float(value) for value in position), None)
 
 
 def _constraint_value_is(value: Any, expected: float, *, epsilon: float = 1e-8) -> bool:
@@ -1186,7 +1074,10 @@ def execute_representation_snap(
                 ),
             )
         try:
-            pole_angle = _derived_pole_angle(capability, pole_solution.position)
+            pole_angle = _derived_pole_angle(
+                capability,
+                pole_solution.position,
+            )
         except RepresentationSnapError as exc:
             return RepresentationSnapResult(
                 False,
