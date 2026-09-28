@@ -96,7 +96,11 @@ from .rigped_humanoid_builder import (
     upgrade_generated_rigped_forearm_post_solve_roll,
 )
 from .rigped_limb_math import preferred_two_bone_bend
-from .rigped_operation_domain import OperationDomainSnapshot, resolve_operation_domain
+from .rigped_operation_domain import (
+    OperationDomainSnapshot,
+    candidate_limb_domain_binding_ids,
+    resolve_operation_domain,
+)
 from .rigped_sliding_evaluation import (
     SlidingAuthoredReference,
     build_transient_solver_seed,
@@ -1051,24 +1055,7 @@ def _semantic_move_selection_cache_key(context) -> tuple[Any, ...] | None:
 
 
 def _mapping_may_contain_binding(view, mapping, binding_id: str) -> bool:
-    if binding_id in {mapping.ik_target_binding_id, mapping.pole_binding_id}:
-        return True
-    chain_by_id = {chain.chain_id: chain for chain in view.definition.chains}
-    fk_chain = chain_by_id.get(mapping.fk_chain_id or "")
-    if fk_chain is not None and binding_id in fk_chain.members:
-        return True
-
-    binding_by_id = {binding.binding_id: binding for binding in view.definition.bindings}
-    selected_binding = binding_by_id.get(binding_id)
-    ik_binding = binding_by_id.get(mapping.ik_target_binding_id or "")
-    if selected_binding is None or ik_binding is None:
-        return False
-    return (
-        selected_binding.semantic_key == ik_binding.semantic_key
-        and selected_binding.side == ik_binding.side
-        and selected_binding.usage.value == "PRIMARY"
-        and selected_binding.kind.value == "BONE"
-    )
+    return binding_id in candidate_limb_domain_binding_ids(view, mapping)
 
 
 def _active_control_for_capability(
@@ -3567,6 +3554,8 @@ class BAW_OT_rigped_semantic_move_axis(bpy.types.Operator):
     _auto_plan: RigpedAutoAnchorPlan | None = None
     _auto_direct_plan: RigpedAutoDirectRotatePlan | None = None
     _auto_contact_batch_plan: RigpedAutoContactBatchPlan | None = None
+    _frozen_auto_limb_context: Any = None
+    _frozen_auto_direct_context: Any = None
     _axis = Vector((1.0, 0.0, 0.0))
     _pivot = Vector((0.0, 0.0, 0.0))
     _move_screen_axis = Vector((1.0, 0.0))
@@ -3618,6 +3607,8 @@ class BAW_OT_rigped_semantic_move_axis(bpy.types.Operator):
         self._auto_plan = None
         self._auto_direct_plan = None
         self._auto_contact_batch_plan = None
+        self._frozen_auto_limb_context = None
+        self._frozen_auto_direct_context = None
         if bool(getattr(context.scene, "baw_auto_key_enabled", False)):
             auto_context = control_context_for_context(context)
             auto_limb_context, auto_direct_context = _fk_move_auto_contexts(
@@ -3625,6 +3616,8 @@ class BAW_OT_rigped_semantic_move_axis(bpy.types.Operator):
                 auto_context,
                 fk_sessions,
             )
+            self._frozen_auto_limb_context = auto_limb_context
+            self._frozen_auto_direct_context = auto_direct_context
             mapping_ids = tuple(
                 str(resolved.capability.native_ik.mapping_id)
                 for resolved in resolutions
@@ -3934,12 +3927,8 @@ class BAW_OT_rigped_semantic_move_axis(bpy.types.Operator):
                 self._auto_direct_plan if auto_enabled_at_release else None
             )
             deferred_auto_results: list[Any] = []
-            auto_context = control_context_for_context(context)
-            auto_limb_context, auto_direct_context = _fk_move_auto_contexts(
-                context.scene,
-                auto_context,
-                fk_sessions,
-            )
+            auto_limb_context = self._frozen_auto_limb_context
+            auto_direct_context = self._frozen_auto_direct_context
             try:
                 if auto_contact_batch_plan is not None:
                     link_trace_operation(
@@ -4203,6 +4192,8 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
     _auto_direct_plan: RigpedAutoDirectRotatePlan | None = None
     _auto_contact_batch_plan: RigpedAutoContactBatchPlan | None = None
     _deferred_auto_contact_mapping_ids: tuple[str, ...] = ()
+    _frozen_auto_limb_context: Any = None
+    _frozen_auto_direct_context: Any = None
     _axis = Vector((1.0, 0.0, 0.0))
     _pivot = Vector((0.0, 0.0, 0.0))
     _start_axis_point = Vector((0.0, 0.0, 0.0))
@@ -4257,6 +4248,8 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
         self._auto_direct_plan = None
         self._auto_contact_batch_plan = None
         self._deferred_auto_contact_mapping_ids = ()
+        self._frozen_auto_limb_context = None
+        self._frozen_auto_direct_context = None
         if bool(getattr(context.scene, "baw_auto_key_enabled", False)):
             targets = _selected_fk_joint_move_targets(context)
             if len(targets) != len(sessions):
@@ -4270,6 +4263,8 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                 auto_context,
                 sessions,
             )
+            self._frozen_auto_limb_context = limb_context
+            self._frozen_auto_direct_context = direct_context
             mapping_ids = (
                 selected_contact_mapping_ids(context.scene, limb_context)
                 if limb_context is not None
@@ -4715,12 +4710,8 @@ class BAW_OT_rigped_fk_joint_move_axis(bpy.types.Operator):
                 else ()
             )
             deferred_auto_results: list[Any] = []
-            auto_context = control_context_for_context(context)
-            auto_limb_context, auto_direct_context = _fk_move_auto_contexts(
-                context.scene,
-                auto_context,
-                sessions,
-            )
+            auto_limb_context = self._frozen_auto_limb_context
+            auto_direct_context = self._frozen_auto_direct_context
             if (
                 auto_contact_batch_plan is None
                 and deferred_auto_contact_mapping_ids
@@ -8256,6 +8247,8 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
     _auto_direct_plan: RigpedAutoDirectRotatePlan | None = None
     _auto_contact_batch_plan: RigpedAutoContactBatchPlan | None = None
     _deferred_auto_contact_mapping_ids: tuple[str, ...] = ()
+    _frozen_auto_limb_context: Any = None
+    _frozen_auto_direct_context: Any = None
     _forearm_post_solve_roll_overlay: bool = False
     _forearm_special_session: FkTwoBoneMoveSession | None = None
     _single_lower_link_z_axis_sign: float = 1.0
@@ -8650,6 +8643,8 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         self._auto_direct_plan = None
         self._auto_contact_batch_plan = None
         self._deferred_auto_contact_mapping_ids = ()
+        self._frozen_auto_limb_context = None
+        self._frozen_auto_direct_context = None
         self._orientation = str(context.scene.transform_orientation_slots[0].type)
         forearm_post_solve_roll_auto = (
             self.axis == "Y"
@@ -8669,6 +8664,8 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 # Keep Contact state and the hidden IK target/pole bundle untouched.
                 auto_limb_context = None
                 auto_direct_context = auto_context
+            self._frozen_auto_limb_context = auto_limb_context
+            self._frozen_auto_direct_context = auto_direct_context
             operation_id = f"rigped-auto-rotate:{uuid4().hex}"
             mapping_ids = (
                 selected_contact_mapping_ids(context.scene, auto_limb_context)
@@ -9659,16 +9656,8 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 else ()
             )
             deferred_auto_results: list[Any] = []
-            auto_context = control_context_for_context(context)
-            auto_limb_context, auto_direct_context = _direct_rotate_auto_contexts(
-                context.scene,
-                auto_context,
-            )
-            if self._forearm_post_solve_roll_overlay:
-                # Match invoke-time authority: ForeArm LOCAL Y stays a pure
-                # public/deform direct write through release as well.
-                auto_limb_context = None
-                auto_direct_context = auto_context
+            auto_limb_context = self._frozen_auto_limb_context
+            auto_direct_context = self._frozen_auto_direct_context
             if (
                 auto_contact_batch_plan is None
                 and deferred_auto_contact_mapping_ids

@@ -264,10 +264,16 @@ def test_rc1_forearm_post_solve_roll_auto_keeps_sliding_authority() -> None:
     assert "include_rigped_free_marker=include_rigped_free_marker" in AUTO_KEY_SOURCE
     assert "include_rigped_free_marker=session.include_rigped_free_marker" in AUTO_KEY_SOURCE
 
+    frozen_limb = invoke.index("self._frozen_auto_limb_context = auto_limb_context")
+    frozen_direct = invoke.index("self._frozen_auto_direct_context = auto_direct_context")
+    forearm_override = invoke.index("auto_limb_context = None")
+    assert forearm_override < frozen_limb
+    assert forearm_override < frozen_direct
+
     modal = _source(_method("BAW_OT_rigped_direct_rotate_axis", "modal"))
-    assert "if self._forearm_post_solve_roll_overlay:" in modal
-    assert "auto_limb_context = None" in modal
-    assert "auto_direct_context = auto_context" in modal
+    assert "auto_limb_context = self._frozen_auto_limb_context" in modal
+    assert "auto_direct_context = self._frozen_auto_direct_context" in modal
+    assert "_direct_rotate_auto_contexts(" not in modal
 
 
 def test_rc1_free_full_four_local_y_uses_pair_semantic_roll_axes() -> None:

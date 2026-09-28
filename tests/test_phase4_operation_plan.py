@@ -1,5 +1,5 @@
 import sys
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType
@@ -94,6 +94,55 @@ def _plan(*channels):
         dependency_footprint=plan_model.DependencyFootprint(("root",), read.owner_binding_tokens),
         write_footprint=plan_model.PlanWriteFootprint(rows, ()),
     )
+
+
+def test_project_read_footprint_replaces_only_requested_fields():
+    base = plan_model.ReadFootprint(
+        character_source_stamp=("source", 7),
+        setup_revision=23,
+        setup_signature="setup-signature",
+        selected_binding_ids=("semantic-a", "semantic-b"),
+        active_binding_id="semantic-b",
+        selection_runtime_keys=((1, 2), (3, 4)),
+        active_runtime_key=(3, 4),
+        owner_binding_tokens=((1, 2, 3, 4),),
+        control_runtime_keys=((5, 6),),
+        native_selection_runtime_keys=((7, 8), (9, 10)),
+        native_active_runtime_key=(9, 10),
+    )
+    new_owner_tokens = ((11, 12, 13, 14),)
+    new_control_keys = ((15, 16), (17, 18))
+
+    projected = plan_model.project_read_footprint(
+        base,
+        owner_binding_tokens=new_owner_tokens,
+        control_runtime_keys=new_control_keys,
+    )
+
+    assert projected is not base
+    assert base.owner_binding_tokens == ((1, 2, 3, 4),)
+    assert base.control_runtime_keys == ((5, 6),)
+    assert projected.owner_binding_tokens == new_owner_tokens
+    assert projected.control_runtime_keys == new_control_keys
+    for field in (
+        "character_source_stamp",
+        "setup_revision",
+        "setup_signature",
+        "selected_binding_ids",
+        "active_binding_id",
+        "selection_runtime_keys",
+        "active_runtime_key",
+        "native_selection_runtime_keys",
+        "native_active_runtime_key",
+    ):
+        assert getattr(projected, field) == getattr(base, field)
+
+    changed_fields = {
+        field.name
+        for field in fields(plan_model.ReadFootprint)
+        if getattr(projected, field.name) != getattr(base, field.name)
+    }
+    assert changed_fields == {"owner_binding_tokens", "control_runtime_keys"}
 
 
 def test_plan_records_are_frozen():

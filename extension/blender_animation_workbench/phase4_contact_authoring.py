@@ -43,8 +43,8 @@ from .phase4_operation_plan import (
     PlannedChannel,
     PlannedOwnerGroup,
     PlanWriteFootprint,
-    ReadFootprint,
     channel_sort_key,
+    project_read_footprint,
     validate_plan_structure,
 )
 from .phase4_preflight import (
@@ -88,7 +88,7 @@ from .phase4_writer import (
     execute_direct_key_plan,
 )
 from .rigped_contract import RigpedCapability, resolve_rigped_target
-from .rigped_operation_domain import resolve_operation_domain
+from .rigped_operation_domain import limb_domain_binding_ids, resolve_operation_domain
 from .semantic_adapter import (
     assigned_channelbag,
     channel_binding_token,
@@ -1206,14 +1206,7 @@ def _next_enabled(current: ContactKeyType, enabled: tuple[ContactKeyType, ...]) 
 
 
 def _mapping_selection_binding_ids(mapping, capability) -> frozenset[str]:
-    allowed = {
-        *capability.fk_binding_ids,
-        capability.authored_terminal_binding_id,
-        mapping.ik_target_binding_id,
-    }
-    if mapping.pole_binding_id:
-        allowed.add(mapping.pole_binding_id)
-    return frozenset(str(binding_id) for binding_id in allowed if binding_id)
+    return frozenset(limb_domain_binding_ids(mapping, capability))
 
 
 def _selected_mapping(view, selected_binding_ids: tuple[str, ...]):
@@ -2758,7 +2751,7 @@ def build_contact_intent_plan(
             pole_curve = _find_fcurve(bag, pole_angle_path, 0)
             if pole_curve is None or _curve_key_at(pole_curve, time) is None:
                 raise ContactAuthoringError(
-                    "Same-frame Sliding→Free replacement is missing its authoritative pole-angle key."
+                    "Same-frame Sliding?묯ree replacement is missing its authoritative pole-angle key."
                 )
             pole_cleanup_fcurve_token = _runtime_pointer(pole_curve)
             if pole_cleanup_fcurve_token is None:
@@ -3323,7 +3316,7 @@ def _build_transform_rows(
             fk_states = snap_result.fk_control_states
             terminal_state = snap_result.authored_terminal_state
             if len(fk_states) != len(capability.fk_controls) or terminal_state is None:
-                raise ContactAuthoringError("IK→FK snap did not return the complete authored Free dependency state.")
+                raise ContactAuthoringError("IK?묯K snap did not return the complete authored Free dependency state.")
         else:
             fk_states = tuple(_current_state(by_binding[binding_id]) for binding_id in capability.fk_binding_ids)
             terminal_state = _current_state(by_binding[capability.authored_terminal_binding_id])
@@ -3610,14 +3603,8 @@ def _contact_operation_plan(
         selected_binding_ids=base.selected_binding_ids,
         active_binding_id=base.active_binding_id,
         owner_groups=(group,),
-        read_footprint=ReadFootprint(
-            character_source_stamp=base.read_footprint.character_source_stamp,
-            setup_revision=base.read_footprint.setup_revision,
-            setup_signature=base.read_footprint.setup_signature,
-            selected_binding_ids=base.read_footprint.selected_binding_ids,
-            active_binding_id=base.read_footprint.active_binding_id,
-            selection_runtime_keys=base.read_footprint.selection_runtime_keys,
-            active_runtime_key=base.read_footprint.active_runtime_key,
+        read_footprint=project_read_footprint(
+            base.read_footprint,
             owner_binding_tokens=(intent.owner_binding_token,),
             control_runtime_keys=control_runtime_keys,
         ),
@@ -3798,14 +3785,8 @@ def _contact_batch_operation_plan(
         selected_binding_ids=base.selected_binding_ids,
         active_binding_id=base.active_binding_id,
         owner_groups=(group,),
-        read_footprint=ReadFootprint(
-            character_source_stamp=base.read_footprint.character_source_stamp,
-            setup_revision=base.read_footprint.setup_revision,
-            setup_signature=base.read_footprint.setup_signature,
-            selected_binding_ids=base.read_footprint.selected_binding_ids,
-            active_binding_id=base.read_footprint.active_binding_id,
-            selection_runtime_keys=base.read_footprint.selection_runtime_keys,
-            active_runtime_key=base.read_footprint.active_runtime_key,
+        read_footprint=project_read_footprint(
+            base.read_footprint,
             owner_binding_tokens=(owner_binding_token,),
             control_runtime_keys=control_runtime_keys,
         ),
@@ -4199,7 +4180,7 @@ def _prepare_contact_intent_for_batch(
             runtime_control_key(capability.native_ik.ik_target),
         )
         if ik_contract is None:
-            raise ContactAuthoringError("I20 Planted→Sliding transition lost its authored IK target contract.")
+            raise ContactAuthoringError("I20 Planted?뭆liding transition lost its authored IK target contract.")
         ik_target_state_override = _state_for_pose_matrix(
             ik_contract,
             capability.native_ik.ik_target.target.matrix.copy(),
@@ -4536,7 +4517,7 @@ def execute_contact_intent_plan(
         )
         if ik_contract is None:
             raise ContactAuthoringError(
-                "Planted→Sliding transition cannot resolve the authored IK target contract."
+                "Planted?뭆liding transition cannot resolve the authored IK target contract."
             )
         ik_target_state_override = _state_for_pose_matrix(
             ik_contract,
@@ -4708,7 +4689,7 @@ def execute_contact_intent_plan(
                 raise ContactAuthoringError("Same-frame pole-angle cleanup target changed before mutation.")
             pole_key = _key_at_frame(pole_curve, time)
             if pole_key is None:
-                raise ContactAuthoringError("Same-frame Sliding→Free pole-angle key disappeared before cleanup.")
+                raise ContactAuthoringError("Same-frame Sliding?묯ree pole-angle key disappeared before cleanup.")
             journal.record(
                 FCurveMutationReceipt(
                     journal.next_ordinal(),

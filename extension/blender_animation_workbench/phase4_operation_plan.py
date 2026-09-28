@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from .phase4_verification import Diagnostic, DiagnosticSeverity, OperationStage
@@ -86,6 +86,19 @@ class ReadFootprint:
     control_runtime_keys: tuple[RuntimeControlKey, ...]
     native_selection_runtime_keys: tuple[RuntimeControlKey, ...] = ()
     native_active_runtime_key: RuntimeControlKey | None = None
+
+
+def project_read_footprint(
+    base: ReadFootprint,
+    *,
+    owner_binding_tokens: tuple[OwnerBindingToken, ...],
+    control_runtime_keys: tuple[RuntimeControlKey, ...],
+) -> ReadFootprint:
+    return replace(
+        base,
+        owner_binding_tokens=owner_binding_tokens,
+        control_runtime_keys=control_runtime_keys,
+    )
 
 
 @dataclass(frozen=True, slots=True)

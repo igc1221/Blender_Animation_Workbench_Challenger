@@ -499,7 +499,7 @@ def test_capability_domain_is_subset_of_topology_candidate_domain():
     capability = _limb_capability("upper", "lower", terminal="hand")
 
     capability_ids = set(domain.limb_domain_binding_ids(mapping, capability))
-    topology_ids = set(domain._candidate_limb_domain_binding_ids(view, mapping))
+    topology_ids = set(domain.candidate_limb_domain_binding_ids(view, mapping))
 
     assert capability_ids <= topology_ids
     assert capability_ids == {"upper", "lower", "hand", "ik", "pole"}

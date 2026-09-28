@@ -12,6 +12,19 @@ from uuid import uuid4
 import bpy
 from mathutils import Matrix, Quaternion, Vector
 
+from .debug_replay_payload import (
+    recorded_contact_type as _recorded_contact_type,
+)
+from .debug_replay_payload import (
+    recorded_direct_binding_ids as _recorded_direct_binding_ids,
+)
+from .debug_replay_payload import (
+    recorded_mapping_contact_types as _recorded_mapping_contact_types,
+)
+from .debug_replay_payload import (
+    validate_direct_rotate_recorded_result_payload,
+    validate_recorded_pose_state_payload,
+)
 from .debug_trace import (
     capture_debug_state_checkpoint,
     read_recent_trace_events,
@@ -244,94 +257,6 @@ def _prepare_contact_action_context(
     if controls:
         _select_pose_controls(context, controls)
     return scene, frame, controls
-
-
-def _recorded_contact_type(value: Any, *, field_name: str) -> ContactKeyType | None:
-    if value is None:
-        return None
-    try:
-        return ContactKeyType(value)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"AWB semantic replay Contact INVALID_RECORDED_RESULT: "
-            f"{field_name}={value!r} is not a valid Contact type."
-        ) from exc
-
-
-def _recorded_mapping_contact_types(
-    action: dict[str, Any],
-) -> tuple[tuple[str, ContactKeyType], ...] | None:
-    raw = action.get("mapping_contact_types")
-    if raw is None:
-        return None
-    if isinstance(raw, dict):
-        items = tuple(raw.items())
-    else:
-        try:
-            raw_items = tuple(raw)
-        except TypeError as exc:
-            raise RuntimeError(
-                "AWB semantic replay Contact INVALID_RECORDED_RESULT: "
-                "mapping_contact_types is not an iterable mapping result."
-            ) from exc
-        if any(
-            not isinstance(item, (list, tuple)) or len(item) != 2
-            for item in raw_items
-        ):
-            raise RuntimeError(
-                "AWB semantic replay Contact INVALID_RECORDED_RESULT: "
-                "mapping_contact_types must contain exact (mapping_id, contact_type) pairs."
-            )
-        items = tuple((item[0], item[1]) for item in raw_items)
-
-    normalized: list[tuple[str, ContactKeyType]] = []
-    seen: set[str] = set()
-    for mapping_id, contact_type in items:
-        normalized_id = str(mapping_id)
-        if not normalized_id or normalized_id in seen:
-            raise RuntimeError(
-                "AWB semantic replay Contact INVALID_RECORDED_RESULT: "
-                f"mapping_contact_types has a missing/duplicate mapping id {normalized_id!r}."
-            )
-        seen.add(normalized_id)
-        normalized.append(
-            (
-                normalized_id,
-                _recorded_contact_type(
-                    contact_type,
-                    field_name=f"mapping_contact_types[{normalized_id!r}]",
-                ),
-            )
-        )
-    return tuple(
-        (mapping_id, contact_type)
-        for mapping_id, contact_type in normalized
-        if contact_type is not None
-    )
-
-
-def _recorded_direct_binding_ids(action: dict[str, Any]) -> tuple[str, ...] | None:
-    raw = action.get("direct_binding_ids")
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        raise TypeError(
-            "AWB semantic replay Contact INVALID_RECORDED_RESULT: "
-            "direct_binding_ids must be a sequence, not a string."
-        )
-    try:
-        values = tuple(str(value) for value in tuple(raw))
-    except TypeError as exc:
-        raise RuntimeError(
-            "AWB semantic replay Contact INVALID_RECORDED_RESULT: "
-            "direct_binding_ids must be an iterable sequence."
-        ) from exc
-    if any(not value for value in values) or len(set(values)) != len(values):
-        raise RuntimeError(
-            "AWB semantic replay Contact INVALID_RECORDED_RESULT: "
-            "direct_binding_ids contains an empty or duplicate binding id."
-        )
-    return values
 
 
 def _contact_result_payload(
@@ -605,25 +530,9 @@ def _execute_contact_action(
     return _execute_contact_recorded_result_action(context, action)
 
 
-def _validate_recorded_pose_state(payload: dict[str, Any]) -> dict[str, Any]:
-    required = {
-        "object",
-        "bone",
-        "location",
-        "rotation_mode",
-        "rotation_property",
-        "rotation",
-    }
-    missing = sorted(required.difference(payload))
-    if missing:
-        raise RuntimeError(
-            f"AWB recorded Rotate result pose state is incomplete: {missing!r}."
-        )
-
-    object_name = str(payload.get("object") or "")
-    bone_name = str(payload.get("bone") or "")
-    if not object_name or not bone_name:
-        raise RuntimeError("AWB recorded Rotate result has an empty pose identity.")
+def _bind_recorded_pose_state(row: dict[str, Any]) -> dict[str, Any]:
+    object_name = row["object"]
+    bone_name = row["bone"]
     owner = bpy.data.objects.get(object_name)
     if owner is None or getattr(owner, "type", None) != "ARMATURE":
         raise RuntimeError(
@@ -634,50 +543,11 @@ def _validate_recorded_pose_state(payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(
             f"AWB recorded Rotate result lost pose bone {bone_name!r}."
         )
+    return {**row, "pose_bone": pose_bone}
 
-    try:
-        location = tuple(float(value) for value in tuple(payload["location"]))
-        rotation = tuple(float(value) for value in tuple(payload["rotation"]))
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"AWB recorded Rotate result has non-numeric pose data for {bone_name!r}."
-        ) from exc
-    if len(location) != 3:
-        raise RuntimeError(
-            f"AWB recorded Rotate result has invalid location for {bone_name!r}."
-        )
 
-    rotation_mode = str(payload.get("rotation_mode") or "")
-    rotation_property = str(payload.get("rotation_property") or "")
-    expected_property = {
-        "QUATERNION": "rotation_quaternion",
-        "AXIS_ANGLE": "rotation_axis_angle",
-        "XYZ": "rotation_euler",
-        "XZY": "rotation_euler",
-        "YXZ": "rotation_euler",
-        "YZX": "rotation_euler",
-        "ZXY": "rotation_euler",
-        "ZYX": "rotation_euler",
-    }.get(rotation_mode)
-    if expected_property is None or rotation_property != expected_property:
-        raise RuntimeError(
-            f"AWB recorded Rotate result has inconsistent rotation representation for {bone_name!r}."
-        )
-    expected_size = 4 if rotation_property != "rotation_euler" else 3
-    if len(rotation) != expected_size:
-        raise RuntimeError(
-            f"AWB recorded Rotate result has invalid rotation for {bone_name!r}."
-        )
-
-    return {
-        "key": (object_name, bone_name),
-        "pose_bone": pose_bone,
-        "location": location,
-        "rotation_mode": rotation_mode,
-        "rotation_property": rotation_property,
-        "rotation": rotation,
-    }
-
+def _validate_recorded_pose_state(payload: dict[str, Any]) -> dict[str, Any]:
+    return _bind_recorded_pose_state(validate_recorded_pose_state_payload(payload))
 
 def _apply_recorded_pose_state(payload: dict[str, Any]) -> None:
     row = _validate_recorded_pose_state(payload)
@@ -719,21 +589,20 @@ def _validate_direct_rotate_recorded_result(
     resolved,
     sliding_syncs,
 ) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
-    if not isinstance(payload, dict) or payload.get("schema") != (
-        "awb-direct-rotate-recorded-result/v1"
-    ):
-        raise RuntimeError("AWB recorded Rotate result schema is unsupported.")
+    """Bind pure recorded-result rows to the current Blender operation domain.
 
-    raw_states = tuple(payload.get("pose_states") or ())
-    if not raw_states:
-        raise RuntimeError("AWB recorded Rotate result has no pose states.")
-    if any(not isinstance(item, dict) for item in raw_states):
-        raise RuntimeError("AWB recorded Rotate result pose state is malformed.")
+    Pure ownership keeps the frozen structural diagnostics for
+    "awb-direct-rotate-recorded-result/v1": "duplicate pose identities",
+    "duplicate Sliding mappings", "Sliding state is incomplete", and
+    "hinge settings are incomplete". Live ownership keeps pose coverage mismatch,
+    solver identity mismatch, and feedback coverage mismatch.
+    """
+    primitive_pose_rows, primitive_sliding_rows = (
+        validate_direct_rotate_recorded_result_payload(payload)
+    )
 
-    pose_rows = tuple(_validate_recorded_pose_state(item) for item in raw_states)
+    pose_rows = tuple(_bind_recorded_pose_state(row) for row in primitive_pose_rows)
     pose_keys = tuple(row["key"] for row in pose_rows)
-    if len(set(pose_keys)) != len(pose_keys):
-        raise RuntimeError("AWB recorded Rotate result has duplicate pose identities.")
     expected_pose_keys = _expected_direct_rotate_recorded_pose_keys(
         resolved,
         sliding_syncs,
@@ -746,10 +615,6 @@ def _validate_direct_rotate_recorded_result(
             f"missing={missing!r}, unexpected={unexpected!r}."
         )
 
-    raw_sliding = tuple(payload.get("sliding") or ())
-    if any(not isinstance(item, dict) for item in raw_sliding):
-        raise RuntimeError("AWB recorded Rotate Sliding state is malformed.")
-
     sync_by_mapping: dict[str, Any] = {}
     for session in sliding_syncs:
         mapping_id = str(session.capability.native_ik.mapping_id)
@@ -760,47 +625,25 @@ def _validate_direct_rotate_recorded_result(
         sync_by_mapping[mapping_id] = session
 
     recorded_mapping_ids = tuple(
-        str(item.get("mapping_id") or "")
-        for item in raw_sliding
+        row["mapping_id"]
+        for row in primitive_sliding_rows
     )
-    if any(not mapping_id for mapping_id in recorded_mapping_ids):
-        raise RuntimeError("AWB recorded Rotate Sliding mapping identity is empty.")
-    if len(set(recorded_mapping_ids)) != len(recorded_mapping_ids):
-        raise RuntimeError("AWB recorded Rotate result has duplicate Sliding mappings.")
     if set(recorded_mapping_ids) != set(sync_by_mapping):
         raise RuntimeError(
             "AWB recorded Rotate Sliding coverage does not match the frozen domain."
         )
 
     sliding_rows: list[dict[str, Any]] = []
-    required_sliding = {
-        "mapping_id",
-        "solver_object",
-        "solver_bone",
-        "pole_angle",
-        "ik_influence",
-        "ik_mute",
-        "terminal_ik_influence",
-        "terminal_ik_mute",
-        "feedback_mutes",
-        "hinge_settings",
-        "contact_state",
-    }
-    for item in raw_sliding:
-        missing = sorted(required_sliding.difference(item))
-        if missing:
-            raise RuntimeError(
-                f"AWB recorded Rotate Sliding state is incomplete: {missing!r}."
-            )
-        mapping_id = str(item["mapping_id"])
+    for row in primitive_sliding_rows:
+        mapping_id = row["mapping_id"]
         session = sync_by_mapping[mapping_id]
         capability = session.capability
         solver_owner = capability.native_ik.solver_owner.target
         solver_object = str(capability.native_ik.solver_owner.owner_object.name)
         solver_bone = str(solver_owner.name)
         if (
-            str(item.get("solver_object") or "") != solver_object
-            or str(item.get("solver_bone") or "") != solver_bone
+            row["solver_object"] != solver_object
+            or row["solver_bone"] != solver_bone
         ):
             raise RuntimeError(
                 f"AWB recorded Rotate solver identity mismatch for {mapping_id!r}."
@@ -810,7 +653,7 @@ def _validate_direct_rotate_recorded_result(
             *capability.fk_copy_constraints,
             capability.terminal_fk_constraint,
         )
-        feedback_mutes = tuple(item["feedback_mutes"])
+        feedback_mutes = row["feedback_mutes"]
         if (
             len(feedback_mutes) != len(feedback_constraints)
             or any(not isinstance(value, bool) for value in feedback_mutes)
@@ -819,56 +662,14 @@ def _validate_direct_rotate_recorded_result(
                 f"AWB recorded Rotate feedback coverage mismatch for {mapping_id!r}."
             )
 
-        hinge_settings = tuple(item["hinge_settings"])
-        if (
-            len(hinge_settings) != 12
-            or any(not isinstance(value, bool) for value in hinge_settings[:6])
-        ):
-            raise RuntimeError(
-                f"AWB recorded Rotate hinge settings are incomplete for {mapping_id!r}."
-            )
-        try:
-            normalized_hinge_settings = (
-                *hinge_settings[:6],
-                *(float(value) for value in hinge_settings[6:]),
-            )
-            pole_angle = float(item["pole_angle"])
-            ik_influence = float(item["ik_influence"])
-            terminal_ik_influence = float(item["terminal_ik_influence"])
-            contact_state = (
-                None
-                if item["contact_state"] is None
-                else float(item["contact_state"])
-            )
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"AWB recorded Rotate Sliding numeric state is invalid for {mapping_id!r}."
-            ) from exc
-        if not isinstance(item["ik_mute"], bool) or not isinstance(
-            item["terminal_ik_mute"],
-            bool,
-        ):
-            raise TypeError(
-                f"AWB recorded Rotate Sliding mute state is invalid for {mapping_id!r}."
-            )
-
         sliding_rows.append({
-            "mapping_id": mapping_id,
+            **row,
             "session": session,
             "solver_owner": solver_owner,
             "feedback_constraints": feedback_constraints,
-            "feedback_mutes": feedback_mutes,
-            "hinge_settings": normalized_hinge_settings,
-            "contact_state": contact_state,
-            "pole_angle": pole_angle,
-            "ik_influence": ik_influence,
-            "ik_mute": item["ik_mute"],
-            "terminal_ik_influence": terminal_ik_influence,
-            "terminal_ik_mute": item["terminal_ik_mute"],
         })
 
     return pose_rows, tuple(sliding_rows)
-
 
 def _apply_direct_rotate_recorded_result(
     context,

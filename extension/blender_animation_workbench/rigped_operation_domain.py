@@ -79,7 +79,7 @@ def limb_domain_binding_ids(mapping: Any, capability: Any) -> tuple[str, ...]:
     return tuple(dict.fromkeys(binding_id for binding_id in ids if binding_id))
 
 
-def _candidate_limb_domain_binding_ids(view: Any, mapping: Any) -> tuple[str, ...]:
+def candidate_limb_domain_binding_ids(view: Any, mapping: Any) -> tuple[str, ...]:
     """Return topology-level animator binding candidates without requiring a valid solver."""
 
     chain = next(
@@ -191,7 +191,7 @@ def resolve_operation_domain(
     for mapping in view.definition.kinematics:
         representation = resolve_limb_representation_capability(view, str(mapping.mapping_id))
         capability = representation.capability
-        candidate_ids = _candidate_limb_domain_binding_ids(view, mapping)
+        candidate_ids = candidate_limb_domain_binding_ids(view, mapping)
         domain_ids = (
             limb_domain_binding_ids(mapping, capability)
             if capability is not None

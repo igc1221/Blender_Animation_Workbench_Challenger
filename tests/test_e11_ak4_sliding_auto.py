@@ -171,6 +171,37 @@ def test_e11_direct_rotate_defers_mixed_contact_direct_and_rechecks_auto() -> No
     assert "rollback_rigped_auto_writer_results(tuple(deferred_auto_results))" in modal
 
 
+def test_e11_auto_release_reuses_invoke_frozen_domain_subsets() -> None:
+    cases = (
+        ("BAW_OT_rigped_semantic_move_axis", "_fk_move_auto_contexts("),
+        ("BAW_OT_rigped_fk_joint_move_axis", "_fk_move_auto_contexts("),
+        ("BAW_OT_rigped_direct_rotate_axis", "_direct_rotate_auto_contexts("),
+    )
+    for class_name, partition_call in cases:
+        invoke = _method(TRANSFORM, class_name, "invoke")
+        modal = _method(TRANSFORM, class_name, "modal")
+        release = modal[modal.index('if event.type == "LEFTMOUSE" and event.value == "RELEASE":'):]
+
+        assert "self._frozen_auto_limb_context = " in invoke
+        assert "self._frozen_auto_direct_context = " in invoke
+        assert "auto_limb_context = self._frozen_auto_limb_context" in release
+        assert "auto_direct_context = self._frozen_auto_direct_context" in release
+        assert "auto_context = control_context_for_context(context)" not in release
+        assert partition_call not in release
+
+    rotate_invoke = _method(TRANSFORM, "BAW_OT_rigped_direct_rotate_axis", "invoke")
+    forearm_override = rotate_invoke.index("if forearm_post_solve_roll_auto:")
+    frozen_limb = rotate_invoke.index(
+        "self._frozen_auto_limb_context = auto_limb_context",
+        forearm_override,
+    )
+    frozen_direct = rotate_invoke.index(
+        "self._frozen_auto_direct_context = auto_direct_context",
+        forearm_override,
+    )
+    assert forearm_override < frozen_limb < frozen_direct
+
+
 def test_e11_direct_move_rechecks_auto_at_release_before_keying() -> None:
     modal = _method(TRANSFORM, "BAW_OT_rigped_direct_move_axis", "modal")
     release_gate = modal.index("auto_enabled_at_release = bool(")
