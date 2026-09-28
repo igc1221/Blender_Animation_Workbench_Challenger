@@ -7,6 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 REPLAY_PATH = ROOT / "extension" / "blender_animation_workbench" / "debug_replay.py"
 TRACE_PATH = ROOT / "extension" / "blender_animation_workbench" / "debug_trace.py"
+TRACKBAR_GIZMO_PATH = ROOT / "extension" / "blender_animation_workbench" / "trackbar_gizmo.py"
+RIGPED_TRANSFORM_PATH = ROOT / "extension" / "blender_animation_workbench" / "rigped_transform.py"
 CONTACT_PATH = ROOT / "extension" / "blender_animation_workbench" / "phase4_contact_authoring.py"
 CONTACT_UI_PATH = ROOT / "extension" / "blender_animation_workbench" / "phase4_contact_ui.py"
 RUNNER_PATH = ROOT / "scripts" / "replay_user_final_test_via_mcp.py"
@@ -130,6 +132,29 @@ def test_e10_latest_replay_retains_three_distinct_sessions() -> None:
     assert "_rotate_replay_history_for_new_session(script)" in persist
 
 
+def test_e10_key_edit_commit_is_frozen_into_latest_replay() -> None:
+    trace_source, _tree = _source(TRACE_PATH)
+    multi_drag = _function(TRACKBAR_GIZMO_PATH, "_finish_multi_key_drag")
+    single_drag = _function(TRACKBAR_GIZMO_PATH, "_finish_key_drag")
+    for commit in (multi_drag, single_drag):
+        assert '"KEY_EDIT_COMMIT"' in commit
+        assert '"kind": "KEY_EDIT"' in commit
+        assert '"source_frames"' in commit
+        assert '"delta_frames"' in commit
+        assert '"controls"' in commit
+    assert '"KEY_EDIT_COMMIT"' in trace_source
+
+
+def test_e10_key_edit_replay_uses_production_trackbar_writers() -> None:
+    execute = _function(REPLAY_PATH, "_execute_key_edit_action")
+    route = _function(REPLAY_PATH, "_semantic_replay_action_route")
+    runner = _function(REPLAY_PATH, "run_semantic_replay")
+    assert "move_selected_key_frames_for_context(" in execute
+    assert "clone_selected_key_frames_for_context(" in execute
+    assert 'kind == "KEY_EDIT"' in route
+    assert 'elif kind == "KEY_EDIT"' in runner
+
+
 def test_e10_archived_semantic_replays_declare_mode_explicitly() -> None:
     expected = {
         "E2": "RECORDED_RESULT",
@@ -146,3 +171,56 @@ def test_e10_archived_semantic_replays_declare_mode_explicitly() -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         assert manifest["runner"] == "semantic_replay"
         assert manifest["replay_mode"] == replay_mode
+
+
+def test_e10_rotate_recorded_result_captures_operation_owned_state() -> None:
+    capture = _function(RIGPED_TRANSFORM_PATH, "_capture_direct_rotate_recorded_result")
+    rigped_source, _tree = _source(RIGPED_TRANSFORM_PATH)
+    assert '"schema": "awb-direct-rotate-recorded-result/v1"' in capture
+    assert '"pose_states"' in capture
+    assert '"sliding"' in capture
+    assert "capability.native_ik.solver_owner" in capture
+    assert "capability.native_ik.ik_target" in capture
+    assert "capability.native_ik.pole_target" in capture
+    assert "_capture_hinge_settings(solver_owner)" in capture
+    assert "recorded_result = _capture_direct_rotate_recorded_result(" in rigped_source
+    assert '"recorded_result": recorded_result' in rigped_source
+
+
+def test_e10_rotate_recorded_result_is_wired_and_legacy_semantic_replay_fails_closed() -> None:
+    execute = _function(REPLAY_PATH, "_execute_free_direct_rotate_action")
+    validate = _function(REPLAY_PATH, "_validate_direct_rotate_recorded_result")
+    restore = _function(REPLAY_PATH, "_apply_direct_rotate_recorded_result")
+    runner = _function(REPLAY_PATH, "run_semantic_replay")
+    assert 'recorded_result = action.get("recorded_result")' in execute
+    assert "_apply_direct_rotate_recorded_result(" in execute
+    assert "UNSUPPORTED_LEGACY_ROTATE_RESULT" in execute
+    assert "UNSUPPORTED_COMMAND_ROTATE_SEMANTICS" in execute
+    assert '"awb-direct-rotate-recorded-result/v1"' in validate
+    assert "_restore_hinge_settings(solver_owner, row[\"hinge_settings\"])" in restore
+    assert "_refresh_current_sliding_public_overlays(" in restore
+    assert "replay_mode=resolved_replay_mode" in runner
+
+
+def test_e10_rotate_recorded_result_prevalidates_full_coverage_before_mutation() -> None:
+    validate = _function(REPLAY_PATH, "_validate_direct_rotate_recorded_result")
+    apply_result = _function(REPLAY_PATH, "_apply_direct_rotate_recorded_result")
+    execute = _function(REPLAY_PATH, "_execute_free_direct_rotate_action")
+
+    assert "duplicate pose identities" in validate
+    assert "pose coverage mismatch" in validate
+    assert "duplicate Sliding mappings" in validate
+    assert "solver identity mismatch" in validate
+    assert "Sliding state is incomplete" in validate
+    assert "feedback coverage mismatch" in validate
+    assert "hinge settings are incomplete" in validate
+    assert apply_result.index("_validate_direct_rotate_recorded_result(") < apply_result.index("constraint.influence = 0.0")
+    assert "del solver_owner[AWB_CONTACT_STATE_PROPERTY]" in apply_result
+    assert "recorded_result,\n            resolved,\n            sliding_syncs," in execute
+    assert "if resolved_for_delta:" in execute
+    assert execute.index("if resolved_for_delta:") < execute.index("delta_world_quaternion")
+    assert "semantic_rotate_requires_result = bool(sliding_syncs) or len(resolved) > 1" in execute
+    assert "quaternion_values: tuple[float, ...] = ()" in execute
+    assert "if bool(getattr(scene, \"baw_auto_key_enabled\", False)):" in execute
+    assert "replay_mode is ReplayMode.COMMAND and bool(" not in execute
+    assert "multi-control/Sliding" in execute

@@ -8,7 +8,7 @@ import bpy
 import gpu
 from gpu_extras.batch import batch_for_shader
 
-from .debug_trace import trace_scrub_begin, trace_scrub_end
+from .debug_trace import trace_event, trace_scrub_begin, trace_scrub_end
 from .semantic_adapter import trackbar_controls_for_context
 from .trackbar_drawing import (
     CURRENT_FRAME_CONTROL_Y_MAX,
@@ -1637,6 +1637,30 @@ class BAW_GT_trackbar(bpy.types.Gizmo):
                 context.scene.frame_set(target_frame)
                 self._sync_legacy_selected_key_marker(context, preferred_frame=target_frame)
                 bpy.ops.ed.undo_push(message=f"AWB Track Bar {operation_name}")
+                edit_mode = "CLONE" if self._key_drag_clone else "MOVE"
+                replay_controls = tuple(
+                    str(item.name)
+                    for item in tuple(getattr(context, "selected_pose_bones", ()) or ())
+                )
+                trace_event(
+                    "INPUT",
+                    "KEY_EDIT_COMMIT",
+                    context=context,
+                    mode=edit_mode,
+                    source_frames=tuple(float(frame) for frame in self._key_drag_source_frames),
+                    delta_frames=delta,
+                    target_frame=int(target_frame),
+                    replay_action={
+                        "kind": "KEY_EDIT",
+                        "mode": edit_mode,
+                        "source_frames": tuple(
+                            float(frame) for frame in self._key_drag_source_frames
+                        ),
+                        "delta_frames": int(delta),
+                        "target_frame": int(target_frame),
+                        "controls": replay_controls,
+                    },
+                )
         elif self._key_drag_plain_preserved_selection:
             select_key_frame_for_context(context, source_frame, mode="SET")
             self._sync_legacy_selected_key_marker(context, preferred_frame=source_frame)
@@ -1711,6 +1735,28 @@ class BAW_GT_trackbar(bpy.types.Gizmo):
                 scene.baw_has_selected_key = True
                 scene.baw_selected_key_frame = target_frame
                 bpy.ops.ed.undo_push(message=f"AWB Track Bar {operation_name}")
+                edit_mode = "CLONE" if self._key_drag_clone else "MOVE"
+                replay_controls = tuple(
+                    str(item.name)
+                    for item in tuple(getattr(context, "selected_pose_bones", ()) or ())
+                )
+                trace_event(
+                    "INPUT",
+                    "KEY_EDIT_COMMIT",
+                    context=context,
+                    mode=edit_mode,
+                    source_frames=(float(source_frame),),
+                    delta_frames=int(target_frame - source_frame),
+                    target_frame=int(target_frame),
+                    replay_action={
+                        "kind": "KEY_EDIT",
+                        "mode": edit_mode,
+                        "source_frames": (float(source_frame),),
+                        "delta_frames": int(target_frame - source_frame),
+                        "target_frame": int(target_frame),
+                        "controls": replay_controls,
+                    },
+                )
 
         self._sync_legacy_selected_key_marker(context, preferred_frame=target_frame)
         refresh_active_trajectory_live(context, force=True, exact_range=True)

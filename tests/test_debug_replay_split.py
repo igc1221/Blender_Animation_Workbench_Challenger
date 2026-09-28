@@ -656,3 +656,27 @@ def test_bb5_supported_gui_prefix_plus_unmatched_modal_requires_handoff():
     assert replay["coverage"] == "PRE_FINAL_GESTURE"
     assert replay["recommended_path"] == "GUI_INPUT"
 
+
+def test_rotate_recorded_result_is_per_control_and_legacy_semantic_replay_fails_closed():
+    replay_source = REPLAY_SOURCE.read_text(encoding="utf-8")
+    transform_source = (
+        ROOT
+        / "extension"
+        / "blender_animation_workbench"
+        / "rigped_transform.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"awb-direct-rotate-recorded-result/v1"' in transform_source
+    assert '"pose_states": tuple(pose_states.values())' in transform_source
+    assert '"sliding": tuple(sliding_rows)' in transform_source
+    assert '"recorded_result": recorded_result' in transform_source
+    assert transform_source.index(
+        "recorded_result = _capture_direct_rotate_recorded_result("
+    ) < transform_source.index("self._states = ()", transform_source.index(
+        "recorded_result = _capture_direct_rotate_recorded_result("
+    ))
+
+    assert "UNSUPPORTED_LEGACY_ROTATE_RESULT" in replay_source
+    assert "UNSUPPORTED_COMMAND_ROTATE_SEMANTICS" in replay_source
+    assert "_apply_direct_rotate_recorded_result(" in replay_source
+    assert "replay_mode=resolved_replay_mode" in replay_source

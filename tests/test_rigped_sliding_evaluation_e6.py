@@ -156,6 +156,10 @@ def test_e6_public_result_paths_use_native_conversion_service() -> None:
         TRANSFORM_SOURCE,
         _function(TRANSFORM_TREE, "_apply_pose_bone_rotation_from_matrix"),
     )
+    display = _source(
+        TRANSFORM_SOURCE,
+        _function(TRANSFORM_TREE, "_sliding_public_display_from_result"),
+    )
     sync = _source(
         TRANSFORM_SOURCE,
         _function(TRANSFORM_TREE, "_sync_sliding_public_pose_from_result"),
@@ -165,12 +169,14 @@ def test_e6_public_result_paths_use_native_conversion_service() -> None:
     assert "parent_rest" not in state
     assert "native_pose_basis_from_matrix(" in replay
     assert "parent_rest" not in replay
+    assert "derive_public_display(capability, solved_result)" in display
+    assert "native_pose_basis_from_matrix(" in display
     assert "capture_native_solved_result(capability)" in sync
-    assert "derive_public_display(capability, solved_result)" in sync
+    assert "_sliding_public_display_from_result(" in sync
     assert "public_display.first_basis" in sync
     assert "public_display.second_basis" in sync
-    assert "public_display.terminal_basis" in sync
-
+    assert "_state_for_pose_matrix(" in sync
+    assert "solved_result.terminal_pose" in sync
 
 def test_e6_sliding_seed_is_transient_before_native_ik_update() -> None:
     apply = _source(

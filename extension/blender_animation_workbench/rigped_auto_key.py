@@ -57,6 +57,7 @@ class RigpedAutoDirectRotatePlan:
     active_only: bool = True
     requested_families: tuple[ChannelFamily, ...] = (ChannelFamily.ROTATION,)
     allow_storage_rebind: bool = False
+    include_rigped_free_marker: bool = True
     trigger: WriterTrigger = WriterTrigger.AUTO_TRANSFORM
 
 
@@ -768,6 +769,7 @@ def plan_rigped_auto_direct_rotate(
     operation_id: str,
     selector_character_id: str | None = None,
     active_only: bool = True,
+    include_rigped_free_marker: bool = True,
 ) -> RigpedAutoDirectRotatePlanResult:
     """Plan one non-Contact direct Rigped Rotate using existing direct authority."""
 
@@ -786,7 +788,7 @@ def plan_rigped_auto_direct_rotate(
         requested_families=requested_families,
         selector_character_id=selector_character_id,
         active_only=active_only,
-        include_rigped_free_marker=True,
+        include_rigped_free_marker=include_rigped_free_marker,
     )
     if not built.ok or built.plan is None:
         return RigpedAutoDirectRotatePlanResult(None, built.diagnostics)
@@ -816,6 +818,7 @@ def plan_rigped_auto_direct_rotate(
             baseline_time=baseline_time,
             active_only=active_only,
             requested_families=requested_families,
+            include_rigped_free_marker=include_rigped_free_marker,
         ),
     )
 
@@ -837,7 +840,7 @@ def commit_rigped_auto_direct_rotate(
         requested_families=session.requested_families,
         selector_character_id=selector_character_id,
         active_only=session.active_only,
-        include_rigped_free_marker=True,
+        include_rigped_free_marker=session.include_rigped_free_marker,
     )
     if not built.ok or built.plan is None:
         return DirectWriterResult(False, 0, 0, built.diagnostics)

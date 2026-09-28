@@ -787,3 +787,120 @@ def test_bb3_rigped_is_registered_as_domain_probe_not_core_dependency():
     assert 'register_debug_state_probe("rigped", _rigped_debug_state_probe)' in rigped_source
     assert 'unregister_debug_state_probe("rigped")' in rigped_source
     assert "RIGPED_SETUP_PROPERTY" not in trace_source
+
+
+def test_trace_same_session_file_load_does_not_archive_active_recording(monkeypatch, tmp_path):
+    module = _load_trace_module(monkeypatch)
+    monkeypatch.setattr(module, "_SESSION_ID", "session-a")
+    path = tmp_path / "trace.jsonl"
+    path.write_text(
+        json.dumps({"session_id": "session-a", "seq": 7}) + "\n",
+        encoding="utf-8",
+    )
+
+    module._archive_existing_session_file(path)
+
+    assert path.exists()
+    assert not (tmp_path / "trace.previous.jsonl").exists()
+
+
+def test_trace_size_rotation_keeps_segments_and_latest_reader_is_contiguous(monkeypatch, tmp_path):
+    module = _load_trace_module(monkeypatch)
+    monkeypatch.setattr(module, "_SESSION_ID", "session-a")
+    path = tmp_path / "trace.jsonl"
+    monkeypatch.setattr(module, "_trace_path", lambda: path)
+    path.write_text(
+        json.dumps({"session_id": "session-a", "seq": 1}) + "\n",
+        encoding="utf-8",
+    )
+
+    module._rotate_if_needed(path, max_bytes=1)
+    path.write_text(
+        json.dumps({"session_id": "session-a", "seq": 2}) + "\n",
+        encoding="utf-8",
+    )
+
+    records = module.read_recent_trace_events(10, latest_session_only=True)
+    assert [item["seq"] for item in records] == [1, 2]
+    segments = module._trace_segment_paths(path, "session-a")
+    assert len(segments) == 1
+    assert segments[0].exists()
+
+
+def test_trace_repeated_same_session_loads_and_rotations_keep_replay_contiguous(monkeypatch, tmp_path):
+    module = _load_trace_module(monkeypatch)
+    monkeypatch.setattr(module, "_SESSION_ID", "session-a")
+    path = tmp_path / "trace.jsonl"
+    precision_path = tmp_path / "precision.jsonl"
+    monkeypatch.setattr(module, "_trace_path", lambda: path)
+    monkeypatch.setattr(module, "_precision_trace_path", lambda: precision_path)
+
+    def write_action(seq: int) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "session_id": "session-a",
+                    "seq": seq,
+                    "event": "ROTATE_COMMIT",
+                    "operation_id": f"op-{seq}",
+                    "data": {
+                        "replay_action": {
+                            "kind": "ROTATE",
+                            "frame": seq,
+                        }
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    write_action(1)
+    module._archive_existing_session_file(path)
+    module._archive_existing_session_file(path)
+    module._rotate_if_needed(path, max_bytes=1)
+
+    write_action(2)
+    module._archive_existing_session_file(path)
+    module._rotate_if_needed(path, max_bytes=1)
+
+    write_action(3)
+    module._archive_existing_session_file(path)
+    module._archive_existing_session_file(path)
+
+    records = module.read_recent_trace_events(10, latest_session_only=True)
+    assert [item["seq"] for item in records] == [1, 2, 3]
+    segments = module._trace_segment_paths(path, "session-a")
+    assert len(segments) == 2
+
+    replay = module.build_latest_replay_script(event_limit=10, precision_limit=10)
+    assert replay["source_session_id"] == "session-a"
+    assert replay["action_count"] == 3
+    assert [item["source_seq"] for item in replay["actions"]] == [1, 2, 3]
+
+def test_trace_new_session_archives_all_segments_without_overwriting_history(monkeypatch, tmp_path):
+    module = _load_trace_module(monkeypatch)
+    monkeypatch.setattr(module, "_SESSION_ID", "session-new")
+    path = tmp_path / "trace.jsonl"
+    segment_root = tmp_path / module._TRACE_SEGMENT_DIRNAME
+    segment_root.mkdir()
+    segment = segment_root / "trace.session-old.000000000001.jsonl"
+    segment.write_text(
+        json.dumps({"session_id": "session-old", "seq": 1}) + "\n",
+        encoding="utf-8",
+    )
+    path.write_text(
+        json.dumps({"session_id": "session-old", "seq": 2}) + "\n",
+        encoding="utf-8",
+    )
+
+    module._archive_existing_session_file(path)
+
+    previous = tmp_path / "trace.previous.jsonl"
+    rows = [
+        json.loads(line)
+        for line in previous.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item["seq"] for item in rows] == [1, 2]
+    assert not path.exists()
+    assert not segment.exists()

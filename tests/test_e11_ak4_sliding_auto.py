@@ -314,7 +314,10 @@ def test_e11_undo_ownership_remains_one_gesture_boundary() -> None:
         }
     }
     assert '{"REGISTER", "UNDO", "BLOCKING"}' in classes["BAW_OT_rigped_direct_move_axis"]
-    assert '{"REGISTER", "UNDO", "BLOCKING"}' in classes["BAW_OT_rigped_direct_rotate_axis"]
+    rotate = classes["BAW_OT_rigped_direct_rotate_axis"]
+    assert '{"REGISTER", "BLOCKING"}' in rotate
+    assert 'bpy.ops.ed.undo_push(message="AWB Rigped Direct Rotate Start")' in rotate
+    assert 'bpy.ops.ed.undo_push(message="AWB Rigped Direct Rotate")' in rotate
     assert "bpy.ops.ed.undo_push(" in classes["BAW_OT_rigped_semantic_move_axis"]
     assert 'bpy.ops.ed.undo_push(message="AWB Rigped FK Move")' in classes[
         "BAW_OT_rigped_fk_joint_move_axis"

@@ -91,7 +91,10 @@ from .rigped_contract import (
     resolve_rigped_target,
     resolve_rigped_transform,
 )
-from .rigped_humanoid_builder import configure_generated_rigped_ik_hinge_branch
+from .rigped_humanoid_builder import (
+    configure_generated_rigped_ik_hinge_branch,
+    upgrade_generated_rigped_forearm_post_solve_roll,
+)
 from .rigped_limb_math import preferred_two_bone_bend
 from .rigped_operation_domain import OperationDomainSnapshot, resolve_operation_domain
 from .rigped_sliding_evaluation import (
@@ -435,6 +438,97 @@ def _capture_control_state(resolved: ResolvedControl) -> SnapControlState:
     )
 
 
+def _replay_control_state_payload(resolved: ResolvedControl) -> dict[str, Any]:
+    state = _capture_control_state(resolved)
+    return {
+        "object": str(resolved.owner_object.name),
+        "bone": str(resolved.target.name),
+        "location": tuple(float(value) for value in state.location),
+        "rotation_mode": str(resolved.target.rotation_mode),
+        "rotation_property": str(state.rotation_property),
+        "rotation": tuple(float(value) for value in state.rotation),
+    }
+
+
+def _capture_direct_rotate_recorded_result(
+    states: tuple[DirectRotateControlState, ...],
+    sliding_syncs: tuple[SlidingRotateSyncSession, ...],
+    lower_link_z_sessions: tuple[FkTwoBoneMoveSession, ...] = (),
+) -> dict[str, Any]:
+    pose_states: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def add_control(control: ResolvedControl) -> None:
+        payload = _replay_control_state_payload(control)
+        pose_states[(payload["object"], payload["bone"])] = payload
+
+    for state in states:
+        add_control(state.control)
+
+    # Free lower-link LOCAL-Z is a two-bone swivel: the authored first/second
+    # links and terminal can all change even though only the lower link is
+    # selected. Capture the whole authored FK chain so replay reproduces the
+    # visible result instead of recording a near-no-op selected-bone state.
+    for session in lower_link_z_sessions:
+        for control in (
+            session.first_control,
+            session.second_control,
+            session.terminal_control,
+        ):
+            add_control(control)
+
+    sliding_rows: list[dict[str, Any]] = []
+    for session in sliding_syncs:
+        capability = session.capability
+        pole_target = capability.native_ik.pole_target
+        for control in (
+            *capability.fk_controls,
+            *capability.result_controls,
+            capability.authored_terminal,
+            capability.result_terminal,
+            capability.native_ik.solver_owner,
+            capability.native_ik.ik_target,
+        ):
+            add_control(control)
+        if pole_target is not None:
+            add_control(pole_target)
+
+        native_ik = capability.native_ik.constraint
+        terminal_ik = capability.terminal_ik_constraint
+        feedback_constraints = (
+            *capability.fk_copy_constraints,
+            capability.terminal_fk_constraint,
+        )
+        solver_owner = capability.native_ik.solver_owner.target
+        sliding_rows.append(
+            {
+                "mapping_id": str(capability.native_ik.mapping_id),
+                "solver_object": str(capability.native_ik.solver_owner.owner_object.name),
+                "solver_bone": str(solver_owner.name),
+                "pole_angle": float(native_ik.pole_angle),
+                "ik_influence": float(native_ik.influence),
+                "ik_mute": bool(native_ik.mute),
+                "terminal_ik_influence": float(terminal_ik.influence),
+                "terminal_ik_mute": bool(terminal_ik.mute),
+                "feedback_mutes": tuple(
+                    bool(constraint.mute)
+                    for constraint in feedback_constraints
+                ),
+                "hinge_settings": tuple(_capture_hinge_settings(solver_owner)),
+                "contact_state": (
+                    float(solver_owner[AWB_CONTACT_STATE_PROPERTY])
+                    if AWB_CONTACT_STATE_PROPERTY in solver_owner
+                    else None
+                ),
+            }
+        )
+
+    return {
+        "schema": "awb-direct-rotate-recorded-result/v1",
+        "pose_states": tuple(pose_states.values()),
+        "sliding": tuple(sliding_rows),
+    }
+
+
 def _apply_control_state(
     resolved: ResolvedControl,
     state: SnapControlState,
@@ -506,22 +600,23 @@ def _sync_generated_sliding_hinge_branch_from_public_pose(
     return bool(configure_generated_rigped_ik_hinge_branch(solver_owner, branch_sign))
 
 
-def _sync_generated_sliding_lower_roll_from_public_pose(
+def _sync_generated_sliding_calf_roll_from_public_pose(
     solver_owner,
     public_lower,
 ) -> bool:
-    """Restore keyed ForeArm/Calf axial roll as a native Sliding IK input."""
+    """Restore keyed Calf axial roll as a native Sliding IK input.
+
+    ForeArm axial roll deliberately does not pass through this path. Generated
+    arms keep the Blender two-bone IK solve untouched and apply public ForeArm Y
+    only at the post-solve public/deform seam.
+    """
 
     if str(getattr(solver_owner, "name", "")) not in {
-        "MCH_ForeArm.L",
-        "MCH_ForeArm.R",
         "MCH_Calf.L",
         "MCH_Calf.R",
     }:
         return False
     if str(getattr(public_lower, "name", "")) not in {
-        "ForeArm.L",
-        "ForeArm.R",
         "Calf.L",
         "Calf.R",
     }:
@@ -640,7 +735,7 @@ def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
                             state_bone,
                             public_lower,
                         )
-                        roll_changed = _sync_generated_sliding_lower_roll_from_public_pose(
+                        roll_changed = _sync_generated_sliding_calf_roll_from_public_pose(
                             state_bone,
                             public_lower,
                         )
@@ -673,6 +768,19 @@ def _sync_rigped_sliding_replay_display(scene, _depsgraph=None) -> None:
                         )
                 touched = branch_changed or roll_changed or feedback_changed or seed_changed or touched
                 if contact_type not in {ContactKeyType.SLIDING, ContactKeyType.PLANTED}:
+                    continue
+
+                capability = capabilities_by_solver.get(state_name)
+                if capability is not None:
+                    _sync_sliding_public_pose_from_result(
+                        bpy.context,
+                        capability,
+                        preserve_forearm_roll=(
+                            contact_type is ContactKeyType.SLIDING
+                        ),
+                        update=False,
+                    )
+                    touched = True
                     continue
 
                 public = tuple(pose.get(name) for name in public_names)
@@ -730,6 +838,40 @@ def _sync_rigped_joint_limits(scene, _depsgraph=None) -> None:
         _RIGPED_JOINT_LIMIT_SYNC_ACTIVE = False
 
 
+def _upgrade_rigped_forearm_post_solve_roll_for_scene(scene) -> bool:
+    """Upgrade existing generated Rigpeds to the ForeArm post-solve roll seam."""
+
+    if scene is None:
+        return False
+    changed = False
+    for rig in getattr(scene, "objects", ()):
+        if (
+            getattr(rig, "type", None) != "ARMATURE"
+            or getattr(rig, "pose", None) is None
+            or not hasattr(rig, "get")
+            or rig.get(RIGPED_SETUP_PROPERTY) is None
+        ):
+            continue
+        try:
+            changed = (
+                bool(upgrade_generated_rigped_forearm_post_solve_roll(scene, rig))
+                or changed
+            )
+        except (KeyError, RuntimeError, TypeError, ValueError, ReferenceError) as exc:
+            trace_exception(
+                "WARNING",
+                "FOREARM_POST_SOLVE_ROLL_UPGRADE_FAILED",
+                exc,
+                context=getattr(bpy, "context", None),
+                rig_object=str(getattr(rig, "name", "") or ""),
+            )
+    if changed:
+        view_layer = getattr(bpy.context, "view_layer", None)
+        if view_layer is not None and getattr(bpy.context, "scene", None) is scene:
+            view_layer.update()
+    return changed
+
+
 @persistent
 def _sync_rigped_replay_load_post(*_args: object) -> None:
     """Reconcile derived Rigped replay display immediately after a .blend load."""
@@ -740,6 +882,7 @@ def _sync_rigped_replay_load_post(*_args: object) -> None:
         scene = scenes[0] if scenes else None
     if scene is None:
         return
+    _upgrade_rigped_forearm_post_solve_roll_for_scene(scene)
     _sync_rigped_sliding_replay_display(scene)
     _sync_rigped_joint_limits(scene)
 
@@ -805,6 +948,7 @@ def register_rigped_sliding_replay_handler() -> None:
     # playback boundary; live authoring operators enforce limits themselves.
     scene = getattr(bpy.context, "scene", None)
     if scene is not None:
+        _upgrade_rigped_forearm_post_solve_roll_for_scene(scene)
         _sync_rigped_sliding_replay_display(scene)
         _sync_rigped_joint_limits(scene)
 
@@ -1066,6 +1210,30 @@ def _orientation_axes_for_control(context, active: ResolvedControl) -> dict[str,
         "Y": Vector(basis.col[1]).normalized(),
         "Z": Vector(basis.col[2]).normalized(),
     }
+
+
+def _semantic_rotate_axis_world(active: ResolvedControl, axis_name: str) -> Vector | None:
+    """Return the frozen semantic-local Rotate axis in world space.
+
+    Transform orientation controls the gizmo/input frame only. X/Y/Z Rotate
+    semantics always use the active control's own local axes so LOCAL/GLOBAL
+    gestures author the same joint DOF.
+    """
+
+    axis = str(axis_name)
+    if axis not in {"X", "Y", "Z"}:
+        return None
+    if isinstance(active.target, bpy.types.PoseBone):
+        basis = (
+            active.owner_object.matrix_world @ active.target.matrix
+        ).to_3x3().normalized()
+    else:
+        basis = active.target.matrix_world.to_3x3().normalized()
+    index = {"X": 0, "Y": 1, "Z": 2}[axis]
+    result = Vector(basis.col[index])
+    if result.length <= 1e-9:
+        return None
+    return result.normalized()
 
 
 def direct_transform_pivot(context) -> Vector | None:
@@ -2364,14 +2532,89 @@ def cancel_semantic_move_domains(
     cancel_fk_joint_moves(context, fk_sessions)
 
 
+def _basis_with_local_y_twist(
+    basis: Matrix,
+    desired_long_angle: float,
+) -> Matrix:
+    """Replace only one basis' local-Y twist while preserving its solved remainder."""
+
+    current = basis.to_quaternion().normalized()
+    current_long = _signed_twist_angle(current, _RIGPED_LOCAL_AXES["Y"])
+    without_long = (
+        current @ Quaternion(_RIGPED_LOCAL_AXES["Y"], current_long).inverted()
+    ).normalized()
+    desired = (
+        without_long @ Quaternion(_RIGPED_LOCAL_AXES["Y"], float(desired_long_angle))
+    ).normalized()
+    return Matrix.LocRotScale(
+        basis.to_translation(),
+        desired,
+        basis.to_scale(),
+    )
+
+
+def _sliding_public_display_from_result(
+    capability: LimbRepresentationCapability,
+    solved_result,
+    *,
+    authored_lower_basis: Matrix | None = None,
+    preserve_forearm_roll: bool = False,
+):
+    """Derive Sliding display, optionally preserving ForeArm Y post-solve."""
+
+    public_display = derive_public_display(capability, solved_result)
+    public_lower = capability.fk_controls[1].target
+    if (
+        str(getattr(public_lower, "name", "")) not in {"ForeArm.L", "ForeArm.R"}
+        or (authored_lower_basis is None and not preserve_forearm_roll)
+    ):
+        return public_display
+
+    authored_basis = (
+        authored_lower_basis.copy()
+        if authored_lower_basis is not None
+        else public_lower.matrix_basis.copy()
+    )
+    authored_hinge = _hinge_state_from_basis(public_lower, authored_basis)
+    if authored_hinge is None:
+        return public_display
+
+    second_basis = _basis_with_local_y_twist(
+        public_display.second_basis,
+        float(authored_hinge[1]),
+    )
+    second_pose = _pose_matrix_from_basis(
+        capability.fk_controls[1],
+        second_basis,
+        parent_pose_matrix=solved_result.first_pose,
+    )
+    terminal_basis = native_pose_basis_from_matrix(
+        capability.authored_terminal.target,
+        solved_result.terminal_pose,
+        parent_pose_matrix=second_pose,
+    )
+    return replace(
+        public_display,
+        second_basis=second_basis,
+        terminal_basis=terminal_basis,
+    )
+
+
 def _sync_sliding_public_pose_from_result(
     context,
     capability: LimbRepresentationCapability,
     *,
+    authored_lower_basis: Matrix | None = None,
+    preserve_forearm_roll: bool = False,
     update: bool = True,
 ) -> None:
     solved_result = capture_native_solved_result(capability)
-    public_display = derive_public_display(capability, solved_result)
+    public_display = _sliding_public_display_from_result(
+        capability,
+        solved_result,
+        authored_lower_basis=authored_lower_basis,
+        preserve_forearm_roll=preserve_forearm_roll,
+    )
 
     first_state = _state_for_pose_basis(
         capability.fk_controls[0],
@@ -2381,9 +2624,15 @@ def _sync_sliding_public_pose_from_result(
         capability.fk_controls[1],
         public_display.second_basis,
     )
-    terminal_state = _state_for_pose_basis(
+    second_pose = _pose_matrix_from_basis(
+        capability.fk_controls[1],
+        public_display.second_basis,
+        parent_pose_matrix=solved_result.first_pose,
+    )
+    terminal_state = _state_for_pose_matrix(
         capability.authored_terminal,
-        public_display.terminal_basis,
+        solved_result.terminal_pose,
+        parent_pose_matrix=second_pose,
     )
     _apply_control_state(
         capability.fk_controls[0],
@@ -2409,17 +2658,49 @@ def _sync_sliding_public_pose_from_result(
 
 def _sliding_public_pose_residual(
     capability: LimbRepresentationCapability,
+    *,
+    preserve_forearm_roll: bool = False,
 ) -> tuple[float, float]:
+    public_lower = capability.fk_controls[1].target
+    if (
+        preserve_forearm_roll
+        and str(getattr(public_lower, "name", "")) in {"ForeArm.L", "ForeArm.R"}
+    ):
+        solved_result = capture_native_solved_result(capability)
+        public_display = _sliding_public_display_from_result(
+            capability,
+            solved_result,
+            preserve_forearm_roll=True,
+        )
+        expected_second = _pose_matrix_from_basis(
+            capability.fk_controls[1],
+            public_display.second_basis,
+            parent_pose_matrix=solved_result.first_pose,
+        )
+        pairs = (
+            (capability.fk_controls[0].target.matrix, solved_result.first_pose),
+            (capability.fk_controls[1].target.matrix, expected_second),
+            (capability.authored_terminal.target.matrix, solved_result.terminal_pose),
+        )
+    else:
+        pairs = tuple(
+            (public_control.target.matrix, result_control.target.matrix)
+            for public_control, result_control in zip(
+                capability.fk_controls,
+                capability.result_controls,
+                strict=True,
+            )
+        ) + (
+            (
+                capability.authored_terminal.target.matrix,
+                capability.result_terminal.target.matrix,
+            ),
+        )
+
     max_position = 0.0
     max_rotation = 0.0
-    pairs = tuple(
-        zip(capability.fk_controls, capability.result_controls, strict=True)
-    ) + ((capability.authored_terminal, capability.result_terminal),)
-    for public_control, result_control in pairs:
-        position, rotation = _pose_residual(
-            public_control.target.matrix,
-            result_control.target.matrix,
-        )
+    for actual, expected in pairs:
+        position, rotation = _pose_residual(actual, expected)
         max_position = max(max_position, position)
         max_rotation = max(max_rotation, rotation)
     return max_position, max_rotation
@@ -6516,14 +6797,13 @@ def _mapped_direct_rotate_axis(
     ):
         opposite = _opposite_control_name(str(active_target.name))
         if opposite is not None and str(target_target.name) == opposite:
-            lower_link_pair = {
-                str(active_target.name),
-                str(target_target.name),
-            } <= {"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}
+            # A Rotate axis is an axial vector under reflection. Lower-link
+            # LOCAL Y is no exception: treating it as a polar vector makes the
+            # opposite ForeArm/Calf roll in the same anatomical direction.
             mirrored = _mirror_control_world_vector(
                 target,
                 axis_world,
-                axial=not (lower_link_pair and axis_name == "Y"),
+                axial=True,
             )
             if mirrored.length > 1e-9:
                 mirrored.normalize()
@@ -7288,6 +7568,7 @@ def _refresh_current_sliding_public_overlays(
     capabilities: tuple[LimbRepresentationCapability, ...] | None = None,
     max_passes: int = 6,
     allow_seed: bool = True,
+    preserve_forearm_roll: bool = False,
 ) -> int:
     if capabilities is None:
         capabilities = _current_sliding_capabilities(context)
@@ -7328,6 +7609,7 @@ def _refresh_current_sliding_public_overlays(
             _sync_sliding_public_pose_from_result(
                 context,
                 capability,
+                preserve_forearm_roll=preserve_forearm_roll,
                 update=False,
             )
         context.view_layer.update()
@@ -7336,7 +7618,10 @@ def _refresh_current_sliding_public_overlays(
         last_position = 0.0
         last_rotation = 0.0
         for capability in capabilities:
-            position, rotation = _sliding_public_pose_residual(capability)
+            position, rotation = _sliding_public_pose_residual(
+                capability,
+                preserve_forearm_roll=preserve_forearm_roll,
+            )
             last_position = max(last_position, position)
             last_rotation = max(last_rotation, rotation)
             if rotation > rotation_tolerance:
@@ -7353,7 +7638,10 @@ def _refresh_current_sliding_public_overlays(
             context.view_layer.update()
             stable = True
             for capability in capabilities:
-                position, rotation = _sliding_public_pose_residual(capability)
+                position, rotation = _sliding_public_pose_residual(
+                    capability,
+                    preserve_forearm_roll=preserve_forearm_roll,
+                )
                 last_position = max(last_position, position)
                 last_rotation = max(last_rotation, rotation)
                 if rotation > rotation_tolerance:
@@ -7769,8 +8057,6 @@ def _restore_direct_rotate_sliding_syncs(
 
 
 def _lower_limb_special_z_session(context, active: ResolvedControl, axis_world: Vector) -> FkTwoBoneMoveSession | None:
-    if str(context.scene.transform_orientation_slots[0].type) != "LOCAL":
-        return None
     pose_bone = active.target
     if not isinstance(pose_bone, bpy.types.PoseBone):
         return None
@@ -7799,6 +8085,68 @@ def _lower_limb_special_z_session(context, active: ResolvedControl, axis_world: 
         resolved,
         allow_sliding_lower_swivel=(resolved.contact_type is ContactKeyType.SLIDING),
     )
+
+
+def _lower_link_local_pair_anchor_name(
+    active_name: str,
+    target_name: str,
+    selected_names: frozenset[str],
+) -> str:
+    """Choose the selected same-side counterpart that owns paired LOCAL-Z parity."""
+
+    active = str(active_name)
+    target = str(target_name)
+    active_left = active.endswith(".L")
+    active_right = active.endswith(".R")
+    target_left = target.endswith(".L")
+    target_right = target.endswith(".R")
+    if not (active_left or active_right) or not (target_left or target_right):
+        return target
+    if active_left == target_left and active_right == target_right:
+        return target
+    opposite = _opposite_control_name(target)
+    if opposite is None or opposite not in selected_names:
+        return target
+    return opposite
+
+
+def _bounded_four_limb_local_y_roll_angle(
+    states: tuple[DirectRotateControlState, ...],
+    requested_angle: float,
+    *,
+    active_name: str,
+    selected_names: frozenset[str],
+) -> float:
+    """Clamp one shared four-limb LOCAL-Y roll without losing pair parity."""
+
+    lower = -float("inf")
+    upper = float("inf")
+    found = False
+    for state in states:
+        pose_bone = state.control.target
+        hinge_state = state.hinge_state
+        if not isinstance(pose_bone, bpy.types.PoseBone) or hinge_state is None:
+            continue
+        lower_name = str(pose_bone.name)
+        limits = _RIGPED_HINGE_JOINT_LIMITS.get(lower_name)
+        if limits is None:
+            continue
+        anchor_name = _lower_link_local_pair_anchor_name(
+            active_name,
+            lower_name,
+            selected_names,
+        )
+        pair_sign = 1.0 if anchor_name == lower_name else -1.0
+        start_long = float(hinge_state[1])
+        roll_limit = float(limits[3])
+        a = (-roll_limit - start_long) / pair_sign
+        b = (roll_limit - start_long) / pair_sign
+        lower = max(lower, min(a, b))
+        upper = min(upper, max(a, b))
+        found = True
+    if not found or lower > upper:
+        return 0.0
+    return _clamp_scalar(float(requested_angle), lower, upper)
 
 
 def _lower_limb_special_z_axis_sign(
@@ -7859,217 +8207,17 @@ def _apply_lower_limb_special_z_rotation(
     return applied
 
 
-def _quaternion_rotation_vector_components(
-    rotation: tuple[float, float, float, float],
-) -> tuple[float, float, float]:
-    """Return a branch-preserving rotation vector for an (w, x, y, z) quaternion."""
-
-    w, x, y, z = (float(component) for component in rotation)
-    magnitude = sqrt(w * w + x * x + y * y + z * z)
-    if magnitude <= 1e-12:
-        return (0.0, 0.0, 0.0)
-    w, x, y, z = (component / magnitude for component in (w, x, y, z))
-    vector_length = sqrt(x * x + y * y + z * z)
-    if vector_length <= 1e-12:
-        return (0.0, 0.0, 0.0)
-    angle = 2.0 * atan2(vector_length, w)
-    scale = angle / vector_length
-    return (x * scale, y * scale, z * scale)
-
-
-def _damped_two_axis_rotation_step(
-    swivel_error: float,
-    roll_error: float,
-    generator_alignment: float,
-    damping: float,
-) -> tuple[float, float]:
-    """Solve one bounded-size DLS update from two unit world generators."""
-
-    alignment = max(-1.0, min(1.0, float(generator_alignment)))
-    damping_sq = max(1e-8, float(damping) * float(damping))
-    diagonal = 1.0 + damping_sq
-    determinant = diagonal * diagonal - alignment * alignment
-    if determinant <= 1e-12:
-        return (0.0, 0.0)
-    first = (
-        diagonal * float(swivel_error) - alignment * float(roll_error)
-    ) / determinant
-    second = (
-        diagonal * float(roll_error) - alignment * float(swivel_error)
-    ) / determinant
-    return (float(first), float(second))
-
-
-@dataclass(frozen=True, slots=True)
-class SlidingGlobalRotateProjection:
-    swivel_angle: float
-    roll_angle: float
-    residual_radians: float
-    conditioning: float
-
-
-def _project_global_rotation_to_sliding_lower_dofs(
-    session: FkTwoBoneMoveSession,
-    state: DirectRotateControlState,
-    axis_world: Vector,
-    angle: float,
-) -> SlidingGlobalRotateProjection:
-    """Project one GLOBAL Rotate gesture onto Sliding swivel + axial-roll DOF.
-
-    Refine the two actual world rotation generators from the zero-DOF branch.
-    The swivel is around root-to-terminal; axial roll is around the lower-link
-    local Y after that swivel. Damping leaves unreachable orientation as a
-    measured residual instead of amplifying a near-singular inverse.
-    """
-
-    requested_axis = Vector(axis_world)
-    if requested_axis.length <= 1e-9:
-        return SlidingGlobalRotateProjection(0.0, 0.0, 0.0, 0.0)
-    requested_axis.normalize()
-    requested_rotation = Quaternion(requested_axis, float(angle))
-
-    root = Vector(session.root_world)
-    end = Vector(session.end_world)
-    swivel_axis = end - root
-    if swivel_axis.length <= 1e-9:
-        return SlidingGlobalRotateProjection(
-            0.0,
-            0.0,
-            min(2.0 * pi, abs(float(angle))),
-            0.0,
-        )
-    swivel_axis.normalize()
-
-    owner_world3 = session.second_control.owner_object.matrix_world.to_3x3()
-    start_world_basis = (
-        owner_world3 @ session.second_start_matrix.to_3x3()
-    ).normalized()
-    start_world_rotation = start_world_basis.to_quaternion().normalized()
-    desired_world_rotation = (
-        requested_rotation @ start_world_rotation
-    ).normalized()
-
-    pose_bone = state.control.target
-    hinge_state = state.hinge_state
-    limits = (
-        _RIGPED_HINGE_JOINT_LIMITS.get(str(pose_bone.name))
-        if isinstance(pose_bone, bpy.types.PoseBone)
-        else None
-    )
-    if hinge_state is None or limits is None:
-        return SlidingGlobalRotateProjection(
-            0.0,
-            0.0,
-            min(2.0 * pi, abs(float(angle))),
-            0.0,
-        )
-
-    swivel_bound = pi - radians(0.25)
-    start_long = float(hinge_state[1])
-    roll_limit = float(limits[3])
-    roll_minimum = -roll_limit - start_long
-    roll_maximum = roll_limit - start_long
-    local_y = _RIGPED_LOCAL_AXES["Y"]
-    swivel_angle = 0.0
-    roll_angle = 0.0
-    conditioning = 0.0
-
-    for _iteration in range(24):
-        swivel_world_rotation = Quaternion(swivel_axis, swivel_angle)
-        post_swivel_rotation = (
-            swivel_world_rotation @ start_world_rotation
-        ).normalized()
-        roll_generator = post_swivel_rotation @ local_y
-        if roll_generator.length <= 1e-9:
-            break
-        roll_generator.normalize()
-        alignment = max(
-            -1.0,
-            min(1.0, float(swivel_axis.dot(roll_generator))),
-        )
-        alignment_magnitude = abs(alignment)
-        conditioning = sqrt(
-            max(0.0, 1.0 - alignment_magnitude)
-            / max(1e-12, 1.0 + alignment_magnitude)
-        )
-
-        predicted_world_rotation = (
-            post_swivel_rotation
-            @ Quaternion(local_y, roll_angle)
-        ).normalized()
-        error_rotation = (
-            desired_world_rotation @ predicted_world_rotation.conjugated()
-        ).normalized()
-        error = Vector(
-            _quaternion_rotation_vector_components(
-                tuple(float(component) for component in error_rotation)
-            )
-        )
-        if error.length <= 1e-6:
-            break
-
-        damping = 0.02 + (1.0 - conditioning) * 0.28
-        swivel_step, roll_step = _damped_two_axis_rotation_step(
-            float(swivel_axis.dot(error)),
-            float(roll_generator.dot(error)),
-            alignment,
-            damping,
-        )
-        largest_step = max(abs(swivel_step), abs(roll_step))
-        if largest_step > 0.35:
-            scale = 0.35 / largest_step
-            swivel_step *= scale
-            roll_step *= scale
-
-        gesture_bound = max(1e-6, abs(float(angle)) * 2.0)
-        next_swivel = _clamp_scalar(
-            swivel_angle + swivel_step,
-            max(-swivel_bound, -gesture_bound),
-            min(swivel_bound, gesture_bound),
-        )
-        next_roll = _clamp_scalar(
-            roll_angle + roll_step,
-            max(roll_minimum, -gesture_bound),
-            min(roll_maximum, gesture_bound),
-        )
-        if (
-            abs(next_swivel - swivel_angle) <= 1e-8
-            and abs(next_roll - roll_angle) <= 1e-8
-        ):
-            break
-        swivel_angle = next_swivel
-        roll_angle = next_roll
-
-    final_swivel_rotation = Quaternion(swivel_axis, swivel_angle)
-    final_post_swivel_rotation = (
-        final_swivel_rotation @ start_world_rotation
-    ).normalized()
-    final_rotation = (
-        final_post_swivel_rotation @ Quaternion(local_y, roll_angle)
-    ).normalized()
-    final_error = (
-        desired_world_rotation @ final_rotation.conjugated()
-    ).normalized()
-    residual = Vector(
-        _quaternion_rotation_vector_components(
-            tuple(float(component) for component in final_error)
-        )
-    ).length
-
-    return SlidingGlobalRotateProjection(
-        float(swivel_angle),
-        float(roll_angle),
-        min(2.0 * pi, max(0.0, float(residual))),
-        max(0.0, min(1.0, float(conditioning))),
-    )
-
-
 class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
     """Fit-style visual Rotate modal with simultaneous Rigped multi-preview."""
 
     bl_idname = "baw.rigped_direct_rotate_axis"
     bl_label = "Rotate Rigped Control"
-    bl_options: ClassVar[set[str]] = {"REGISTER", "UNDO", "BLOCKING"}
+    # This modal owns live preview edits plus optional release-time Auto/Contact
+    # authoring. Frame navigation and the AWB AUTO toggle are intentionally not
+    # undoable, so Blender's native UNDO boundary can jump back to an older
+    # global snapshot instead of the exact gesture-start state. Own the start
+    # and final checkpoints explicitly, matching FK Move.
+    bl_options: ClassVar[set[str]] = {"REGISTER", "BLOCKING"}
 
     axis: EnumProperty(
         items=(
@@ -8089,6 +8237,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
     _sliding_affected_capabilities: tuple[LimbRepresentationCapability, ...] = ()
     _sliding_seed_snapshots: tuple[SlidingHiddenSeedSnapshot, ...] = ()
     _sliding_dependency_guards: tuple[SlidingDependencyGuard, ...] = ()
+    _gesture_axis_world = Vector((0.0, 0.0, 1.0))
     _axis_world = Vector((0.0, 0.0, 1.0))
     _pivot = Vector((0.0, 0.0, 0.0))
     _start_rotation_vector = Vector((1.0, 0.0, 0.0))
@@ -8107,14 +8256,10 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
     _auto_direct_plan: RigpedAutoDirectRotatePlan | None = None
     _auto_contact_batch_plan: RigpedAutoContactBatchPlan | None = None
     _deferred_auto_contact_mapping_ids: tuple[str, ...] = ()
+    _forearm_post_solve_roll_overlay: bool = False
     _forearm_special_session: FkTwoBoneMoveSession | None = None
     _single_lower_link_z_axis_sign: float = 1.0
     _lower_link_z_sessions: tuple[tuple[FkTwoBoneMoveSession, float, bool], ...] = ()
-    _sliding_global_lower_sessions: tuple[
-        tuple[FkTwoBoneMoveSession, SlidingRotateSyncSession], ...
-    ] = ()
-    _sliding_global_projected_dofs: tuple[tuple[str, float, float], ...] = ()
-    _sliding_global_projection_diagnostics: tuple[tuple[str, float, float], ...] = ()
     _trace_operation_id: str | None = None
 
     trackball_radius_px: FloatProperty(
@@ -8179,13 +8324,18 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         active = controls[0]
         if not isinstance(active.target, bpy.types.PoseBone):
             return {"CANCELLED"}
-        axis = (
+        gesture_axis = (
             _view_axis(context)
             if self.axis in {"VIEW", "FREE"}
             else axes.get(self.axis)
         )
-        if axis is None or axis.length <= 1e-9:
+        if gesture_axis is None or gesture_axis.length <= 1e-9:
             return {"CANCELLED"}
+        semantic_axis = Vector(gesture_axis)
+        if self.axis in {"X", "Y", "Z"}:
+            semantic_axis = _semantic_rotate_axis_world(active, self.axis)
+            if semantic_axis is None:
+                return {"CANCELLED"}
 
         selected_lower_names = tuple(
             sorted(
@@ -8195,21 +8345,40 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             )
         )
         full_four_local_x_gesture = (
-            str(context.scene.transform_orientation_slots[0].type) == "LOCAL"
-            and self.axis == "X"
+            self.axis == "X"
             and selected_lower_names
             == ("Calf.L", "Calf.R", "ForeArm.L", "ForeArm.R")
         )
         if full_four_local_x_gesture:
+            full_four_resolutions = tuple(
+                resolved
+                for resolved in _selected_semantic_move_resolutions(context)
+                if str(resolved.active_control.target.name) in selected_lower_names
+            )
+            full_four_sliding_local_x_gesture = (
+                len(full_four_resolutions) == len(controls)
+                and all(
+                    resolved.contact_type is ContactKeyType.SLIDING
+                    for resolved in full_four_resolutions
+                )
+            )
             active_hinge_state = _hinge_state_from_basis(
                 active.target,
                 active.target.matrix_basis,
             )
             if active_hinge_state is not None:
-                axis = Vector(axis) * _lower_link_local_x_branch_sign(
-                    str(active.target.name),
-                    float(active_hinge_state[0]),
+                hinge_angle = (
+                    0.0
+                    if full_four_sliding_local_x_gesture
+                    else float(active_hinge_state[0])
                 )
+                branch_sign = _lower_link_local_x_branch_sign(
+                    str(active.target.name),
+                    hinge_angle,
+                )
+                semantic_axis = Vector(semantic_axis) * branch_sign
+                if str(context.scene.transform_orientation_slots[0].type) == "LOCAL":
+                    gesture_axis = Vector(gesture_axis) * branch_sign
         pivot = _control_pivot_world(active)
         if self.axis == "FREE":
             region_data = getattr(context, "region_data", None)
@@ -8221,7 +8390,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             start = _rotation_vector(
                 context,
                 pivot,
-                Vector(axis),
+                Vector(gesture_axis),
                 event.mouse_region_x,
                 event.mouse_region_y,
             )
@@ -8254,14 +8423,11 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         self._forearm_special_session = None
         self._single_lower_link_z_axis_sign = 1.0
         self._lower_link_z_sessions = ()
-        self._sliding_global_lower_sessions = ()
-        self._sliding_global_projected_dofs = ()
-        self._sliding_global_projection_diagnostics = ()
         try:
             self._forearm_special_session = _lower_limb_special_z_session(
                 context,
                 active,
-                Vector(axis),
+                Vector(semantic_axis),
             )
         except RigpedSemanticMoveError as exc:
             _report_operator_error(self, context, exc)
@@ -8272,7 +8438,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             self._single_lower_link_z_axis_sign = (
                 _lower_limb_special_z_axis_sign(
                     self._forearm_special_session,
-                    Vector(axis),
+                    Vector(semantic_axis),
                 )
             )
         if self._forearm_special_session is not None and len(self._states) > 1:
@@ -8306,61 +8472,9 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             )
         )
         lower_link_set = {"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}
-        sliding_global_supported_selection = (
-            (
-                len(lower_link_names) == 1
-                and lower_link_names[0] in lower_link_set
-            )
-            or lower_link_names
-            in {
-                ("Calf.L", "Calf.R"),
-                ("ForeArm.L", "ForeArm.R"),
-            }
-        )
-        if (
-            str(context.scene.transform_orientation_slots[0].type) == "GLOBAL"
-            and self.axis in {"X", "Y", "Z"}
-            and sliding_global_supported_selection
-            and len(self._states) == len(self._sliding_syncs)
-            and len(self._states) == len(lower_link_resolutions)
-            and len(lower_link_names) == len(self._states)
-        ):
-            sync_by_mapping = {
-                str(session.capability.native_ik.mapping_id): session
-                for session in self._sliding_syncs
-            }
-            global_rows: list[
-                tuple[FkTwoBoneMoveSession, SlidingRotateSyncSession]
-            ] = []
-            try:
-                for resolved in lower_link_resolutions:
-                    if resolved.contact_type is not ContactKeyType.SLIDING:
-                        global_rows = []
-                        break
-                    sync_session = sync_by_mapping.get(
-                        str(resolved.capability.native_ik.mapping_id)
-                    )
-                    if sync_session is None:
-                        global_rows = []
-                        break
-                    global_rows.append(
-                        (
-                            _begin_fk_two_bone_move_for_resolution(
-                                resolved,
-                                allow_sliding_lower_swivel=True,
-                            ),
-                            sync_session,
-                        )
-                    )
-            except RigpedSemanticMoveError as exc:
-                _report_operator_error(self, context, exc)
-                global_rows = []
-            if len(global_rows) == len(self._states):
-                self._sliding_global_lower_sessions = tuple(global_rows)
 
         if (
-            str(context.scene.transform_orientation_slots[0].type) == "LOCAL"
-            and self.axis == "Z"
+            self.axis == "Z"
             and len(self._states) > 1
             and len(self._states) == len(lower_link_resolutions)
             and len(lower_link_names) == len(self._states)
@@ -8370,7 +8484,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 active.owner_object.matrix_world @ active.target.matrix
             ).to_3x3().normalized()
             active_local_z = Vector(active_basis_world.col[2])
-            requested_axis = Vector(axis)
+            requested_axis = Vector(semantic_axis)
             if active_local_z.length > 1e-9 and requested_axis.length > 1e-9:
                 active_local_z.normalize()
                 requested_axis.normalize()
@@ -8380,19 +8494,22 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                         for state in self._states
                     }
                     multi_rows: list[tuple[FkTwoBoneMoveSession, float, bool]] = []
+                    multi_inputs: list[
+                        tuple[ResolvedControl, str, FkTwoBoneMoveSession, Vector, bool]
+                    ] = []
                     try:
                         for resolved in lower_link_resolutions:
                             if resolved.contact_type not in {
                                 ContactKeyType.FREE,
                                 ContactKeyType.SLIDING,
                             }:
-                                multi_rows = []
+                                multi_inputs = []
                                 break
                             lower_control = resolved.active_control
                             lower_name = str(lower_control.target.name)
                             state = state_by_key.get(runtime_control_key(lower_control))
                             if state is None or lower_name not in lower_link_set:
-                                multi_rows = []
+                                multi_inputs = []
                                 break
                             special_session = _begin_fk_two_bone_move_for_resolution(
                                 resolved,
@@ -8400,27 +8517,79 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                                     resolved.contact_type is ContactKeyType.SLIDING
                                 ),
                             )
-                            mapped_axis = _mapped_direct_rotate_axis(
-                                active,
-                                lower_control,
-                                Vector(axis),
-                                mirror_opposites=True,
-                                axis_name="Z",
+                            frozen_basis_world = (
+                                lower_control.owner_object.matrix_world.to_3x3()
+                                @ state.start_matrix.to_3x3().normalized()
                             )
-                            axis_sign = _lower_limb_special_z_axis_sign(
-                                special_session,
-                                mapped_axis,
-                            )
-                            multi_rows.append(
+                            local_z_world = Vector(frozen_basis_world.col[2])
+                            if local_z_world.length <= 1e-9:
+                                multi_inputs = []
+                                break
+                            local_z_world.normalize()
+                            multi_inputs.append(
                                 (
+                                    lower_control,
+                                    lower_name,
                                     special_session,
-                                    axis_sign,
+                                    local_z_world,
                                     resolved.contact_type is ContactKeyType.FREE,
                                 )
                             )
                     except RigpedSemanticMoveError as exc:
                         _report_operator_error(self, context, exc)
-                        multi_rows = []
+                        multi_inputs = []
+
+                    if len(multi_inputs) == len(self._states):
+                        active_name = str(active.target.name)
+                        selected_lower_names = frozenset(lower_link_names)
+                        frozen_local_z_by_name = {
+                            lower_name: Vector(local_z_world)
+                            for (
+                                _lower_control,
+                                lower_name,
+                                _special_session,
+                                local_z_world,
+                                _terminal_follows_second,
+                            ) in multi_inputs
+                        }
+                        for (
+                            lower_control,
+                            lower_name,
+                            special_session,
+                            local_z_world,
+                            terminal_follows_second,
+                        ) in multi_inputs:
+                            input_axis_world = Vector(local_z_world)
+                            anchor_name = _lower_link_local_pair_anchor_name(
+                                active_name,
+                                lower_name,
+                                selected_lower_names,
+                            )
+                            if anchor_name != lower_name:
+                                anchor_axis = frozen_local_z_by_name.get(anchor_name)
+                                if anchor_axis is None:
+                                    multi_rows = []
+                                    break
+                                input_axis_world = _mirror_control_world_vector(
+                                    lower_control,
+                                    anchor_axis,
+                                    axial=True,
+                                )
+                                if input_axis_world.length <= 1e-9:
+                                    multi_rows = []
+                                    break
+                                input_axis_world.normalize()
+                            axis_sign = _lower_limb_special_z_axis_sign(
+                                special_session,
+                                input_axis_world,
+                            )
+                            multi_rows.append(
+                                (
+                                    special_session,
+                                    axis_sign,
+                                    terminal_follows_second,
+                                )
+                            )
                     if len(multi_rows) == len(self._states):
                         self._lower_link_z_sessions = tuple(multi_rows)
 
@@ -8481,12 +8650,25 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         self._auto_direct_plan = None
         self._auto_contact_batch_plan = None
         self._deferred_auto_contact_mapping_ids = ()
+        self._orientation = str(context.scene.transform_orientation_slots[0].type)
+        forearm_post_solve_roll_auto = (
+            self.axis == "Y"
+            and self._orientation == "LOCAL"
+            and lower_link_names == ("ForeArm.L", "ForeArm.R")
+            and len(self._states) == len(self._sliding_syncs) == 2
+        )
+        self._forearm_post_solve_roll_overlay = forearm_post_solve_roll_auto
         if bool(getattr(context.scene, "baw_auto_key_enabled", False)):
             auto_context = control_context_for_context(context)
             auto_limb_context, auto_direct_context = _direct_rotate_auto_contexts(
                 context.scene,
                 auto_context,
             )
+            if forearm_post_solve_roll_auto:
+                # Pure Sliding ForeArm axial roll is public/deform authority.
+                # Keep Contact state and the hidden IK target/pole bundle untouched.
+                auto_limb_context = None
+                auto_direct_context = auto_context
             operation_id = f"rigped-auto-rotate:{uuid4().hex}"
             mapping_ids = (
                 selected_contact_mapping_ids(context.scene, auto_limb_context)
@@ -8537,6 +8719,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     auto_direct_context,
                     operation_id=f"{operation_id}:direct",
                     active_only=len(auto_direct_context.controls) == 1,
+                    include_rigped_free_marker=not forearm_post_solve_roll_auto,
                 )
                 if not direct.ok or direct.plan is None:
                     detail = (
@@ -8555,7 +8738,8 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                         self._auto_direct_plan,
                         allow_storage_rebind=True,
                     )
-        self._axis_world = Vector(axis).normalized()
+        self._gesture_axis_world = Vector(gesture_axis).normalized()
+        self._axis_world = Vector(semantic_axis).normalized()
         self._pivot = Vector(pivot)
         self._start_rotation_vector = Vector(start)
         self._previous_rotation_vector = Vector(start)
@@ -8568,7 +8752,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             tangent = linear_roll_screen_tangent(
                 context,
                 self._pivot,
-                self._axis_world,
+                self._gesture_axis_world,
                 self._previous_rotation_mouse,
                 self._start_rotation_vector,
             )
@@ -8582,7 +8766,6 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         self._rotate_reference_radius = 0.0
         self._raw_angle = 0.0
         self._current_angle = 0.0
-        self._orientation = str(context.scene.transform_orientation_slots[0].type)
         selected_pose_names = tuple(
             sorted(
                 str(state.control.target.name)
@@ -8590,11 +8773,25 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 if isinstance(state.control.target, bpy.types.PoseBone)
             )
         )
+        sliding_thigh_z = (
+            self.axis == "Z"
+            and bool(self._sliding_syncs)
+            and len(self._states) == len(self._sliding_syncs)
+            and bool(selected_pose_names)
+            and all(name in {"Thigh.L", "Thigh.R"} for name in selected_pose_names)
+        )
+        paired_calf_z = (
+            self.axis == "Z"
+            and selected_pose_names == ("Calf.L", "Calf.R")
+        )
         self._angle_sign = (
             -1.0
-            if self._orientation == "LOCAL"
-            and self.axis == "Z"
-            and selected_pose_names == ("Clavicle.L", "Clavicle.R")
+            if (
+                self.axis == "Z"
+                and selected_pose_names == ("Clavicle.L", "Clavicle.R")
+            )
+            or sliding_thigh_z
+            or paired_calf_z
             else 1.0
         )
         if self.axis != "FREE":
@@ -8642,7 +8839,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     probe_vector = Matrix.Rotation(
                         probe_angle,
                         3,
-                        self._axis_world,
+                        self._gesture_axis_world,
                     ) @ Vector(start)
                     probe_end = location_3d_to_region_2d(
                         context.region,
@@ -8677,6 +8874,8 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             route="DIRECT_ROTATE",
             axis=self.axis,
             authority=authority,
+            orientation=self._orientation,
+            forearm_post_solve_roll_overlay=self._forearm_post_solve_roll_overlay,
             auto_key=bool(getattr(context.scene, "baw_auto_key_enabled", False)),
             sliding_sync_count=len(self._sliding_syncs),
             sliding_guard_count=len(self._sliding_guard_capabilities),
@@ -8757,6 +8956,19 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             if abs(self._current_angle) <= 1e-9:
                 return
 
+        calf_local_y_noop = (
+            self.axis == "Y"
+            and self._orientation == "LOCAL"
+            and all(
+                isinstance(state.control.target, bpy.types.PoseBone)
+                and str(state.control.target.name) in {"Calf.L", "Calf.R"}
+                for state in self._states
+            )
+        )
+        if calf_local_y_noop:
+            self._current_angle = 0.0
+            return
+
         if self._lower_link_z_sessions:
             for (
                 special_session,
@@ -8825,6 +9037,12 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             ("Calf.L", "Calf.R"),
             ("ForeArm.L", "ForeArm.R"),
         }
+        sliding_forearm_pair_local_y = (
+            self.axis == "Y"
+            and self._orientation == "LOCAL"
+            and sliding_lower_names == ("ForeArm.L", "ForeArm.R")
+            and len(self._states) == len(self._sliding_syncs) == 2
+        )
         sliding_lower_full_four = sliding_lower_names == (
             "Calf.L",
             "Calf.R",
@@ -8832,8 +9050,12 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             "ForeArm.R",
         )
         full_four_local_x = (
-            self._orientation == "LOCAL"
-            and self.axis == "X"
+            self.axis == "X"
+            and sliding_lower_full_four
+            and all(state.hinge_state is not None for state in self._states)
+        )
+        full_four_local_y = (
+            self.axis == "Y"
             and sliding_lower_full_four
             and all(state.hinge_state is not None for state in self._states)
         )
@@ -8842,8 +9064,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             and sliding_lower_names[0] in {"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}
         )
         sliding_lower_local_x = (
-            self._orientation == "LOCAL"
-            and self.axis == "X"
+            self.axis == "X"
             and len(self._states) == len(self._sliding_syncs)
             and bool(sliding_lower_names)
             and (
@@ -8856,34 +9077,44 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 for name in sliding_lower_names
             )
         )
-        sliding_lower_global = (
-            self._orientation == "GLOBAL"
-            and self.axis in {"X", "Y", "Z"}
+        # Sliding first-link Rotate (UpperArm/Thigh) keeps the selected
+        # semantic-local X/Y/Z rotation and lets the terminal position slide.
+        # This matches Biped's 3DOF upper-link behavior; fixed-terminal swivel
+        # semantics belong to the lower-link special paths instead.
+        sliding_first_link_keys = {
+            runtime_control_key(session.capability.fk_controls[0])
+            for session in self._sliding_syncs
+        }
+        sliding_first_link_transports_terminal = (
+            self.axis in {"X", "Y", "Z"}
             and len(self._states) == len(self._sliding_syncs)
-            and bool(sliding_lower_names)
-            and (sliding_lower_single or sliding_lower_pair)
+            and bool(self._states)
             and all(
-                name in {"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}
-                for name in sliding_lower_names
+                runtime_control_key(state.control) in sliding_first_link_keys
+                for state in self._states
             )
         )
-        # Sliding GLOBAL lower-link Rotate must keep the authored terminal
-        # Hand/Foot world transform pinned. LOCAL X is the one supported
-        # lower-link exception that transports the terminal so bend can change
-        # without inventing an impossible fixed-end two-bone solve.
-        sliding_lower_pins_terminal = sliding_lower_global
-        sliding_lower_transports_terminal = (
-            sliding_lower_local_x and not sliding_lower_pins_terminal
+        # Lower-link semantic X is the existing transport exception. Lower-link
+        # Y roll and Z swivel continue to preserve the authored Hand/Foot target.
+        sliding_lower_transports_terminal = sliding_lower_local_x
+        sliding_transports_terminal = (
+            sliding_first_link_transports_terminal
+            or sliding_lower_transports_terminal
         )
         full_four_local_x_axes: dict[int, Vector] = {}
         if full_four_local_x:
+            full_four_sliding_local_x = len(self._states) == len(self._sliding_syncs)
             for state in self._states:
                 pose_bone = state.control.target
                 hinge_state = state.hinge_state
                 if not isinstance(pose_bone, bpy.types.PoseBone) or hinge_state is None:
                     continue
                 lower_name = str(pose_bone.name)
-                hinge_angle = float(hinge_state[0])
+                hinge_angle = (
+                    0.0
+                    if full_four_sliding_local_x
+                    else float(hinge_state[0])
+                )
                 branch_sign = _lower_link_local_x_branch_sign(
                     lower_name,
                     hinge_angle,
@@ -8900,13 +9131,43 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 bend_axis.normalize()
                 bend_axis *= float(branch_sign)
                 full_four_local_x_axes[int(pose_bone.as_pointer())] = bend_axis
+        full_four_local_y_axes: dict[int, Vector] = {}
+        if full_four_local_y:
+            active_name = str(active.target.name)
+            selected_names = frozenset(sliding_lower_names)
+            for state in self._states:
+                pose_bone = state.control.target
+                if not isinstance(pose_bone, bpy.types.PoseBone) or state.hinge_state is None:
+                    continue
+                lower_name = str(pose_bone.name)
+                anchor_name = _lower_link_local_pair_anchor_name(
+                    active_name,
+                    lower_name,
+                    selected_names,
+                )
+                pair_sign = 1.0 if anchor_name == lower_name else -1.0
+                basis_world = (
+                    state.control.owner_object.matrix_world.to_3x3()
+                    @ state.start_matrix.to_3x3().normalized()
+                )
+                roll_axis = basis_world @ _RIGPED_LOCAL_AXES["Y"]
+                if roll_axis.length <= 1e-9:
+                    raise RigpedSemanticMoveError(
+                        "Four-limb LOCAL Y found a collapsed roll axis."
+                    )
+                roll_axis.normalize()
+                roll_axis *= pair_sign
+                full_four_local_y_axes[int(pose_bone.as_pointer())] = roll_axis
         if (
-            self._orientation == "LOCAL"
-            and self.axis == "Y"
+            self.axis == "Y"
             and len(self._states) == len(self._sliding_syncs)
-            and len(self._states) in {1, 2}
+            and len(self._states) in {1, 2, 4}
             and all(state.hinge_state is not None for state in self._states)
-            and (sliding_lower_single or sliding_lower_pair)
+            and (
+                sliding_lower_single
+                or sliding_lower_pair
+                or sliding_lower_full_four
+            )
         ):
             states_by_key = {
                 runtime_control_key(state.control): state
@@ -8922,56 +9183,98 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 for session in self._sliding_syncs
             )
             if all(state is not None for _session, state in session_states):
-                self._current_angle = _bounded_hinge_direct_rotate_angle(
-                    active,
-                    self._states,
-                    self._axis_world,
-                    self._current_angle,
-                    axis_name=self.axis,
-                )
+                active_name = str(active.target.name)
+                selected_lower_names = frozenset(sliding_lower_names)
+                if sliding_lower_full_four:
+                    self._current_angle = _bounded_four_limb_local_y_roll_angle(
+                        self._states,
+                        self._current_angle,
+                        active_name=active_name,
+                        selected_names=selected_lower_names,
+                    )
+                else:
+                    self._current_angle = _bounded_hinge_direct_rotate_angle(
+                        active,
+                        self._states,
+                        self._axis_world,
+                        self._current_angle,
+                        axis_name=self.axis,
+                    )
                 if abs(self._current_angle) > 1e-9:
-                    if sliding_lower_pair:
+                    if sliding_lower_pair or sliding_lower_full_four:
                         pair_capabilities = []
-                        active_name = str(active.target.name)
                         active_opposite = _opposite_control_name(active_name)
                         for session, state in session_states:
                             assert state is not None
-                            solver_control = session.capability.native_ik.solver_owner
-                            if session.start_solver_state.rotation_property != "rotation_quaternion":
-                                raise RigpedSemanticMoveError(
-                                    "Sliding lower-link roll requires quaternion solver rotation."
-                                )
-                            start_rotation = Quaternion(
-                                session.start_solver_state.rotation
-                            ).normalized()
                             lower_name = str(
                                 session.capability.fk_controls[1].target.name
                             )
-                            roll_angle = (
-                                -self._current_angle
-                                if active_opposite is not None
-                                and lower_name == active_opposite
-                                else self._current_angle
-                            )
-                            desired_rotation = (
-                                start_rotation
-                                @ Quaternion(_RIGPED_LOCAL_AXES["Y"], roll_angle)
-                            ).normalized()
-                            _apply_control_state(
-                                solver_control,
-                                replace(
-                                    session.start_solver_state,
-                                    rotation=tuple(float(value) for value in desired_rotation),
-                                ),
-                                location=False,
-                                rotation=True,
-                            )
+                            if sliding_lower_full_four:
+                                anchor_name = _lower_link_local_pair_anchor_name(
+                                    active_name,
+                                    lower_name,
+                                    selected_lower_names,
+                                )
+                                roll_angle = (
+                                    self._current_angle
+                                    if anchor_name == lower_name
+                                    else -self._current_angle
+                                )
+                            else:
+                                roll_angle = (
+                                    -self._current_angle
+                                    if active_opposite is not None
+                                    and lower_name == active_opposite
+                                    else self._current_angle
+                                )
+
+                            if sliding_forearm_pair_local_y:
+                                hinge_state = state.hinge_state
+                                assert hinge_state is not None
+                                authored_basis = _basis_with_local_y_twist(
+                                    state.start_basis,
+                                    float(hinge_state[1]) + float(roll_angle),
+                                )
+                                _sync_sliding_public_pose_from_result(
+                                    context,
+                                    session.capability,
+                                    authored_lower_basis=authored_basis,
+                                    update=False,
+                                )
+                            else:
+                                solver_control = session.capability.native_ik.solver_owner
+                                if (
+                                    session.start_solver_state.rotation_property
+                                    != "rotation_quaternion"
+                                ):
+                                    raise RigpedSemanticMoveError(
+                                        "Sliding lower-link roll requires quaternion solver rotation."
+                                    )
+                                start_rotation = Quaternion(
+                                    session.start_solver_state.rotation
+                                ).normalized()
+                                desired_rotation = (
+                                    start_rotation
+                                    @ Quaternion(_RIGPED_LOCAL_AXES["Y"], roll_angle)
+                                ).normalized()
+                                _apply_control_state(
+                                    solver_control,
+                                    replace(
+                                        session.start_solver_state,
+                                        rotation=tuple(
+                                            float(value) for value in desired_rotation
+                                        ),
+                                    ),
+                                    location=False,
+                                    rotation=True,
+                                )
                             pair_capabilities.append(session.capability)
                         context.view_layer.update()
                         _refresh_current_sliding_public_overlays(
                             context,
                             capabilities=tuple(pair_capabilities),
                             allow_seed=False,
+                            preserve_forearm_roll=sliding_forearm_pair_local_y,
                         )
                     else:
                         session, state = session_states[0]
@@ -8989,20 +9292,22 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
 
         hinge_states = tuple(state for state in self._states if state.hinge_state is not None)
         generic_states = tuple(state for state in self._states if state.hinge_state is None)
-        # GLOBAL and VIEW are shared frame-space gestures: every selected control
-        # receives the same visible/world rotation direction. LOCAL retains the
-        # anatomical opposite-side mirror behavior for paired controls.
-        mirror_opposites = self._orientation == "LOCAL" and self.axis != "FREE"
-        sliding_global_projection = bool(self._sliding_global_lower_sessions)
-        hinge_axis_effective = sliding_global_projection or sliding_lower_local_x or any(
-            abs(weight) > 1e-7
-            for state in hinge_states
-            for weight in _hinge_axis_weights(
-                active,
-                state,
-                self._axis_world,
-                mirror_opposites=mirror_opposites,
-                axis_name=self.axis,
+        # X/Y/Z always author semantic-local joint DOF. Transform orientation
+        # changes only the visible/input gizmo frame, not the anatomical result.
+        mirror_opposites = self.axis in {"X", "Y", "Z"}
+        hinge_axis_effective = (
+            sliding_lower_local_x
+            or bool(full_four_local_y_axes)
+            or any(
+                abs(weight) > 1e-7
+                for state in hinge_states
+                for weight in _hinge_axis_weights(
+                    active,
+                    state,
+                    self._axis_world,
+                    mirror_opposites=mirror_opposites,
+                    axis_name=self.axis,
+                )
             )
         )
         if hinge_states and not generic_states and not hinge_axis_effective:
@@ -9013,11 +9318,10 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             self._current_angle = 0.0
             return
 
-        # ForeArm/Calf are true Biped-style hinge + axial-roll joints in every
-        # gizmo orientation. Hand/Foot and broad ball joints follow the actual
-        # rotate axis and stop at the first invalid swing/twist pose along that
-        # path, avoiding both Euler coupling and quaternion re-entry flips.
-        if hinge_states and not sliding_global_projection:
+        # ForeArm/Calf keep their semantic hinge + axial-roll DOF in every
+        # gizmo orientation. Hand/Foot and broad ball joints likewise use the
+        # selected semantic-local X/Y/Z axis, independent of gizmo orientation.
+        if hinge_states:
             if full_four_local_x_axes:
                 bounded_angle = float(self._current_angle)
                 for state in hinge_states:
@@ -9037,6 +9341,13 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                         axis_name="X",
                     )
                 self._current_angle = bounded_angle
+            elif full_four_local_y_axes:
+                self._current_angle = _bounded_four_limb_local_y_roll_angle(
+                    self._states,
+                    self._current_angle,
+                    active_name=str(active.target.name),
+                    selected_names=frozenset(sliding_lower_names),
+                )
             else:
                 self._current_angle = _bounded_hinge_direct_rotate_angle(
                     active,
@@ -9083,6 +9394,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             desired = None
             if state.hinge_state is not None:
                 semantic_bend_axis = full_four_local_x_axes.get(pointer)
+                semantic_roll_axis = full_four_local_y_axes.get(pointer)
                 if semantic_bend_axis is not None:
                     desired = _hinge_direct_rotate_desired(
                         state.control,
@@ -9091,6 +9403,16 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                         self._current_angle,
                         mirror_opposites=False,
                         axis_name="X",
+                        parent_pose_matrix=parent_desired,
+                    )
+                elif semantic_roll_axis is not None:
+                    desired = _hinge_direct_rotate_desired(
+                        state.control,
+                        state,
+                        semantic_roll_axis,
+                        self._current_angle,
+                        mirror_opposites=False,
+                        axis_name="Y",
                         parent_pose_matrix=parent_desired,
                     )
                 else:
@@ -9107,135 +9429,6 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 desired = raw_desired_by_bone[pointer]
             resolved_desired_by_bone[pointer] = desired
             return desired
-
-        if self._sliding_global_lower_sessions:
-            projected_rows = []
-            any_swivel = False
-            for special_session, sync_session in self._sliding_global_lower_sessions:
-                second_target = special_session.second_control.target
-                if not isinstance(second_target, bpy.types.PoseBone):
-                    raise RigpedSemanticMoveError(
-                        "Sliding GLOBAL lower-link Rotate lost its PoseBone target."
-                    )
-                state = state_by_bone.get(int(second_target.as_pointer()))
-                if state is None:
-                    raise RigpedSemanticMoveError(
-                        "Sliding GLOBAL lower-link Rotate lost its selected lower-link state."
-                    )
-                projection = _project_global_rotation_to_sliding_lower_dofs(
-                    special_session,
-                    state,
-                    self._axis_world,
-                    self._current_angle,
-                )
-                projected_rows.append(
-                    (special_session, sync_session, projection)
-                )
-                if abs(projection.swivel_angle) <= 1e-9:
-                    continue
-                root = Vector(special_session.root_world)
-                end = Vector(special_session.end_world)
-                swivel_axis = end - root
-                if swivel_axis.length <= 1e-9:
-                    raise RigpedSemanticMoveError(
-                        "Sliding GLOBAL lower-link Rotate found a collapsed swivel axis."
-                    )
-                swivel_axis.normalize()
-                desired_joint = root + Quaternion(
-                    swivel_axis,
-                    projection.swivel_angle,
-                ) @ (
-                    Vector(special_session.joint_world) - root
-                )
-                if not _apply_solved_two_bone_fk_pose(
-                    special_session,
-                    desired_joint,
-                    end,
-                    terminal_follows_second=False,
-                ):
-                    raise RigpedSemanticMoveError(
-                        "Sliding GLOBAL lower-link Rotate could not apply its projected swivel."
-                    )
-                any_swivel = True
-
-            self._sliding_global_projected_dofs = tuple(
-                (
-                    str(row[0].second_control.target.name),
-                    float(row[2].swivel_angle),
-                    float(row[2].roll_angle),
-                )
-                for row in projected_rows
-            )
-            self._sliding_global_projection_diagnostics = tuple(
-                (
-                    str(row[0].second_control.target.name),
-                    float(row[2].residual_radians),
-                    float(row[2].conditioning),
-                )
-                for row in projected_rows[:4]
-            )
-
-            if any_swivel:
-                context.view_layer.update()
-                _apply_direct_rotate_sliding_syncs(
-                    context,
-                    tuple(row[1] for row in projected_rows),
-                )
-
-            roll_capabilities = []
-            for _special_session, sync_session, projection in projected_rows:
-                roll_angle = projection.roll_angle
-                if abs(roll_angle) <= 1e-9:
-                    continue
-                if sync_session.start_solver_state.rotation_property != "rotation_quaternion":
-                    raise RigpedSemanticMoveError(
-                        "Sliding GLOBAL lower-link roll requires quaternion solver rotation."
-                    )
-                solver_control = sync_session.capability.native_ik.solver_owner
-                current_solver_state = _capture_control_state(solver_control)
-                if current_solver_state.rotation_property != "rotation_quaternion":
-                    raise RigpedSemanticMoveError(
-                        "Sliding GLOBAL lower-link roll requires quaternion solver rotation."
-                    )
-                current_rotation = Quaternion(
-                    current_solver_state.rotation
-                ).normalized()
-                desired_rotation = (
-                    current_rotation
-                    @ Quaternion(_RIGPED_LOCAL_AXES["Y"], roll_angle)
-                ).normalized()
-                _apply_control_state(
-                    solver_control,
-                    replace(
-                        current_solver_state,
-                        rotation=tuple(float(value) for value in desired_rotation),
-                    ),
-                    location=False,
-                    rotation=True,
-                )
-                roll_capabilities.append(sync_session.capability)
-
-            if roll_capabilities:
-                context.view_layer.update()
-                _refresh_current_sliding_public_overlays(
-                    context,
-                    capabilities=tuple(roll_capabilities),
-                    allow_seed=False,
-                )
-
-            if self._sliding_dependency_guards:
-                _refresh_frozen_sliding_dependency_overlays(
-                    context,
-                    self._sliding_dependency_guards,
-                    operation_id=self._trace_operation_id,
-                    phase="ROTATE_PREVIEW",
-                )
-            else:
-                _refresh_current_sliding_public_overlays(
-                    context,
-                    capabilities=self._sliding_guard_capabilities,
-                )
-            return
 
         for state in state_by_bone.values():
             pose_bone = state.control.target
@@ -9259,7 +9452,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         _apply_direct_rotate_sliding_syncs(
             context,
             self._sliding_syncs,
-            pin_terminal=not sliding_lower_transports_terminal,
+            pin_terminal=not sliding_transports_terminal,
         )
         if self._sliding_dependency_guards:
             _refresh_frozen_sliding_dependency_overlays(
@@ -9296,6 +9489,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     angle = float(self._free_rotation.angle)
                     if axis_world.length > 1e-9 and angle > 1e-12:
                         axis_world.normalize()
+                        self._gesture_axis_world = axis_world
                         self._axis_world = axis_world
                         self._current_angle = angle
                         applied = True
@@ -9313,14 +9507,14 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 current = _rotation_vector(
                     context,
                     self._pivot,
-                    self._axis_world,
+                    self._gesture_axis_world,
                     event.mouse_region_x,
                     event.mouse_region_y,
                 )
                 if current is not None:
                     previous = self._previous_rotation_vector
                     raw_step = atan2(
-                        float(self._axis_world.dot(previous.cross(current))),
+                        float(self._gesture_axis_world.dot(previous.cross(current))),
                         float(previous.dot(current)),
                     )
                     pixel_step = float((mouse - self._previous_rotation_mouse).length)
@@ -9412,6 +9606,43 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 self._trace_operation_id = None
                 return {"CANCELLED"}
 
+            # Freeze the exact live state that existed immediately before this
+            # gesture. The preview already mutated pose data during MOUSEMOVE;
+            # restore it first, checkpoint frame/AUTO/selection plus the original
+            # pose, then replay the already-validated final rotation. This keeps
+            # one Ctrl+Z local to this gesture even when frame/AUTO changes since
+            # the previous global undo snapshot were intentionally non-undoable.
+            self._restore_preview(context)
+            bpy.ops.ed.undo_push(message="AWB Rigped Direct Rotate Start")
+            try:
+                self._apply_preview(context)
+            except RigpedSemanticMoveError as exc:
+                self._restore_preview(context)
+                _report_operator_error(
+                    self,
+                    context,
+                    exc,
+                    tool="ROTATE",
+                    route="DIRECT_ROTATE",
+                    phase="RELEASE_REPLAY",
+                    axis=self.axis,
+                    attempted_angle=angle,
+                    orientation=str(self._orientation),
+                )
+                self._states = ()
+                self._sliding_syncs = ()
+                self._sliding_guard_capabilities = ()
+                self._active = None
+                self._auto_plan = None
+                self._auto_direct_plan = None
+                self._auto_contact_batch_plan = None
+                self._deferred_auto_contact_mapping_ids = ()
+                self._forearm_special_session = None
+                clear_rotation_angle(context)
+                if context.area is not None:
+                    context.area.tag_redraw()
+                return {"CANCELLED"}
+
             auto_enabled_at_release = bool(
                 getattr(context.scene, "baw_auto_key_enabled", False)
             )
@@ -9433,6 +9664,11 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 context.scene,
                 auto_context,
             )
+            if self._forearm_post_solve_roll_overlay:
+                # Match invoke-time authority: ForeArm LOCAL Y stays a pure
+                # public/deform direct write through release as well.
+                auto_limb_context = None
+                auto_direct_context = auto_context
             if (
                 auto_contact_batch_plan is None
                 and deferred_auto_contact_mapping_ids
@@ -9587,6 +9823,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                         _refresh_current_sliding_public_overlays(
                             context,
                             capabilities=self._sliding_affected_capabilities,
+                            preserve_forearm_roll=self._forearm_post_solve_roll_overlay,
                         )
                 except (RuntimeError, ValueError, ReferenceError) as exc:
                     rollback_rigped_auto_writer_results(tuple(deferred_auto_results))
@@ -9661,6 +9898,22 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 clear_key_selection_for_context(context)
                 context.scene.baw_has_selected_key = False
 
+            lower_link_z_recorded_sessions = tuple(
+                row[0] for row in self._lower_link_z_sessions
+            )
+            if self._forearm_special_session is not None:
+                lower_link_z_recorded_sessions = (
+                    *lower_link_z_recorded_sessions,
+                    self._forearm_special_session,
+                )
+            recorded_result = _capture_direct_rotate_recorded_result(
+                self._states,
+                self._sliding_syncs,
+                lower_link_z_recorded_sessions,
+            )
+            # The whole successful Rotate gesture, including any release-time
+            # Auto/Contact authoring, is one final redoable snapshot.
+            bpy.ops.ed.undo_push(message="AWB Rigped Direct Rotate")
             self._states = ()
             self._sliding_syncs = ()
             self._sliding_guard_capabilities = ()
@@ -9673,8 +9926,6 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             clear_rotation_angle(context)
             if context.area is not None:
                 context.area.tag_redraw()
-            projected_dofs = self._sliding_global_projected_dofs
-            projection_diagnostics = self._sliding_global_projection_diagnostics
             replay_rotation = (
                 self._free_rotation.copy()
                 if self.axis == "FREE"
@@ -9694,8 +9945,6 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 route="DIRECT_ROTATE",
                 axis=self.axis,
                 final_angle=angle,
-                sliding_global_projected_dofs=projected_dofs,
-                sliding_global_projection_diagnostics=projection_diagnostics,
                 auto_key=bool(getattr(context.scene, "baw_auto_key_enabled", False)),
                 replay_action={
                     "kind": "ROTATE",
@@ -9710,6 +9959,7 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                     "orientation": self._orientation,
                     "delta_world_quaternion": replay_quaternion,
                     "final_angle": float(angle),
+                    "recorded_result": recorded_result,
                 },
             )
             self._trace_operation_id = None

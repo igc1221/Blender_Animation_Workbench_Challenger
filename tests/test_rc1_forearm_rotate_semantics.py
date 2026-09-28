@@ -9,6 +9,7 @@ EXT = ROOT / "extension" / "blender_animation_workbench"
 TRANSFORM_PATH = EXT / "rigped_transform.py"
 SOURCE = TRANSFORM_PATH.read_text(encoding="utf-8")
 BUILDER_SOURCE = (EXT / "rigped_humanoid_builder.py").read_text(encoding="utf-8")
+AUTO_KEY_SOURCE = (EXT / "rigped_auto_key.py").read_text(encoding="utf-8")
 FIT_COMMIT_SOURCE = (EXT / "rigped_fit_commit.py").read_text(encoding="utf-8")
 SNAP_SOURCE = (EXT / "phase4_representation_snap.py").read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
@@ -123,6 +124,42 @@ def test_rc1_lower_limb_axis_contract_is_x_hinge_y_roll_z_swivel() -> None:
     assert "fallback = -1" in SNAP_SOURCE
 
 
+def test_rc1_lower_link_local_y_mirrors_as_axial_rotation_axis() -> None:
+    mapped = _source(_function("_mapped_direct_rotate_axis"))
+    assert "axial=True" in mapped
+    assert 'axis_name == "Y"' not in mapped
+    assert "lower_link_pair" not in mapped
+
+
+def test_rc1_sliding_thigh_local_z_uses_expected_open_close_direction() -> None:
+    invoke = _source(_method("BAW_OT_rigped_direct_rotate_axis", "invoke"))
+    assert "sliding_thigh_z = (" in invoke
+    assert 'self.axis == "Z"' in invoke
+    assert 'all(name in {"Thigh.L", "Thigh.R"} for name in selected_pose_names)' in invoke
+    assert "len(self._states) == len(self._sliding_syncs)" in invoke
+    assert "or sliding_thigh_z" in invoke
+
+
+def test_rc1_paired_calf_local_z_uses_expected_open_close_direction() -> None:
+    invoke = _source(_method("BAW_OT_rigped_direct_rotate_axis", "invoke"))
+    assert "paired_calf_z = (" in invoke
+    assert 'selected_pose_names == ("Calf.L", "Calf.R")' in invoke
+    assert "or paired_calf_z" in invoke
+
+
+def test_rc1_calf_local_y_is_noop_without_hiding_the_gizmo() -> None:
+    preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
+    assert "calf_local_y_noop = (" in preview
+    assert 'self.axis == "Y"' in preview
+    assert 'self._orientation == "LOCAL"' in preview
+    assert 'str(state.control.target.name) in {"Calf.L", "Calf.R"}' in preview
+    noop = preview.index("if calf_local_y_noop:")
+    roll = preview.index("_apply_sliding_lower_long_roll(")
+    assert noop < roll
+    assert "self._current_angle = 0.0" in preview[noop:roll]
+    assert "return" in preview[noop:roll]
+
+
 def test_rc1_lower_limb_swivel_free_follows_terminal_sliding_pins_terminal() -> None:
     solved = _source(_function("_apply_solved_two_bone_fk_pose"))
     assert "terminal_follows_second: bool = False" in solved
@@ -139,20 +176,115 @@ def test_rc1_lower_limb_swivel_free_follows_terminal_sliding_pins_terminal() -> 
     assert "terminal_follows_second=not bool(self._sliding_syncs)" in preview
 
 
-def test_rc1_sliding_lower_long_roll_is_shared_by_forearm_and_calf() -> None:
-    replay = _source(_function("_sync_generated_sliding_lower_roll_from_public_pose"))
-    assert '"MCH_ForeArm.L"' in replay
+def test_rc1_free_lower_link_z_recorded_result_captures_full_fk_chain() -> None:
+    capture = _source(_function("_capture_direct_rotate_recorded_result"))
+    assert "lower_link_z_sessions: tuple[FkTwoBoneMoveSession, ...] = ()" in capture
+    assert "for session in lower_link_z_sessions:" in capture
+    assert "session.first_control" in capture
+    assert "session.second_control" in capture
+    assert "session.terminal_control" in capture
+
+    modal = _source(_method("BAW_OT_rigped_direct_rotate_axis", "modal"))
+    assert "lower_link_z_recorded_sessions = tuple(" in modal
+    assert "row[0] for row in self._lower_link_z_sessions" in modal
+    assert "if self._forearm_special_session is not None:" in modal
+    assert "*lower_link_z_recorded_sessions" in modal
+    assert "self._forearm_special_session" in modal
+    assert "lower_link_z_recorded_sessions," in modal
+
+
+def test_rc1_sliding_forearm_local_y_uses_post_solve_overlay_not_native_ik_roll() -> None:
+    replay = _source(_function("_sync_generated_sliding_calf_roll_from_public_pose"))
     assert '"MCH_Calf.L"' in replay
-    assert '"ForeArm.L"' in replay
     assert '"Calf.L"' in replay
+    assert '"MCH_ForeArm.L"' not in replay
+    assert '"ForeArm.L"' not in replay
+
+    display = _source(_function("_sliding_public_display_from_result"))
+    assert '{"ForeArm.L", "ForeArm.R"}' in display
+    assert "_basis_with_local_y_twist(" in display
+    assert "solved_result.first_pose" in display
+    assert "solved_result.terminal_pose" in display
+    assert "parent_pose_matrix=second_pose" in display
+
+    preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
+    assert "sliding_forearm_pair_local_y = (" in preview
+    assert 'self._orientation == "LOCAL"' in preview
+    overlay = preview.index("if sliding_forearm_pair_local_y:")
+    native = preview.index("else:", overlay)
+    assert "_basis_with_local_y_twist(" in preview[overlay:native]
+    assert "authored_lower_basis=authored_basis" in preview[overlay:native]
+    assert "solver_control" not in preview[overlay:native]
 
     live = _source(_function("_apply_sliding_lower_long_roll"))
     assert "terminal world transform fixed" in live
     assert '_RIGPED_LOCAL_AXES["Y"]' in live
 
+    four_roll_bound = _source(_function("_bounded_four_limb_local_y_roll_angle"))
+    assert "start_long = float(hinge_state[1])" in four_roll_bound
+    assert "roll_limit = float(limits[3])" in four_roll_bound
+    assert "pair_sign = 1.0 if anchor_name == lower_name else -1.0" in four_roll_bound
+
+
+def test_rc1_forearm_post_solve_roll_seam_is_generated_and_upgrade_safe() -> None:
+    assert '_FOREARM_POST_SOLVE_ROLL_CONSTRAINT = "AWB_PostSolve_ForeArmRoll"' in BUILDER_SOURCE
+    assert "def ensure_generated_rigped_forearm_post_solve_roll(" in BUILDER_SOURCE
+    assert 'owner = pose.get(f"DEF_ForeArm.{suffix}")' in BUILDER_SOURCE
+    assert 'constraint = owner.constraints.new(type="COPY_ROTATION")' in BUILDER_SOURCE
+    assert 'constraint.target_space = "LOCAL"' in BUILDER_SOURCE
+    assert 'constraint.owner_space = "LOCAL"' in BUILDER_SOURCE
+    assert 'constraint.mix_mode = "REPLACE"' in BUILDER_SOURCE
+    assert "constraint.use_x = False" in BUILDER_SOURCE
+    assert "constraint.use_y = True" in BUILDER_SOURCE
+    assert "constraint.use_z = False" in BUILDER_SOURCE
+    assert "owner.constraints.move(current_index, final_index)" in BUILDER_SOURCE
+    assert "ensure_generated_rigped_forearm_post_solve_roll(armature_object)" in BUILDER_SOURCE
+    assert "def upgrade_generated_rigped_forearm_post_solve_roll(" in BUILDER_SOURCE
+    assert 'setup["signature"] = compute_setup_signature(view)' in BUILDER_SOURCE
+    assert 'setup["revision"] = max(1, int(getter("revision", 1) or 1)) + 1' in BUILDER_SOURCE
+
+    replay_load = _source(_function("_sync_rigped_replay_load_post"))
+    assert "_upgrade_rigped_forearm_post_solve_roll_for_scene(scene)" in replay_load
+
+
+def test_rc1_forearm_post_solve_roll_auto_keeps_sliding_authority() -> None:
+    invoke = _source(_method("BAW_OT_rigped_direct_rotate_axis", "invoke"))
+    assert "forearm_post_solve_roll_auto = (" in invoke
+    orientation_capture = invoke.index(
+        'self._orientation = str(context.scene.transform_orientation_slots[0].type)'
+    )
+    auto_route = invoke.index("forearm_post_solve_roll_auto = (")
+    assert orientation_capture < auto_route
+    assert 'lower_link_names == ("ForeArm.L", "ForeArm.R")' in invoke
+    assert "auto_limb_context = None" in invoke
+    assert "auto_direct_context = auto_context" in invoke
+    assert "include_rigped_free_marker=not forearm_post_solve_roll_auto" in invoke
+
+    assert "include_rigped_free_marker: bool = True" in AUTO_KEY_SOURCE
+    assert "include_rigped_free_marker=include_rigped_free_marker" in AUTO_KEY_SOURCE
+    assert "include_rigped_free_marker=session.include_rigped_free_marker" in AUTO_KEY_SOURCE
+
+    modal = _source(_method("BAW_OT_rigped_direct_rotate_axis", "modal"))
+    assert "if self._forearm_post_solve_roll_overlay:" in modal
+    assert "auto_limb_context = None" in modal
+    assert "auto_direct_context = auto_context" in modal
+
+
+def test_rc1_free_full_four_local_y_uses_pair_semantic_roll_axes() -> None:
     preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
-    assert '{"ForeArm.L", "ForeArm.R", "Calf.L", "Calf.R"}' in preview
-    assert "_apply_sliding_lower_long_roll(" in preview
+    assert "full_four_local_y = (" in preview
+    assert 'self.axis == "Y"' in preview
+    assert "full_four_local_y_axes: dict[int, Vector] = {}" in preview
+    assert "anchor_name = _lower_link_local_pair_anchor_name(" in preview
+    assert "pair_sign = 1.0 if anchor_name == lower_name else -1.0" in preview
+    assert 'roll_axis = basis_world @ _RIGPED_LOCAL_AXES["Y"]' in preview
+    assert "roll_axis *= pair_sign" in preview
+    assert "elif full_four_local_y_axes:" in preview
+    assert "_bounded_four_limb_local_y_roll_angle(" in preview
+    assert "semantic_roll_axis = full_four_local_y_axes.get(pointer)" in preview
+    assert "elif semantic_roll_axis is not None:" in preview
+    assert 'axis_name="Y"' in preview
+    assert "mirror_opposites=False" in preview
 
 
 def test_rc1_sliding_rotate_terminal_policy_is_axis_specific() -> None:
@@ -162,14 +294,19 @@ def test_rc1_sliding_rotate_terminal_policy_is_axis_specific() -> None:
     assert "else session.start_ik_state" in source
 
     preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
-    assert 'self._orientation == "LOCAL"' in preview
-    assert 'self.axis == "X"' in preview
-    assert 'self._orientation == "GLOBAL"' in preview
+    assert "sliding_first_link_keys = {" in preview
+    assert "session.capability.fk_controls[0]" in preview
+    assert "sliding_first_link_transports_terminal = (" in preview
     assert 'self.axis in {"X", "Y", "Z"}' in preview
-    assert "sliding_lower_pins_terminal = sliding_lower_global" in preview
-    assert "sliding_lower_local_x and not sliding_lower_pins_terminal" in preview
-    assert "sliding_lower_local_x or sliding_lower_global" not in preview
-    assert "pin_terminal=not sliding_lower_transports_terminal" in preview
+    assert "runtime_control_key(state.control) in sliding_first_link_keys" in preview
+    assert "sliding_lower_local_x = (" in preview
+    assert 'self.axis == "X"' in preview
+    assert "sliding_lower_transports_terminal = sliding_lower_local_x" in preview
+    assert "sliding_transports_terminal = (" in preview
+    assert "sliding_first_link_transports_terminal" in preview
+    assert "or sliding_lower_transports_terminal" in preview
+    assert "pin_terminal=not sliding_transports_terminal" in preview
+    assert "sliding_lower_global" not in preview
 
 
 def test_rc1_forbidden_hinge_axis_bounds_to_zero_instead_of_preserving_requested_angle() -> None:
@@ -191,11 +328,10 @@ def test_rc1_forbidden_hinge_axis_skips_sliding_fk_to_ik_sync_preview() -> None:
         early_return,
     )
     assert supported < early_return < sliding_sync
-    assert "sliding_global_projection = bool(self._sliding_global_lower_sessions)" in preview
-    assert (
-        "hinge_axis_effective = sliding_global_projection or sliding_lower_local_x or any("
-        in preview
-    )
+    assert "hinge_axis_effective = (" in preview
+    assert "sliding_lower_local_x" in preview
+    assert "or bool(full_four_local_y_axes)" in preview
+    assert "or any(" in preview
     assert "self._current_angle = 0.0" in preview[early_return:sliding_sync]
 
 
@@ -206,8 +342,8 @@ def test_rc1_sliding_lower_local_x_is_effective_without_removing_forbidden_axis_
     early_return = preview.index("self._current_angle = 0.0", guard)
     sliding_sync = preview.index("_apply_direct_rotate_sliding_syncs(", early_return)
     assert supported < guard < early_return < sliding_sync
-    assert 'self._orientation == "LOCAL"' in preview[supported:guard]
     assert 'self.axis == "X"' in preview[supported:guard]
+    assert 'self._orientation == "LOCAL"' not in preview[supported:guard]
     assert "sliding_lower_full_four = sliding_lower_names == (" in preview
     assert '"Calf.L"' in preview[supported:guard]
     assert '"Calf.R"' in preview[supported:guard]
@@ -217,11 +353,14 @@ def test_rc1_sliding_lower_local_x_is_effective_without_removing_forbidden_axis_
     assert "full_four_local_x_axes: dict[int, Vector] = {}" in preview
     assert "full_four_local_x = (" in preview
     assert "_lower_link_local_x_branch_sign(" in preview
+    assert "full_four_sliding_local_x = len(self._states) == len(self._sliding_syncs)" in preview
+    assert "if full_four_sliding_local_x" in preview
+    assert "else float(hinge_state[0])" in preview
     assert 'bend_axis = basis_world @ _RIGPED_LOCAL_AXES["X"]' in preview
     assert "bend_axis *= float(branch_sign)" in preview
     assert "semantic_bend_axis = full_four_local_x_axes.get(pointer)" in preview
     assert "mirror_opposites=False" in preview
-    assert "pin_terminal=not sliding_lower_transports_terminal" in preview[sliding_sync:]
+    assert "pin_terminal=not sliding_transports_terminal" in preview[sliding_sync:]
 
 
 def test_rc1_full_four_local_x_gesture_uses_active_semantic_bend_hemisphere() -> None:
@@ -229,8 +368,15 @@ def test_rc1_full_four_local_x_gesture_uses_active_semantic_bend_hemisphere() ->
     assert "full_four_local_x_gesture = (" in invoke
     assert 'selected_lower_names' in invoke
     assert '("Calf.L", "Calf.R", "ForeArm.L", "ForeArm.R")' in invoke
+    assert "full_four_sliding_local_x_gesture = (" in invoke
+    assert "resolved.contact_type is ContactKeyType.SLIDING" in invoke
     assert "_hinge_state_from_basis(" in invoke
-    assert "axis = Vector(axis) * _lower_link_local_x_branch_sign(" in invoke
+    assert "if full_four_sliding_local_x_gesture" in invoke
+    assert "else float(active_hinge_state[0])" in invoke
+    assert "branch_sign = _lower_link_local_x_branch_sign(" in invoke
+    assert "semantic_axis = Vector(semantic_axis) * branch_sign" in invoke
+    assert 'if str(context.scene.transform_orientation_slots[0].type) == "LOCAL":' in invoke
+    assert "gesture_axis = Vector(gesture_axis) * branch_sign" in invoke
     assert invoke.index("full_four_local_x_gesture = (") < invoke.index(
         "pivot = _control_pivot_world(active)"
     )
@@ -249,10 +395,17 @@ def test_rc1_local_z_sign_is_captured_once_from_frozen_tangent_agreement() -> No
     invoke = _source(_method("BAW_OT_rigped_direct_rotate_axis", "invoke"))
     assert "self._single_lower_link_z_axis_sign = (" in invoke
     assert "_lower_limb_special_z_axis_sign(" in invoke
-    assert "mapped_axis = _mapped_direct_rotate_axis(" in invoke
+    assert "frozen_basis_world = (" in invoke
+    assert "lower_control.owner_object.matrix_world.to_3x3()" in invoke
+    assert "@ state.start_matrix.to_3x3().normalized()" in invoke
+    assert "local_z_world = Vector(frozen_basis_world.col[2])" in invoke
+    assert "local_z_world.normalize()" in invoke
     assert "axis_sign = _lower_limb_special_z_axis_sign(" in invoke
-    assert "mirror_opposites=True" in invoke
-    assert 'axis_name="Z"' in invoke
+    assert "frozen_local_z_by_name = {" in invoke
+    assert "anchor_name = _lower_link_local_pair_anchor_name(" in invoke
+    assert "input_axis_world = _mirror_control_world_vector(" in invoke
+    assert "axial=True" in invoke
+    assert "special_session,\n                                input_axis_world," in invoke
     assert 'active_name.endswith(".L")' not in invoke
     assert 'lower_name.endswith(".R")' not in invoke
 
@@ -269,6 +422,28 @@ def test_rc1_local_z_sign_is_captured_once_from_frozen_tangent_agreement() -> No
     preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
     assert "self._current_angle * self._single_lower_link_z_axis_sign" in preview
     assert "terminal_follows_second=not bool(self._sliding_syncs)" in preview
+
+
+def test_rc1_multi_local_z_pair_anchor_tracks_active_side_without_selection_order() -> None:
+    opposite = _evaluate_function("_opposite_control_name", {})
+    pair_anchor = _evaluate_function(
+        "_lower_link_local_pair_anchor_name",
+        {"_opposite_control_name": opposite},
+    )
+    all_four = frozenset({"Calf.L", "Calf.R", "ForeArm.L", "ForeArm.R"})
+
+    assert pair_anchor("ForeArm.L", "ForeArm.L", all_four) == "ForeArm.L"
+    assert pair_anchor("ForeArm.L", "ForeArm.R", all_four) == "ForeArm.L"
+    assert pair_anchor("ForeArm.L", "Calf.L", all_four) == "Calf.L"
+    assert pair_anchor("ForeArm.L", "Calf.R", all_four) == "Calf.L"
+
+    assert pair_anchor("Calf.R", "Calf.R", all_four) == "Calf.R"
+    assert pair_anchor("Calf.R", "Calf.L", all_four) == "Calf.R"
+    assert pair_anchor("Calf.R", "ForeArm.R", all_four) == "ForeArm.R"
+    assert pair_anchor("Calf.R", "ForeArm.L", all_four) == "ForeArm.R"
+
+    right_only = frozenset({"Calf.R", "ForeArm.R"})
+    assert pair_anchor("ForeArm.R", "Calf.R", right_only) == "Calf.R"
 
 
 def test_rc1_local_z_axis_sign_preserves_tangent_hemisphere_and_degenerate_fallback() -> None:
@@ -294,45 +469,37 @@ def test_rc1_local_z_axis_sign_preserves_tangent_hemisphere_and_degenerate_fallb
     assert sign(session, (0.0, 0.0, 1.0)) == 1.0
 
 
-def test_rc1_sliding_global_rotate_uses_dls_swivel_roll_and_post_swivel_composition() -> None:
-    projector = _source(_function("_project_global_rotation_to_sliding_lower_dofs"))
-    assert "swivel_axis = end - root" in projector
-    assert "roll_generator = post_swivel_rotation @ local_y" in projector
-    assert "_damped_two_axis_rotation_step(" in projector
-    assert "swivel_bound = pi - radians(0.25)" in projector
-    assert "roll_minimum" in projector
-    assert "roll_maximum" in projector
-    assert "largest_step > 0.35" in projector
-    assert "gesture_bound = max(1e-6, abs(float(angle)) * 2.0)" in projector
-    assert "max(-swivel_bound, -gesture_bound)" in projector
-    assert "min(swivel_bound, gesture_bound)" in projector
-    assert "max(roll_minimum, -gesture_bound)" in projector
-    assert "min(roll_maximum, gesture_bound)" in projector
-    assert "_quaternion_rotation_vector_components(" in projector
-    assert "atan2(" not in projector
+def test_rc1_global_gizmo_reuses_semantic_local_xyz_rotate_axes() -> None:
+    helper = _source(_function("_semantic_rotate_axis_world"))
+    assert 'axis not in {"X", "Y", "Z"}' in helper
+    assert "active.owner_object.matrix_world @ active.target.matrix" in helper
+    assert 'index = {"X": 0, "Y": 1, "Z": 2}[axis]' in helper
+    assert "result = Vector(basis.col[index])" in helper
+
+    invoke = _source(_method("BAW_OT_rigped_direct_rotate_axis", "invoke"))
+    assert "gesture_axis = (" in invoke
+    assert "semantic_axis = _semantic_rotate_axis_world(active, self.axis)" in invoke
+    assert "self._gesture_axis_world = Vector(gesture_axis).normalized()" in invoke
+    assert "self._axis_world = Vector(semantic_axis).normalized()" in invoke
+    assert "linear_roll_screen_tangent(" in invoke
+    assert "self._gesture_axis_world" in invoke
 
     preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
-    assert "sliding_global_projection = bool(self._sliding_global_lower_sessions)" in preview
-    assert "if hinge_states and not sliding_global_projection:" in preview
-    assert "_apply_solved_two_bone_fk_pose(" in preview
-    assert "current_solver_state = _capture_control_state(solver_control)" in preview
-    assert "current_rotation = Quaternion(" in preview
-    assert "replace(\n                        current_solver_state," in preview
-    assert "start_rotation = Quaternion(\n                    sync_session.start_solver_state.rotation" not in preview
-    assert "_sliding_global_projected_dofs" in SOURCE
-    assert "_sliding_global_projection_diagnostics" in SOURCE
+    assert 'mirror_opposites = self.axis in {"X", "Y", "Z"}' in preview
+    assert 'self._orientation == "GLOBAL"' not in preview
+    assert "sliding_global_projection" not in preview
 
 
-def test_rc1_damped_global_projection_step_stays_bounded_near_singularity() -> None:
-    solve_step = _evaluate_function("_damped_two_axis_rotation_step", {})
-    small = solve_step(0.1, 0.0, 0.0, 0.05)
-    doubled = solve_step(0.2, 0.0, 0.0, 0.05)
-    assert math.isclose(doubled[0], small[0] * 2.0, rel_tol=1e-10)
-    assert math.isclose(doubled[1], small[1] * 2.0, abs_tol=1e-10)
+def test_rc1_retired_global_projection_solver_cannot_reenter_rotate_path() -> None:
+    assert "_project_global_rotation_to_sliding_lower_dofs" not in SOURCE
+    assert "_damped_two_axis_rotation_step" not in SOURCE
+    assert "SlidingGlobalRotateProjection" not in SOURCE
+    assert "_sliding_global_lower_sessions" not in SOURCE
+    assert "_sliding_global_projected_dofs" not in SOURCE
+    assert "_sliding_global_projection_diagnostics" not in SOURCE
 
-    near_singular = solve_step(0.8378, 0.8378, 0.999999, 0.3)
-    assert all(math.isfinite(value) for value in near_singular)
-    assert max(abs(value) for value in near_singular) < 0.5
+    special_z = _source(_function("_lower_limb_special_z_session"))
+    assert 'transform_orientation_slots[0].type' not in special_z
 
 
 def test_rc1_sliding_replay_restores_signed_calf_branch_from_public_pose() -> None:

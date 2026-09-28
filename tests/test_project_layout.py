@@ -86,6 +86,18 @@ def test_debug_trace_routes_golden_baseline_to_project_debug():
     assert 'return blend_dir.parent.parent / "debug"' in source
 
 
+def test_user_blender_launch_keeps_input_debugging_opt_in():
+    root = Path(__file__).parents[1]
+    launcher = (root / "scripts" / "launch_blender_hidden.py").read_text(encoding="utf-8-sig")
+    init_source = (
+        root / "extension" / "blender_animation_workbench" / "__init__.py"
+    ).read_text(encoding="utf-8-sig")
+
+    assert '"--enable-event-simulate"' not in launcher
+    assert "debug_input.register_raw_input_observers()" not in init_source
+    assert "debug_input.unregister_raw_input_observers()" in init_source
+
+
 def test_blender_runtime_errors_are_persisted_with_semantic_context():
     root = Path(__file__).parents[1]
     launcher = (root / "scripts" / "launch_blender_hidden.py").read_text(encoding="utf-8-sig")

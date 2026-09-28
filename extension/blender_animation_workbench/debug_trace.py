@@ -39,6 +39,7 @@ _RUNTIME_CONTEXT_FILENAME = "awb_runtime_context.json"
 _RUNTIME_ERRORS_FILENAME = "awb_runtime_errors.jsonl"
 _TRACE_MAX_BYTES = 4 * 1024 * 1024
 _PRECISION_TRACE_MAX_BYTES = 2 * 1024 * 1024
+_TRACE_SEGMENT_DIRNAME = "trace_segments"
 _TAIL_READ_CHUNK_BYTES = 64 * 1024
 _RUNTIME_ERROR_CAUSAL_MAX_AGE_NS = 5_000_000_000
 _STATE_CHECKPOINT_EVENT_BOUNDARIES: dict[str, str] = {
@@ -558,14 +559,52 @@ def _rotate_replay_history_for_new_session(script: dict[str, Any]) -> None:
     _write_replay_script_file(previous_path, current)
 
 
+def _trace_segment_dir(path: Path) -> Path:
+    return path.parent / _TRACE_SEGMENT_DIRNAME
+
+
+def _trace_segment_paths(path: Path, session_id: str) -> tuple[Path, ...]:
+    if not session_id:
+        return ()
+    root = _trace_segment_dir(path)
+    if not root.exists():
+        return ()
+    pattern = f"{path.stem}.{session_id}.*{path.suffix}"
+    return tuple(sorted(root.glob(pattern)))
+
+
+def _last_jsonl_session(path: Path) -> str:
+    records = _read_jsonl_tail(path, 1)
+    if not records:
+        return ""
+    return str(records[-1].get("session_id") or "")
+
+
 def _archive_existing_session_file(path: Path) -> None:
     try:
         if not path.exists() or path.stat().st_size <= 0:
             return
+        recorded_session = _last_jsonl_session(path)
+        if recorded_session == _SESSION_ID:
+            # Reopening/reloading a .blend inside one Blender process must not
+            # rotate away the still-active diagnostic session.
+            return
+
         archive = path.with_name(f"{path.stem}.previous{path.suffix}")
-        if archive.exists():
-            archive.unlink()
-        path.replace(archive)
+        temp = archive.with_name(f"{archive.name}.tmp")
+        sources = (*_trace_segment_paths(path, recorded_session), path)
+        with temp.open("wb") as output:
+            for source in sources:
+                if not source.exists():
+                    continue
+                with source.open("rb") as input_handle:
+                    while chunk := input_handle.read(1024 * 1024):
+                        output.write(chunk)
+        temp.replace(archive)
+        for source in sources:
+            if source != path:
+                source.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
     except OSError:
         # Diagnostics must never block Blender startup.
         return
@@ -613,24 +652,33 @@ def _read_jsonl_tail(path: Path, limit: int) -> list[dict[str, Any]]:
         return []
 
 
+def _read_active_session_records(path: Path, limit: int) -> list[dict[str, Any]]:
+    limit = max(1, int(limit))
+    records: list[dict[str, Any]] = []
+    for segment in _trace_segment_paths(path, _SESSION_ID):
+        records.extend(
+            item
+            for item in _read_jsonl_tail(segment, limit)
+            if item.get("session_id") == _SESSION_ID
+        )
+    records.extend(
+        item
+        for item in _read_jsonl_tail(path, limit)
+        if item.get("session_id") == _SESSION_ID
+    )
+    return records[-limit:]
+
+
 def read_recent_trace_events(limit: int = 80, *, latest_session_only: bool = True) -> list[dict[str, Any]]:
-    records = _read_jsonl_tail(_trace_path(), limit)
-    if not latest_session_only or not records:
-        return records
-    latest_session = records[-1].get("session_id")
-    if not latest_session:
-        return records
-    return [item for item in records if item.get("session_id") == latest_session]
+    if latest_session_only:
+        return _read_active_session_records(_trace_path(), limit)
+    return _read_jsonl_tail(_trace_path(), limit)
 
 
 def read_recent_precision_events(limit: int = 120, *, latest_session_only: bool = True) -> list[dict[str, Any]]:
-    records = _read_jsonl_tail(_precision_trace_path(), limit)
-    if not latest_session_only or not records:
-        return records
-    latest_session = records[-1].get("session_id")
-    if not latest_session:
-        return records
-    return [item for item in records if item.get("session_id") == latest_session]
+    if latest_session_only:
+        return _read_active_session_records(_precision_trace_path(), limit)
+    return _read_jsonl_tail(_precision_trace_path(), limit)
 
 
 def summarize_recent_precision_events(limit: int = 600) -> dict[str, Any]:
@@ -1658,9 +1706,19 @@ def _rotate_if_needed(path: Path, *, max_bytes: int = _TRACE_MAX_BYTES) -> None:
     try:
         if not path.exists() or path.stat().st_size < int(max_bytes):
             return
-        archive = path.with_name(f"{path.stem}.previous{path.suffix}")
-        if archive.exists():
-            archive.unlink()
+        records = _read_jsonl_tail(path, 1)
+        last = records[-1] if records else {}
+        session_id = str(last.get("session_id") or _SESSION_ID)
+        last_seq = int(last.get("seq") or 0)
+        root = _trace_segment_dir(path)
+        root.mkdir(parents=True, exist_ok=True)
+        archive = root / f"{path.stem}.{session_id}.{last_seq:012d}{path.suffix}"
+        collision = 1
+        while archive.exists():
+            archive = root / (
+                f"{path.stem}.{session_id}.{last_seq:012d}.{collision}{path.suffix}"
+            )
+            collision += 1
         path.replace(archive)
     except OSError:
         # Tracing is diagnostic-only and must never interfere with animation.
@@ -2057,6 +2115,7 @@ def trace_event(
                 "AUTO_KEY_TOGGLE",
                 "CONTACT_COMMIT",
                 "TRANSFORM_COMMIT",
+                "KEY_EDIT_COMMIT",
                 "SCRUB_END",
             }
         ):

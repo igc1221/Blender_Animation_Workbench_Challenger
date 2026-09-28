@@ -744,7 +744,9 @@ def register():
     register_interaction_keymaps()
     register_trajectory_edit_keymaps()
     debug_input.unregister_keymap_probes()
-    debug_input.register_raw_input_observers()
+    # Raw-input observation is diagnostic-only. Keep the normal USER Blender
+    # input path clean; incident tooling may opt in explicitly when needed.
+    debug_input.unregister_raw_input_observers()
     register_draw_handler()
     register_trajectory_draw_handler()
     register_trajectory_tangent_draw_handler()

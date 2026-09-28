@@ -543,6 +543,112 @@ def ensure_generated_rigped_ik_hinge_limits(armature_object) -> bool:
     return changed
 
 
+_FOREARM_POST_SOLVE_ROLL_CONSTRAINT = "AWB_PostSolve_ForeArmRoll"
+
+
+def ensure_generated_rigped_forearm_post_solve_roll(armature_object) -> bool:
+    """Ensure generated Rigpeds expose ForeArm axial roll after the native IK solve.
+
+    The native two-bone IK result remains authoritative on MCH_ForeArm. DEF_ForeArm
+    first copies that complete solved transform, then replaces only local Y rotation
+    from the public ForeArm control. This keeps Free behavior unchanged while
+    allowing Sliding ForeArm axial roll to remain a post-solve deform/display DOF.
+    """
+
+    pose = getattr(getattr(armature_object, "pose", None), "bones", None)
+    if pose is None:
+        return False
+
+    changed = False
+    for suffix in ("L", "R"):
+        owner = pose.get(f"DEF_ForeArm.{suffix}")
+        public_lower = pose.get(f"ForeArm.{suffix}")
+        if owner is None or public_lower is None:
+            continue
+
+        constraint_name = f"{_FOREARM_POST_SOLVE_ROLL_CONSTRAINT}.{suffix}"
+        constraint = next(
+            (
+                item
+                for item in owner.constraints
+                if str(getattr(item, "name", "")) == constraint_name
+                and str(getattr(item, "type", "")) == "COPY_ROTATION"
+            ),
+            None,
+        )
+        if constraint is None:
+            constraint = owner.constraints.new(type="COPY_ROTATION")
+            constraint.name = constraint_name
+            changed = True
+
+        desired = (
+            armature_object,
+            f"ForeArm.{suffix}",
+            "LOCAL",
+            "LOCAL",
+            "REPLACE",
+            False,
+            True,
+            False,
+            1.0,
+        )
+        before = (
+            getattr(constraint, "target", None),
+            str(getattr(constraint, "subtarget", "")),
+            str(getattr(constraint, "target_space", "")),
+            str(getattr(constraint, "owner_space", "")),
+            str(getattr(constraint, "mix_mode", "")),
+            bool(getattr(constraint, "use_x", False)),
+            bool(getattr(constraint, "use_y", False)),
+            bool(getattr(constraint, "use_z", False)),
+            float(getattr(constraint, "influence", 0.0)),
+        )
+        constraint.target = armature_object
+        constraint.subtarget = f"ForeArm.{suffix}"
+        constraint.target_space = "LOCAL"
+        constraint.owner_space = "LOCAL"
+        constraint.mix_mode = "REPLACE"
+        constraint.use_x = False
+        constraint.use_y = True
+        constraint.use_z = False
+        constraint.influence = 1.0
+        changed = before != desired or changed
+
+        current_index = owner.constraints.find(constraint.name)
+        final_index = len(owner.constraints) - 1
+        if current_index >= 0 and current_index != final_index:
+            owner.constraints.move(current_index, final_index)
+            changed = True
+
+    return changed
+
+
+def upgrade_generated_rigped_forearm_post_solve_roll(scene, armature_object) -> bool:
+    """Idempotently upgrade an existing generated Rigped and refresh its descriptor."""
+
+    setup = (
+        armature_object.get(RIGPED_SETUP_PROPERTY)
+        if hasattr(armature_object, "get")
+        else None
+    )
+    getter = getattr(setup, "get", None)
+    if not callable(getter):
+        return False
+    character_id = str(getter("character_id", "") or "")
+    if not character_id:
+        return False
+
+    # Resolve before mutating so malformed/non-generated objects remain untouched.
+    view = resolve_character(scene, character_id)
+    changed = ensure_generated_rigped_forearm_post_solve_roll(armature_object)
+    if not changed:
+        return False
+
+    setup["signature"] = compute_setup_signature(view)
+    setup["revision"] = max(1, int(getter("revision", 1) or 1)) + 1
+    return True
+
+
 def _setup_constraints(
     armature_object,
     bones: tuple[HumanoidBoneSpec, ...],
@@ -589,6 +695,7 @@ def _setup_constraints(
     # constraint itself lives on the lower MCH joint. Apply their broad
     # anatomical envelope only after the whole generated pose chain exists.
     ensure_generated_rigped_ik_hinge_limits(armature_object)
+    ensure_generated_rigped_forearm_post_solve_roll(armature_object)
 
     # I18 adds a dormant parent-like external Object space to every generated
     # Contact hold carrier. A Rigped-owned hidden placeholder keeps the

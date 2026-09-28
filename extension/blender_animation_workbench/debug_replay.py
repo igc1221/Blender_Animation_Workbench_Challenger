@@ -67,6 +67,7 @@ from .rigped_transform import (
     _passive_sliding_capabilities,
     _refresh_current_sliding_public_overlays,
     _resolved_control_role_name,
+    _restore_hinge_settings,
     _selected_direct_rotate_controls,
     _sliding_capabilities_for_character,
     _state_for_pose_matrix,
@@ -80,6 +81,10 @@ from .rigped_transform import (
 )
 from .semantic_adapter import control_context_for_context
 from .trackbar_keying import set_awb_auto_key
+from .trackbar_model import (
+    clone_selected_key_frames_for_context,
+    move_selected_key_frames_for_context,
+)
 
 
 class ReplayMode(StrEnum):
@@ -600,7 +605,338 @@ def _execute_contact_action(
     return _execute_contact_recorded_result_action(context, action)
 
 
-def _execute_free_direct_rotate_action(context, action: dict[str, Any]) -> dict[str, Any]:
+def _validate_recorded_pose_state(payload: dict[str, Any]) -> dict[str, Any]:
+    required = {
+        "object",
+        "bone",
+        "location",
+        "rotation_mode",
+        "rotation_property",
+        "rotation",
+    }
+    missing = sorted(required.difference(payload))
+    if missing:
+        raise RuntimeError(
+            f"AWB recorded Rotate result pose state is incomplete: {missing!r}."
+        )
+
+    object_name = str(payload.get("object") or "")
+    bone_name = str(payload.get("bone") or "")
+    if not object_name or not bone_name:
+        raise RuntimeError("AWB recorded Rotate result has an empty pose identity.")
+    owner = bpy.data.objects.get(object_name)
+    if owner is None or getattr(owner, "type", None) != "ARMATURE":
+        raise RuntimeError(
+            f"AWB recorded Rotate result lost armature {object_name!r}."
+        )
+    pose_bone = owner.pose.bones.get(bone_name)
+    if pose_bone is None:
+        raise RuntimeError(
+            f"AWB recorded Rotate result lost pose bone {bone_name!r}."
+        )
+
+    try:
+        location = tuple(float(value) for value in tuple(payload["location"]))
+        rotation = tuple(float(value) for value in tuple(payload["rotation"]))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"AWB recorded Rotate result has non-numeric pose data for {bone_name!r}."
+        ) from exc
+    if len(location) != 3:
+        raise RuntimeError(
+            f"AWB recorded Rotate result has invalid location for {bone_name!r}."
+        )
+
+    rotation_mode = str(payload.get("rotation_mode") or "")
+    rotation_property = str(payload.get("rotation_property") or "")
+    expected_property = {
+        "QUATERNION": "rotation_quaternion",
+        "AXIS_ANGLE": "rotation_axis_angle",
+        "XYZ": "rotation_euler",
+        "XZY": "rotation_euler",
+        "YXZ": "rotation_euler",
+        "YZX": "rotation_euler",
+        "ZXY": "rotation_euler",
+        "ZYX": "rotation_euler",
+    }.get(rotation_mode)
+    if expected_property is None or rotation_property != expected_property:
+        raise RuntimeError(
+            f"AWB recorded Rotate result has inconsistent rotation representation for {bone_name!r}."
+        )
+    expected_size = 4 if rotation_property != "rotation_euler" else 3
+    if len(rotation) != expected_size:
+        raise RuntimeError(
+            f"AWB recorded Rotate result has invalid rotation for {bone_name!r}."
+        )
+
+    return {
+        "key": (object_name, bone_name),
+        "pose_bone": pose_bone,
+        "location": location,
+        "rotation_mode": rotation_mode,
+        "rotation_property": rotation_property,
+        "rotation": rotation,
+    }
+
+
+def _apply_recorded_pose_state(payload: dict[str, Any]) -> None:
+    row = _validate_recorded_pose_state(payload)
+    pose_bone = row["pose_bone"]
+    pose_bone.rotation_mode = row["rotation_mode"]
+    pose_bone.location = row["location"]
+    setattr(pose_bone, row["rotation_property"], row["rotation"])
+
+
+def _expected_direct_rotate_recorded_pose_keys(resolved, sliding_syncs) -> frozenset[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+
+    def add(control) -> None:
+        keys.add((
+            str(control.owner_object.name),
+            str(control.target.name),
+        ))
+
+    for control in resolved:
+        add(control)
+    for session in sliding_syncs:
+        capability = session.capability
+        for control in (
+            *capability.fk_controls,
+            *capability.result_controls,
+            capability.authored_terminal,
+            capability.result_terminal,
+            capability.native_ik.solver_owner,
+            capability.native_ik.ik_target,
+        ):
+            add(control)
+        if capability.native_ik.pole_target is not None:
+            add(capability.native_ik.pole_target)
+    return frozenset(keys)
+
+
+def _validate_direct_rotate_recorded_result(
+    payload: dict[str, Any],
+    resolved,
+    sliding_syncs,
+) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    if not isinstance(payload, dict) or payload.get("schema") != (
+        "awb-direct-rotate-recorded-result/v1"
+    ):
+        raise RuntimeError("AWB recorded Rotate result schema is unsupported.")
+
+    raw_states = tuple(payload.get("pose_states") or ())
+    if not raw_states:
+        raise RuntimeError("AWB recorded Rotate result has no pose states.")
+    if any(not isinstance(item, dict) for item in raw_states):
+        raise RuntimeError("AWB recorded Rotate result pose state is malformed.")
+
+    pose_rows = tuple(_validate_recorded_pose_state(item) for item in raw_states)
+    pose_keys = tuple(row["key"] for row in pose_rows)
+    if len(set(pose_keys)) != len(pose_keys):
+        raise RuntimeError("AWB recorded Rotate result has duplicate pose identities.")
+    expected_pose_keys = _expected_direct_rotate_recorded_pose_keys(
+        resolved,
+        sliding_syncs,
+    )
+    if set(pose_keys) != set(expected_pose_keys):
+        missing = sorted(set(expected_pose_keys).difference(pose_keys))
+        unexpected = sorted(set(pose_keys).difference(expected_pose_keys))
+        raise RuntimeError(
+            "AWB recorded Rotate pose coverage mismatch: "
+            f"missing={missing!r}, unexpected={unexpected!r}."
+        )
+
+    raw_sliding = tuple(payload.get("sliding") or ())
+    if any(not isinstance(item, dict) for item in raw_sliding):
+        raise RuntimeError("AWB recorded Rotate Sliding state is malformed.")
+
+    sync_by_mapping: dict[str, Any] = {}
+    for session in sliding_syncs:
+        mapping_id = str(session.capability.native_ik.mapping_id)
+        if mapping_id in sync_by_mapping:
+            raise RuntimeError(
+                f"AWB replay operation domain has duplicate Sliding mapping {mapping_id!r}."
+            )
+        sync_by_mapping[mapping_id] = session
+
+    recorded_mapping_ids = tuple(
+        str(item.get("mapping_id") or "")
+        for item in raw_sliding
+    )
+    if any(not mapping_id for mapping_id in recorded_mapping_ids):
+        raise RuntimeError("AWB recorded Rotate Sliding mapping identity is empty.")
+    if len(set(recorded_mapping_ids)) != len(recorded_mapping_ids):
+        raise RuntimeError("AWB recorded Rotate result has duplicate Sliding mappings.")
+    if set(recorded_mapping_ids) != set(sync_by_mapping):
+        raise RuntimeError(
+            "AWB recorded Rotate Sliding coverage does not match the frozen domain."
+        )
+
+    sliding_rows: list[dict[str, Any]] = []
+    required_sliding = {
+        "mapping_id",
+        "solver_object",
+        "solver_bone",
+        "pole_angle",
+        "ik_influence",
+        "ik_mute",
+        "terminal_ik_influence",
+        "terminal_ik_mute",
+        "feedback_mutes",
+        "hinge_settings",
+        "contact_state",
+    }
+    for item in raw_sliding:
+        missing = sorted(required_sliding.difference(item))
+        if missing:
+            raise RuntimeError(
+                f"AWB recorded Rotate Sliding state is incomplete: {missing!r}."
+            )
+        mapping_id = str(item["mapping_id"])
+        session = sync_by_mapping[mapping_id]
+        capability = session.capability
+        solver_owner = capability.native_ik.solver_owner.target
+        solver_object = str(capability.native_ik.solver_owner.owner_object.name)
+        solver_bone = str(solver_owner.name)
+        if (
+            str(item.get("solver_object") or "") != solver_object
+            or str(item.get("solver_bone") or "") != solver_bone
+        ):
+            raise RuntimeError(
+                f"AWB recorded Rotate solver identity mismatch for {mapping_id!r}."
+            )
+
+        feedback_constraints = (
+            *capability.fk_copy_constraints,
+            capability.terminal_fk_constraint,
+        )
+        feedback_mutes = tuple(item["feedback_mutes"])
+        if (
+            len(feedback_mutes) != len(feedback_constraints)
+            or any(not isinstance(value, bool) for value in feedback_mutes)
+        ):
+            raise RuntimeError(
+                f"AWB recorded Rotate feedback coverage mismatch for {mapping_id!r}."
+            )
+
+        hinge_settings = tuple(item["hinge_settings"])
+        if (
+            len(hinge_settings) != 12
+            or any(not isinstance(value, bool) for value in hinge_settings[:6])
+        ):
+            raise RuntimeError(
+                f"AWB recorded Rotate hinge settings are incomplete for {mapping_id!r}."
+            )
+        try:
+            normalized_hinge_settings = (
+                *hinge_settings[:6],
+                *(float(value) for value in hinge_settings[6:]),
+            )
+            pole_angle = float(item["pole_angle"])
+            ik_influence = float(item["ik_influence"])
+            terminal_ik_influence = float(item["terminal_ik_influence"])
+            contact_state = (
+                None
+                if item["contact_state"] is None
+                else float(item["contact_state"])
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"AWB recorded Rotate Sliding numeric state is invalid for {mapping_id!r}."
+            ) from exc
+        if not isinstance(item["ik_mute"], bool) or not isinstance(
+            item["terminal_ik_mute"],
+            bool,
+        ):
+            raise TypeError(
+                f"AWB recorded Rotate Sliding mute state is invalid for {mapping_id!r}."
+            )
+
+        sliding_rows.append({
+            "mapping_id": mapping_id,
+            "session": session,
+            "solver_owner": solver_owner,
+            "feedback_constraints": feedback_constraints,
+            "feedback_mutes": feedback_mutes,
+            "hinge_settings": normalized_hinge_settings,
+            "contact_state": contact_state,
+            "pole_angle": pole_angle,
+            "ik_influence": ik_influence,
+            "ik_mute": item["ik_mute"],
+            "terminal_ik_influence": terminal_ik_influence,
+            "terminal_ik_mute": item["terminal_ik_mute"],
+        })
+
+    return pose_rows, tuple(sliding_rows)
+
+
+def _apply_direct_rotate_recorded_result(
+    context,
+    payload: dict[str, Any],
+    resolved,
+    sliding_syncs,
+) -> None:
+    pose_rows, sliding_rows = _validate_direct_rotate_recorded_result(
+        payload,
+        resolved,
+        sliding_syncs,
+    )
+
+    for row in sliding_rows:
+        capability = row["session"].capability
+        capability.native_ik.constraint.influence = 0.0
+        capability.terminal_ik_constraint.influence = 0.0
+    if sliding_rows:
+        context.view_layer.update()
+
+    for row in pose_rows:
+        pose_bone = row["pose_bone"]
+        pose_bone.rotation_mode = row["rotation_mode"]
+        pose_bone.location = row["location"]
+        setattr(pose_bone, row["rotation_property"], row["rotation"])
+
+    for row in sliding_rows:
+        session = row["session"]
+        capability = session.capability
+        native_ik = capability.native_ik.constraint
+        terminal_ik = capability.terminal_ik_constraint
+        solver_owner = row["solver_owner"]
+        _restore_hinge_settings(solver_owner, row["hinge_settings"])
+        contact_state = row["contact_state"]
+        if contact_state is None:
+            if AWB_CONTACT_STATE_PROPERTY in solver_owner:
+                del solver_owner[AWB_CONTACT_STATE_PROPERTY]
+        else:
+            solver_owner[AWB_CONTACT_STATE_PROPERTY] = contact_state
+        native_ik.pole_angle = row["pole_angle"]
+        native_ik.mute = row["ik_mute"]
+        terminal_ik.mute = row["terminal_ik_mute"]
+        for constraint, mute in zip(
+            row["feedback_constraints"],
+            row["feedback_mutes"],
+            strict=True,
+        ):
+            constraint.mute = mute
+        native_ik.influence = row["ik_influence"]
+        terminal_ik.influence = row["terminal_ik_influence"]
+
+    context.view_layer.update()
+    if sliding_rows:
+        _refresh_current_sliding_public_overlays(
+            context,
+            capabilities=tuple(
+                row["session"].capability for row in sliding_rows
+            ),
+            allow_seed=False,
+        )
+
+
+def _execute_free_direct_rotate_action(
+    context,
+    action: dict[str, Any],
+    *,
+    replay_mode: ReplayMode,
+) -> dict[str, Any]:
     scene = context.scene
     frame = int(action.get("frame", scene.frame_current))
     subframe = float(action.get("subframe", 0.0))
@@ -702,35 +1038,67 @@ def _execute_free_direct_rotate_action(context, action: dict[str, Any]) -> dict[
                     allow_storage_rebind=True,
                 )
 
-    quaternion_values = tuple(float(value) for value in tuple(action.get("delta_world_quaternion") or ()))
-    if len(quaternion_values) != 4:
-        raise RuntimeError("AWB semantic replay Rotate is missing its world delta quaternion.")
-    delta_world = Quaternion(quaternion_values).normalized()
+    recorded_result = action.get("recorded_result")
+    semantic_rotate_requires_result = bool(sliding_syncs) or len(resolved) > 1
+    if replay_mode is ReplayMode.RECORDED_RESULT and recorded_result is not None:
+        _apply_direct_rotate_recorded_result(
+            context,
+            recorded_result,
+            resolved,
+            sliding_syncs,
+        )
+        resolved_for_delta = ()
+        sliding_syncs_for_delta = ()
+    else:
+        if replay_mode is ReplayMode.RECORDED_RESULT and semantic_rotate_requires_result:
+            raise RuntimeError(
+                "UNSUPPORTED_LEGACY_ROTATE_RESULT: multi-control/Sliding "
+                "Rotate replay lacks a per-control recorded-result bundle."
+            )
+        if replay_mode is ReplayMode.COMMAND and semantic_rotate_requires_result:
+            raise RuntimeError(
+                "UNSUPPORTED_COMMAND_ROTATE_SEMANTICS: multi-control/Sliding "
+                "Rotate requires the semantic command executor, not a shared world quaternion."
+            )
+        resolved_for_delta = resolved
+        sliding_syncs_for_delta = sliding_syncs
 
-    rotation_world = delta_world.to_matrix().to_4x4()
-    for control in resolved:
-        pose_bone = control.target
-        owner = control.owner_object
-        start_pose = pose_bone.matrix.copy()
-        start_world = owner.matrix_world @ start_pose
-        pivot_world = Vector(_control_pivot_world(control))
-        desired_world = (
-            Matrix.Translation(pivot_world)
-            @ rotation_world
-            @ Matrix.Translation(-pivot_world)
-            @ start_world
+    quaternion_values: tuple[float, ...] = ()
+    if resolved_for_delta:
+        quaternion_values = tuple(
+            float(value)
+            for value in tuple(action.get("delta_world_quaternion") or ())
         )
-        desired_pose = owner.matrix_world.inverted_safe() @ desired_world
-        desired_state = _state_for_pose_matrix(control, desired_pose)
-        _apply_control_state(
-            control,
-            desired_state,
-            location=_uses_center_pivot(control),
-            rotation=True,
-        )
-    context.view_layer.update()
-    for session in sliding_syncs:
-        _apply_direct_rotate_sliding_sync(context, session)
+        if len(quaternion_values) != 4:
+            raise RuntimeError(
+                "AWB semantic replay Rotate is missing its world delta quaternion."
+            )
+        delta_world = Quaternion(quaternion_values).normalized()
+
+        rotation_world = delta_world.to_matrix().to_4x4()
+        for control in resolved_for_delta:
+            pose_bone = control.target
+            owner = control.owner_object
+            start_pose = pose_bone.matrix.copy()
+            start_world = owner.matrix_world @ start_pose
+            pivot_world = Vector(_control_pivot_world(control))
+            desired_world = (
+                Matrix.Translation(pivot_world)
+                @ rotation_world
+                @ Matrix.Translation(-pivot_world)
+                @ start_world
+            )
+            desired_pose = owner.matrix_world.inverted_safe() @ desired_world
+            desired_state = _state_for_pose_matrix(control, desired_pose)
+            _apply_control_state(
+                control,
+                desired_state,
+                location=_uses_center_pivot(control),
+                rotation=True,
+            )
+        context.view_layer.update()
+        for session in sliding_syncs_for_delta:
+            _apply_direct_rotate_sliding_sync(context, session)
     _refresh_current_sliding_public_overlays(
         context,
         capabilities=sliding_guard_capabilities,
@@ -1254,6 +1622,60 @@ def _execute_hybrid_move_action(context, action: dict[str, Any]) -> dict[str, An
     }
 
 
+def _execute_key_edit_action(context, action: dict[str, Any]) -> dict[str, Any]:
+    scene = context.scene
+    mode = str(action.get("mode") or "").upper()
+    if mode not in {"MOVE", "CLONE"}:
+        raise RuntimeError(f"AWB semantic replay KEY_EDIT mode is unsupported: {mode!r}.")
+
+    source_frames = tuple(float(value) for value in tuple(action.get("source_frames") or ()))
+    if not source_frames:
+        raise RuntimeError("AWB semantic replay KEY_EDIT requires source_frames.")
+    try:
+        delta_frames = int(action.get("delta_frames"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("AWB semantic replay KEY_EDIT requires integer delta_frames.") from exc
+    if delta_frames == 0:
+        raise RuntimeError("AWB semantic replay KEY_EDIT delta_frames must be non-zero.")
+
+    controls = tuple(str(name) for name in tuple(action.get("controls") or ()) if str(name))
+    if controls:
+        _select_pose_controls(context, controls)
+
+    if mode == "MOVE":
+        committed = move_selected_key_frames_for_context(
+            context,
+            list(source_frames),
+            delta_frames,
+        )
+    else:
+        committed = clone_selected_key_frames_for_context(
+            context,
+            list(source_frames),
+            delta_frames,
+        )
+    if not committed:
+        raise RuntimeError(
+            f"AWB semantic replay KEY_EDIT {mode} did not mutate the requested source frames."
+        )
+
+    target_frame = int(
+        action.get(
+            "target_frame",
+            round(source_frames[0] + float(delta_frames)),
+        )
+    )
+    scene.frame_set(target_frame)
+    return {
+        "kind": "KEY_EDIT",
+        "mode": mode,
+        "source_frames": list(source_frames),
+        "delta_frames": delta_frames,
+        "target_frame": target_frame,
+        "controls": controls,
+    }
+
+
 def _execute_scrub_action(
     context,
     action: dict[str, Any],
@@ -1317,6 +1739,11 @@ def _semantic_replay_action_route(
         if route in {"SLIDING_MOVE", "HYBRID_MOVE", "DIRECT_MOVE"}:
             return route
         return "FREE_FK_MOVE"
+    if kind == "KEY_EDIT":
+        mode = str(action.get("mode") or "").upper()
+        if mode not in {"MOVE", "CLONE"}:
+            raise RuntimeError(f"AWB semantic replay KEY_EDIT mode is unsupported: {mode!r}.")
+        return f"KEY_{mode}"
     if kind == "SCRUB":
         return "SCRUB"
     raise RuntimeError(f"AWB semantic replay v1 does not support action kind {kind!r}.")
@@ -1419,7 +1846,11 @@ def run_semantic_replay(
                         replay_mode=resolved_replay_mode,
                     )
                 elif kind == "ROTATE":
-                    result = _execute_free_direct_rotate_action(context, action)
+                    result = _execute_free_direct_rotate_action(
+                        context,
+                        action,
+                        replay_mode=resolved_replay_mode,
+                    )
                 elif kind == "MOVE":
                     route = str(action.get("route") or "")
                     if route == "SLIDING_MOVE":
@@ -1430,6 +1861,8 @@ def run_semantic_replay(
                         result = _execute_direct_move_action(context, action)
                     else:
                         result = _execute_free_fk_move_action(context, action)
+                elif kind == "KEY_EDIT":
+                    result = _execute_key_edit_action(context, action)
                 elif kind == "SCRUB":
                     result = _execute_scrub_action(
                         context,
