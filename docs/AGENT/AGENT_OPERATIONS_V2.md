@@ -1,6 +1,6 @@
 # Blender Animation Workbench — Agent Operations V2
 
-> Updated: 2026-09-27 KST
+> Updated: 2026-09-29 KST
 > Authority: Main / Sol
 > Runtime: Harness Lite V2 + Goose G1-G8
 > Purpose: single current authority for planning, research, implementation, debugging, review, verification, and worker allocation.
@@ -44,6 +44,8 @@ Main owns the work where continuous judgment is the speed advantage:
 - final integration and Git checkpoint.
 
 Main does not hand off an important step merely to keep workers occupied.
+
+**GPT-6 Sol High standing rule:** when available through the ordinary Goose G1-G8 pool, GPT-6 Sol High is the standing Sub-main/Main-peer partner. It may own important implementation, review, debugging, or verification work at the same scale as Main on a non-overlapping slice. When two important independent slices are ready, default allocation is Main 1 / Sol High 1. One coupled production seam still has one live mutation owner, and Main retains final APPLY / DEFER / REJECT, integration, acceptance, checkpoint, and session-close authority.
 
 ### Goose G1-G8
 
@@ -105,6 +107,25 @@ When a worker launch needs Harness Lite code/runtime, invoke it explicitly while
 Switch the selected project to `aiprojectharness_lite` only when the task is actually to inspect, modify, test, or repair Harness Lite itself. That is a separate project task, not normal AWB worker orchestration.
 
 Parallelism is **aggressive where independent, conservative where ownership overlaps**.
+
+### Git / worktree boundary
+
+Canonical Main workspace:
+
+`E:\AIProjects\Tools\Blender_Animation_Workbench`
+
+Canonical worker root:
+
+`E:\AIProjects\Worktrees\Blender_Animation_Workbench`
+
+Normal worker lanes are `goose\g1..g8`.
+
+- Main owns `master`, canonical docs, integration, and checkpoints.
+- A Goose execution mutates only its assigned isolated lane/worktree.
+- Never reset, clean, restore, or depend on another lane's uncommitted state.
+- Direct automatic worker merge/commit into Main is forbidden.
+- Consume/disposition the result and complete any learning review before lane finalization/cleanup.
+- At session close, every used lane must be inactive/clean.
 
 ## 4. Planning and research policy
 
@@ -169,11 +190,13 @@ Main chooses the provider from DeepSeek / Qwen / Gemini Web (GLM fallback) accor
 
 PRE receives the decision-critical design/contract plus exact relevant source evidence.
 
+External reviewers do not have implicit repository context. Each substantive packet must provide the smallest fair context: the frozen contract, task-specific canonical docs, exact affected source/diff, known verification evidence, and the precise review question. If required evidence is absent, the reviewer should report `MISSING PROJECT CONTEXT` rather than fill gaps with generic assumptions.
+
 POST receives the actual completed source/diff plus the frozen contracts and required regression evidence.
 
 If POST finds blockers, Main fixes and verifies them directly. Do **not** request another POST merely because the first POST produced findings. A new PRE/POST cycle begins only for a genuinely new implementation/design slice.
 
-A sent PRE/POST request must be consumed and dispositioned before that gate closes.
+A sent PRE/POST request must be consumed and dispositioned before that gate closes. Request/response queue artifacts are transient: after Main consumes and dispositions the findings, remove the task packet rather than preserving a permanent reviewer archive. Provider-specific behavior belongs in `WORKER_PROFILES/`.
 
 ## 7. Implementation allocation rule
 
@@ -227,30 +250,30 @@ The General Debugger remains evidence-driven rather than mandatory. Use `docs/DE
 
 Never stack speculative sign/axis/hotfix patches. When evidence invalidates the causal model or repeated focused repair contaminates the patch stack, return to the newest accepted recovery boundary and re-plan.
 
-## 10. Major-unit operations plans
+## 10. Feature / major-unit plans
 
-Permanent policy and milestone execution plans are separate.
+Permanent worker policy and product/feature plans are separate.
 
-For every large work unit, create or update exactly one plan under:
+When a substantial unit needs a durable implementation plan, place it in the **owning subsystem folder** under `docs/PHASE4/planning/` rather than a central orchestration folder. Examples:
 
-`docs/PHASE4/planning/orchestrator/`
+- Rigped / Contact / Fit / core closure -> `planning/rigped/`;
+- general viewport/selection/gizmo work -> `planning/general/`;
+- animation operations -> `planning/animation/`.
 
-That plan owns the unit's:
+The focused plan may own:
 
 - H-step decomposition;
-- MAIN/GOOSE assignment;
-- Step-level `required_skills` selection;
+- MAIN / Sub-main / GOOSE assignment;
+- Step-level `required_skills`;
 - parallel groups and dependencies;
 - research/web-research fan-out;
 - mutation ownership;
 - PRE1/POST1 placement;
 - verification and USER acceptance boundaries.
 
-Do not grow this permanent policy with RC-, feature-, or milestone-specific worker allocations.
+Completed plans may remain beside the subsystem they explain when they document the architecture or accepted decisions of the current system. Speculative plans for unstarted future features should be written fresh when that feature is actually prioritized.
 
-Current plan index:
-
-`docs/PHASE4/planning/orchestrator/README.md`
+Do not create a separate central orchestration-plan hierarchy merely to describe worker allocation.
 
 ## 11. Verification and repair
 
@@ -289,13 +312,13 @@ This file is the current AWB agent/worker operations authority.
 Supporting documents:
 
 - `AGENTS.md` — short project bootstrap and routing;
-- `MAIN_WORKFLOW.md` — Main-specific execution checklist;
 - `WORKER_GUIDE.md` — bounded Goose worker contract;
+- `WORKER_REQUEST_TEMPLATE.md` — reusable Goose and External Web request shape;
 - `BLENDER_RUNTIME_RULES.md` — Blender/runtime evidence rules;
 - `../DEBUG/BLENDER_USER_FIRST_FINAL_TEST_PROTOCOL.md` — top-level product-modification and USER FIRST/FINAL authority;
 - `../DEBUG/BUG_FIXING_GUIDE.md` — subordinate SMALL/MEDIUM/LARGE bug-fix routing;
 - `../DEBUG/AWB_DEBUG_FLIGHT_RECORDER.md` — General Debugger operational detail;
 - `WORKER_PROFILES/*` — current Goose and External Web provider profiles.
-- `../PHASE4/planning/orchestrator/*` — current Phase 4 major-unit execution/workforce plans.
+- `../PHASE4/planning/*` — task-specific Phase 4 plans in their owning subsystem folders.
 
 Older OpenCode/Luna-first routing, fixed eight-lane occupancy, two-reviewer PRE/POST minimums, and PRE2/POST2-style review practice are superseded by this document.

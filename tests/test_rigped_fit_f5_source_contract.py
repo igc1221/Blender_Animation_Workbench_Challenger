@@ -51,24 +51,23 @@ def test_f5_fit_ui_has_no_native_rest_history_authority():
     assert "end_fit_semantic_session(context)" in ui
 
 
-def test_f5_transform_routes_keep_figure_and_remove_editbone_fit_route():
+def test_f5_transform_routes_keep_fit_and_remove_editbone_fit_route():
     gizmo = _source("global_transform_gizmo.py")
     keymap = _source("viewport_keymap.py")
 
-    assert 'return "FIGURE", "MOVE"' in gizmo
-    assert 'return "FIGURE", "ROTATE"' in gizmo
-    assert 'return "FIGURE", "SCALE"' in gizmo
-    assert 'return "FIT",' not in gizmo
+    assert 'return "FIT", "MOVE"' in gizmo
+    assert 'return "FIT", "ROTATE"' in gizmo
+    assert 'return "FIT", "SCALE"' in gizmo
     assert '("FIT", BAW_OT_rigped_fit' not in gizmo
 
     assert "baw.rigped_fit_history_undo" not in keymap
     assert "baw.rigped_fit_history_redo" not in keymap
     assert "FIT_F5_NON_OBJECT_TRANSFORM_BLOCKED" in keymap
-    assert "class BAW_OT_guard_figure_native_edit" in keymap
+    assert "class BAW_OT_guard_fit_native_edit" in keymap
     assert 'if name in {"Object Mode", "Pose", "Armature"}:' in keymap
     assert 'for event_type in ("G", "S"):' in keymap
 
-    guard_start = keymap.index("class BAW_OT_guard_figure_native_edit")
+    guard_start = keymap.index("class BAW_OT_guard_fit_native_edit")
     guard_end = keymap.index("class BAW_OT_block_native_select_click", guard_start)
     guard_block = keymap[guard_start:guard_end]
     assert '"FIT_F5_OBJECT_HOST_RESTORE_FAILED"' in guard_block

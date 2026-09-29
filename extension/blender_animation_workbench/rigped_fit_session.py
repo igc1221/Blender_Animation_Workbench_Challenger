@@ -77,7 +77,7 @@ _SESSIONS: dict[int, FitSemanticSession] = {}
 
 
 def clear_fit_semantic_sessions() -> None:
-    """Discard only the non-serialized Figure semantic session map."""
+    """Discard only the non-serialized Fit semantic session map."""
 
     _SESSIONS.clear()
 
@@ -459,7 +459,7 @@ def validate_fit_semantic_snapshot_access(
     context,
     session: FitSemanticSession,
 ) -> tuple[str, ...]:
-    """Cheap per-frame/session-identity guard for immutable Figure snapshots."""
+    """Cheap per-frame/session-identity guard for immutable Fit snapshots."""
 
     issues: list[str] = []
     rig = session.rig_object
@@ -609,7 +609,7 @@ def _active_part_definition(session: FitSemanticSession):
     return next((part for part in session.document.parts if part.part_id == part_id), None)
 
 
-def fit_figure_move_available(context) -> bool:
+def fit_move_available(context) -> bool:
     session = fit_semantic_session(context)
     if session is None or validate_fit_semantic_snapshot_access(context, session):
         return False
@@ -626,7 +626,7 @@ def fit_figure_move_available(context) -> bool:
     )
 
 
-def fit_figure_rotate_available(context) -> bool:
+def fit_rotate_available(context) -> bool:
     session = fit_semantic_session(context)
     if session is None or validate_fit_semantic_snapshot_access(context, session):
         return False
@@ -643,7 +643,7 @@ def fit_figure_rotate_available(context) -> bool:
     )
 
 
-def fit_figure_scale_available(context) -> bool:
+def fit_scale_available(context) -> bool:
     session = fit_semantic_session(context)
     if session is None or validate_fit_semantic_snapshot_access(context, session):
         return False

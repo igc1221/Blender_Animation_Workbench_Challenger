@@ -282,7 +282,7 @@ def insert_free_key(context) -> RigpedFreeKeyResult:
     """Author the minimal clean Rigped Free key baseline.
 
     Free keys intentionally own the complete XYZ position and complete quaternion
-    rotation sample. Scale is Figure/Fit authority and is not authored here.
+    rotation sample. Scale is Fit authority and is not authored here.
     Contact/IK state is not consulted in this baseline implementation.
     """
 

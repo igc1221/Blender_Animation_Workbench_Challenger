@@ -46,9 +46,9 @@ from .rigped_fit_session import (
     commit_fit_rotate_gesture,
     commit_fit_scale_gesture,
     fit_active_part_world_pivot_axes,
-    fit_figure_move_available,
-    fit_figure_rotate_available,
-    fit_figure_scale_available,
+    fit_move_available,
+    fit_rotate_available,
+    fit_scale_available,
     fit_semantic_session,
 )
 from .rigped_transform import (
@@ -84,7 +84,7 @@ def _active_tool_id(context) -> str:
     return str(getattr(tool, "idname", "") or "")
 
 
-def _force_figure_safe_workspace_tool(context) -> None:
+def _force_fit_safe_workspace_tool(context) -> None:
     if not fit_ui_state_present(context) or getattr(context, "mode", "") != "OBJECT":
         return
     active_tool = _active_tool_id(context)
@@ -123,23 +123,23 @@ def _route_and_mode(context) -> tuple[str, str]:
 
     if fit_ui_state_present(context):
         if getattr(context, "mode", "") != "OBJECT":
-            # Figure is Object-hosted. If external UI or a stale Blender action
+            # Fit is Object-hosted. If external UI or a stale Blender action
             # forces another mode while the semantic session is alive, never
             # expose a native/EditBone transform route.
             return "", ""
-        # A raw Figure/Fit host suppresses native Object transforms even if the
-        # semantic session became stale/missing. Only a fully valid Figure
+        # A raw Fit host suppresses native Object transforms even if the
+        # semantic session became stale/missing. Only a fully valid Fit
         # state may expose the migrated semantic transform route.
         state = fit_ui_state(context)
         if state is None:
             return "", ""
         mode = str(fit_transform_mode(context) or "")
-        if mode == "MOVE" and fit_figure_move_available(context):
-            return "FIGURE", "MOVE"
-        if mode == "ROTATE" and fit_figure_rotate_available(context):
-            return "FIGURE", "ROTATE"
-        if mode == "SCALE" and fit_figure_scale_available(context):
-            return "FIGURE", "SCALE"
+        if mode == "MOVE" and fit_move_available(context):
+            return "FIT", "MOVE"
+        if mode == "ROTATE" and fit_rotate_available(context):
+            return "FIT", "ROTATE"
+        if mode == "SCALE" and fit_scale_available(context):
+            return "FIT", "SCALE"
         return "", ""
 
     active_tool = _active_tool_id(context)
@@ -341,7 +341,7 @@ def _pivot_axes(
     route: str,
     mode: str = "",
 ) -> tuple[Vector | None, dict[str, Vector] | None]:
-    if route == "FIGURE":
+    if route == "FIT":
         return fit_active_part_world_pivot_axes(
             context,
             orientation_mode=fit_orientation_mode(context),
@@ -787,11 +787,11 @@ class BAW_OT_global_native_transform_axis(bpy.types.Operator):
 
 
 
-class BAW_OT_figure_fit_move_axis(bpy.types.Operator):
-    """Object-hosted Figure Move preview that mutates FitDraft only."""
+class BAW_OT_fit_move_axis(bpy.types.Operator):
+    """Object-hosted Fit Move preview that mutates FitDraft only."""
 
-    bl_idname = "baw.figure_fit_move_axis"
-    bl_label = "Figure Move"
+    bl_idname = "baw.fit_move_axis"
+    bl_label = "Fit Move"
     bl_options: ClassVar[set[str]] = {"REGISTER"}
 
     axis: EnumProperty(
@@ -809,7 +809,7 @@ class BAW_OT_figure_fit_move_axis(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         route, mode = _route_and_mode(context)
-        return route == "FIGURE" and mode == "MOVE"
+        return route == "FIT" and mode == "MOVE"
 
     def _axis_world(self) -> Vector | None:
         axis = self._axes.get(self.axis)
@@ -819,7 +819,7 @@ class BAW_OT_figure_fit_move_axis(bpy.types.Operator):
         session = fit_semantic_session(context)
         if session is None or session.active_part_id is None:
             return {"CANCELLED"}
-        pivot, axes = _pivot_axes(context, "FIGURE")
+        pivot, axes = _pivot_axes(context, "FIT")
         if pivot is None or axes is None:
             return {"CANCELLED"}
 
@@ -1008,11 +1008,11 @@ class BAW_OT_figure_fit_move_axis(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
 
-class BAW_OT_figure_fit_rotate_axis(bpy.types.Operator):
-    """Object-hosted Figure Rotate preview that mutates FitDraft only."""
+class BAW_OT_fit_rotate_axis(bpy.types.Operator):
+    """Object-hosted Fit Rotate preview that mutates FitDraft only."""
 
-    bl_idname = "baw.figure_fit_rotate_axis"
-    bl_label = "Figure Rotate"
+    bl_idname = "baw.fit_rotate_axis"
+    bl_label = "Fit Rotate"
     bl_options: ClassVar[set[str]] = {"REGISTER"}
 
     axis: EnumProperty(
@@ -1036,7 +1036,7 @@ class BAW_OT_figure_fit_rotate_axis(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         route, mode = _route_and_mode(context)
-        return route == "FIGURE" and mode == "ROTATE"
+        return route == "FIT" and mode == "ROTATE"
 
     def _axis_world(self) -> Vector | None:
         axis = self._axes.get(self.axis)
@@ -1054,7 +1054,7 @@ class BAW_OT_figure_fit_rotate_axis(bpy.types.Operator):
         session = fit_semantic_session(context)
         if session is None or session.active_part_id is None:
             return {"CANCELLED"}
-        pivot, axes = _pivot_axes(context, "FIGURE")
+        pivot, axes = _pivot_axes(context, "FIT")
         if pivot is None or axes is None:
             return {"CANCELLED"}
 
@@ -1277,11 +1277,11 @@ class BAW_OT_figure_fit_rotate_axis(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
 
-class BAW_OT_figure_fit_scale_axis(bpy.types.Operator):
-    """Object-hosted Figure Scale preview that mutates FitDraft only."""
+class BAW_OT_fit_scale_axis(bpy.types.Operator):
+    """Object-hosted Fit Scale preview that mutates FitDraft only."""
 
-    bl_idname = "baw.figure_fit_scale_axis"
-    bl_label = "Figure Scale"
+    bl_idname = "baw.fit_scale_axis"
+    bl_label = "Fit Scale"
     bl_options: ClassVar[set[str]] = {"REGISTER"}
 
     axis: EnumProperty(
@@ -1297,7 +1297,7 @@ class BAW_OT_figure_fit_scale_axis(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         route, mode = _route_and_mode(context)
-        return route == "FIGURE" and mode == "SCALE"
+        return route == "FIT" and mode == "SCALE"
 
     def _axis_world(self) -> Vector | None:
         axis = self._axes.get(self.axis)
@@ -1307,7 +1307,7 @@ class BAW_OT_figure_fit_scale_axis(bpy.types.Operator):
         session = fit_semantic_session(context)
         if session is None or session.active_part_id is None:
             return {"CANCELLED"}
-        pivot, axes = _pivot_axes(context, "FIGURE", "SCALE")
+        pivot, axes = _pivot_axes(context, "FIT", "SCALE")
         if pivot is None or axes is None:
             return {"CANCELLED"}
 
@@ -1558,7 +1558,7 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
     @classmethod
     def poll(cls, context):
         if fit_ui_state_present(context) and getattr(context, "mode", "") == "OBJECT":
-            # Keep the persistent shell alive throughout the raw Figure/Fit host
+            # Keep the persistent shell alive throughout the raw Fit host
             # lifetime, including stale semantic-session states, so native Object
             # transform routes remain suppressed fail-closed.
             return True
@@ -1656,7 +1656,7 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
         handles = ("X", "Y", "Z", "XY", "XZ", "YZ")
         for route, operator in (
             ("NATIVE", BAW_OT_global_native_transform_axis.bl_idname),
-            ("FIGURE", BAW_OT_figure_fit_move_axis.bl_idname),
+            ("FIT", BAW_OT_fit_move_axis.bl_idname),
             ("DIRECT_MOVE", BAW_OT_rigped_direct_move_axis.bl_idname),
             ("FK_MOVE", BAW_OT_rigped_fk_joint_move_axis.bl_idname),
             ("SEMANTIC_MOVE", BAW_OT_rigped_semantic_move_axis.bl_idname),
@@ -1691,7 +1691,7 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
     def _setup_rotate_hits(self):
         for route, operator in (
             ("NATIVE", BAW_OT_global_native_transform_axis.bl_idname),
-            ("FIGURE", BAW_OT_figure_fit_rotate_axis.bl_idname),
+            ("FIT", BAW_OT_fit_rotate_axis.bl_idname),
             ("DIRECT_ROTATE", BAW_OT_rigped_direct_rotate_axis.bl_idname),
         ):
             route_hits = {}
@@ -1721,7 +1721,7 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
     def _setup_scale_hits(self):
         for route, operator in (
             ("NATIVE", BAW_OT_global_native_transform_axis.bl_idname),
-            ("FIGURE", BAW_OT_figure_fit_scale_axis.bl_idname),
+            ("FIT", BAW_OT_fit_scale_axis.bl_idname),
         ):
             route_hits = {}
             for handle in ("X", "Y", "Z", "XYZ"):
@@ -1758,7 +1758,7 @@ class BAW_GGT_global_transform(bpy.types.GizmoGroup):
 
     def draw_prepare(self, context):
         self._hide_all()
-        _force_figure_safe_workspace_tool(context)
+        _force_fit_safe_workspace_tool(context)
         if (
             fit_ui_state_present(context)
             and getattr(context, "mode", "") == "OBJECT"

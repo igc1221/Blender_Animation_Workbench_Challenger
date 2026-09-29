@@ -8148,6 +8148,8 @@ def _bounded_four_limb_local_y_roll_angle(
         if not isinstance(pose_bone, bpy.types.PoseBone) or hinge_state is None:
             continue
         lower_name = str(pose_bone.name)
+        if lower_name in {"Calf.L", "Calf.R"}:
+            continue
         limits = _RIGPED_HINGE_JOINT_LIMITS.get(lower_name)
         if limits is None:
             continue
@@ -8675,6 +8677,12 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         self._frozen_auto_limb_context = None
         self._frozen_auto_direct_context = None
         self._orientation = str(context.scene.transform_orientation_slots[0].type)
+        full_four_local_y_calf_lock = (
+            self.axis == "Y"
+            and self._orientation == "LOCAL"
+            and lower_link_names
+            == ("Calf.L", "Calf.R", "ForeArm.L", "ForeArm.R")
+        )
         forearm_post_solve_roll_auto = (
             self.axis == "Y"
             and self._orientation == "LOCAL"
@@ -8684,6 +8692,16 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
         self._forearm_post_solve_roll_overlay = forearm_post_solve_roll_auto
         if bool(getattr(context.scene, "baw_auto_key_enabled", False)):
             auto_context = control_context_for_context(context)
+            if full_four_local_y_calf_lock:
+                auto_context = _subset_control_context(
+                    auto_context,
+                    tuple(
+                        control
+                        for control in auto_context.controls
+                        if isinstance(control.target, bpy.types.PoseBone)
+                        and str(control.target.name) in {"ForeArm.L", "ForeArm.R"}
+                    ),
+                )
             auto_limb_context, auto_direct_context = _direct_rotate_auto_contexts(
                 context.scene,
                 auto_context,
@@ -9166,6 +9184,8 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                 if not isinstance(pose_bone, bpy.types.PoseBone) or state.hinge_state is None:
                     continue
                 lower_name = str(pose_bone.name)
+                if lower_name in {"Calf.L", "Calf.R"}:
+                    continue
                 anchor_name = _lower_link_local_pair_anchor_name(
                     active_name,
                     lower_name,
@@ -9235,6 +9255,11 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
                             lower_name = str(
                                 session.capability.fk_controls[1].target.name
                             )
+                            if (
+                                sliding_lower_full_four
+                                and lower_name in {"Calf.L", "Calf.R"}
+                            ):
+                                continue
                             if sliding_lower_full_four:
                                 anchor_name = _lower_link_local_pair_anchor_name(
                                     active_name,
@@ -9344,9 +9369,10 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             self._current_angle = 0.0
             return
 
-        # ForeArm/Calf keep their semantic hinge + axial-roll DOF in every
-        # gizmo orientation. Hand/Foot and broad ball joints likewise use the
-        # selected semantic-local X/Y/Z axis, independent of gizmo orientation.
+        # ForeArm keeps semantic hinge + axial-roll DOF. Calf LOCAL Y is
+        # intentionally locked by the frozen USER matrix; in a full four-limb
+        # selection only the ForeArm pair consumes semantic LOCAL Y. Hand/Foot
+        # and broad ball joints use the selected semantic-local X/Y/Z axis.
         if hinge_states:
             if full_four_local_x_axes:
                 bounded_angle = float(self._current_angle)
@@ -9421,7 +9447,13 @@ class BAW_OT_rigped_direct_rotate_axis(bpy.types.Operator):
             if state.hinge_state is not None:
                 semantic_bend_axis = full_four_local_x_axes.get(pointer)
                 semantic_roll_axis = full_four_local_y_axes.get(pointer)
-                if semantic_bend_axis is not None:
+                calf_local_y_locked = (
+                    full_four_local_y
+                    and str(pose_bone.name) in {"Calf.L", "Calf.R"}
+                )
+                if calf_local_y_locked:
+                    desired = state.start_matrix.copy()
+                elif semantic_bend_axis is not None:
                     desired = _hinge_direct_rotate_desired(
                         state.control,
                         state,

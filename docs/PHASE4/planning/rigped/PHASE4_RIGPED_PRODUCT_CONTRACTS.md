@@ -1,6 +1,6 @@
 # AWB Phase 4 — Product Contracts
 
-> Updated: **2026-09-23 12:46 KST**
+> Updated: **2026-09-29 KST**
 > Role: **authoritative Phase 4 product-behavior contract**. This file owns user-visible Rigped semantics. Historical reviews, milestone proofs, and implementation experiments must not override it.
 
 ## 1. Authority and layering
@@ -20,19 +20,19 @@ No parallel hidden Character database, Contact-session cache, or independent ani
 Primary flow:
 
 ```text
-New Rigped -> Figure/Fit -> Apply -> Animate
+New Rigped -> Fit -> Apply -> Animate
 ```
 
 Current practical baseline:
 
-- Figure/Fit F1-F6 is USER PASS / CLOSED and is the structural editing baseline.
-- live Figure interaction is Object-hosted and semantic; native EditBone/rest mutation is bounded to atomic Apply.
+- Fit F1-F6 is USER PASS / CLOSED and is the structural editing baseline.
+- live Fit interaction is Object-hosted and semantic; native EditBone/rest mutation is bounded to atomic Apply.
 - Animate A1-A6 is the accepted first animation-core baseline.
-- Figure and Animate use the same AWB Move/Rotate/Scale visual language where the corresponding operation is supported.
-- Figure edits rest/setup structure. Animate edits pose/animation only; Animate must not silently change rest structure.
+- Fit and Animate use the same AWB Move/Rotate/Scale visual language where the corresponding operation is supported.
+- Fit edits rest/setup structure. Animate edits pose/animation only; Animate must not silently change rest structure.
 - Root, COM, and Pelvis are distinct authored roles.
 - hidden mechanism, deform, IK target, and pole controls are never normal animator selection targets.
-- post-animation structural Figure/rebuild migration remains outside the current frozen core and must not be inferred from raw FCurve preservation alone.
+- post-animation structural Fit/rebuild migration remains outside the current frozen core and must not be inferred from raw FCurve preservation alone.
 
 ## 3. Selection grammar
 
@@ -64,19 +64,24 @@ Alt + Double Click     = semantic Chain/Group remove
 
 #### ForeArm / Calf lower-link Rotate
 
-ForeArm.L/R and Calf.L/R share one animator-facing lower-link Rotate contract:
+ForeArm.L/R and Calf.L/R share the lower-link X/Z semantics, but LOCAL Y is role-specific:
 
 ```text
-LOCAL X = hinge / bend
-LOCAL Y = axial roll around the lower-link length axis
-LOCAL Z = limb swivel around the shoulder-to-wrist / hip-to-foot axis
+ForeArm LOCAL X = hinge / bend
+ForeArm LOCAL Y = axial roll around the forearm length axis
+ForeArm LOCAL Z = arm swivel around the shoulder-to-wrist axis
+
+Calf LOCAL X = knee hinge / bend
+Calf LOCAL Y = LOCKED / intentional no-op
+Calf LOCAL Z = leg swivel around the hip-to-foot axis
 ```
 
 State-specific terminal behavior is explicit:
 
 - **Free LOCAL Z:** the limb swivels, terminal Hand/Foot position stays fixed, and terminal rotation follows the lower link.
 - **Sliding LOCAL Z:** the limb swivels while terminal Hand/Foot **world position and world rotation remain fixed**.
-- **Sliding LOCAL Y:** the lower link rolls while terminal Hand/Foot **world position and world rotation remain fixed**.
+- **ForeArm Sliding LOCAL Y:** the forearm rolls while terminal Hand **world position and world rotation remain fixed**.
+- **Calf LOCAL Y:** Free and Sliding are both intentional no-op; the Calf must not rotate or receive Rotate-driven authored mutation from this axis.
 - direct rotation of the terminal Hand/Foot itself remains the operation that may intentionally change terminal orientation.
 - these rules apply symmetrically to left/right arm and leg mappings; sign/mirror implementation details must not change the user-visible contract.
 
@@ -197,7 +202,7 @@ First-key baseline은 AUTO만의 보조 정책이다. 아직 animation이 없는
 
 일반 Object와 custom/external bone Auto는 기존 AWB 경로를 유지한다. generated Rigped + custom/external mixed gesture는 atomic ownership이 증명되기 전까지 fail-closed한다.
 
-AUTO의 상세 구현 이력은 `PHASE4_RIGPED_AUTO_KEY_IMPLEMENTATION_PLAN.md`에 보존한다. 현재 AUTO 제품 계약과 RC0 동결 의미는 이 문서와 통합 로드맵이 우선한다.
+AUTO의 과거 구현 이력은 Git history에 보존한다. 현재 AUTO 제품 계약은 이 문서와 통합 로드맵이 우선한다.
 
 ## 7. C state-time behavior
 
@@ -211,11 +216,11 @@ AUTO의 상세 구현 이력은 `PHASE4_RIGPED_AUTO_KEY_IMPLEMENTATION_PLAN.md`�
 - Contact state interpolation is discrete/constant.
 - incomplete Contact bundles fail closed; playback/scrubbing never repairs them through frame handlers.
 
-## 8. RC0 frozen practical core baseline
+## 8. RC3 frozen practical core baseline
 
 The first complete Rigped animator core is USER-accepted:
 
-- Figure/Fit F1-F6 is closed and provides the structural editing boundary.
+- Fit F1-F6 is closed and provides the structural editing boundary.
 - A1-A4 FK/keying foundation is USER PASS.
 - A5 Free/Sliding plus E1-E12 stabilization is USER PASS / CLOSED.
 - A6 Planted is USER PASS / CLOSED.
@@ -225,7 +230,7 @@ The first complete Rigped animator core is USER-accepted:
 - direct native IK constraints on visible ForeArm/Calf remain rejected/reverted.
 - Blender Action/FCurve remains authored replay authority.
 
-RC0 is CLOSED and this section is the frozen animator-facing baseline. There is no A7 feature currently defined. RC1 practical-use hardening is active, followed by RC2 -> RC3 before unrelated feature expansion. The evidence map is `docs/PHASE4/verification/PHASE4_RC0_CORE_FREEZE_EVIDENCE.md`.
+RC0-RC3 are CLOSED and this section is the frozen animator-facing baseline. There is no active A7 feature slice. The Rigped Core is now a stable dependency; reopen it only for a concrete regression or explicit contract change. Durable acceptance evidence lives under `debug/user_final_tests/`, including `debug/user_final_tests/RC3_CORE_FREEZE.md`.
 
 ## 9. Multi-selection and solver-domain boundary
 
@@ -245,7 +250,7 @@ Supported semantic target-space categories may include World, Character/Root, lo
 
 ## 11. Key references
 
-Detailed Rigped Animate implementation spec and USER PASS ledger: `docs/PHASE4/planning/rigped/PHASE4_RIGPED_ANIMATE_IMPLEMENTATION_SPEC.md`
+Historical Rigped implementation ledgers are recoverable from Git history. Current accepted behavior is owned by this contract, current code/tests, and frozen USER FINAL evidence.
 
 Execution/dependency status: `docs/PHASE4/PHASE4_INTEGRATED_IMPLEMENTATION_ROADMAP.md`
 
@@ -253,8 +258,8 @@ Current blocker/next action: `docs/PHASE4/PHASE4_CURRENT_SESSION.md`
 
 Manual acceptance: `docs/PHASE4/verification/PHASE4_USER_TEST_SCOPE.md`
 
-RC0 frozen evidence map: `docs/PHASE4/verification/PHASE4_RC0_CORE_FREEZE_EVIDENCE.md`
+Final RC3 USER receipt: `debug/user_final_tests/RC3_CORE_FREEZE.md`
 
 Verification rules: `docs/PHASE4/verification/PHASE4_VERIFICATION_STRATEGY.md`
 
-Deep behavior/reference evidence only: `docs/PHASE4/research/PHASE4_BIPED_KINEMATICS_RESEARCH.md`
+Deep behavior questions should be re-researched against the current Blender/runtime/code state when needed; do not treat old research notes as current authority.

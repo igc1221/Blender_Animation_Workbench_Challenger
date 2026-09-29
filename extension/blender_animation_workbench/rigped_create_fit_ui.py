@@ -134,7 +134,7 @@ def _live_window_generations() -> dict[int, tuple[int | None, int | None]] | Non
 
 
 def prune_dead_fit_window_state() -> int:
-    """Prune dead/file-reloaded Figure state using cheap window generations."""
+    """Prune dead/file-reloaded Fit state using cheap window generations."""
 
     live_windows = _live_window_generations()
     if live_windows is None:
@@ -144,7 +144,7 @@ def prune_dead_fit_window_state() -> int:
         generation = live_windows.get(key)
         # Scene/file generation loss is safe to discard automatically. A Screen
         # mismatch is intentionally different: semantic ownership is invalidated
-        # below, while the UI host remains stale-present so native Figure guards
+        # below, while the UI host remains stale-present so native Fit guards
         # stay fail-closed until the user explicitly chooses Reset Fit.
         if generation is None or (
             state.scene_pointer is not None
@@ -163,7 +163,7 @@ def _fit_ui_state_raw(context) -> _FitUiState | None:
 
 
 def fit_ui_state_present(context) -> bool:
-    """True while this window still owns a Figure/Fit UI host, even if stale."""
+    """True while this window still owns a Fit UI host, even if stale."""
 
     return _fit_ui_state_raw(context) is not None
 
@@ -512,7 +512,7 @@ def _hide_rigped_internal_helpers_after_load(*_args) -> None:
 
 @persistent
 def _clear_fit_transient_state_after_load(*_args) -> None:
-    """Clear non-serialized Figure maps without touching native file state."""
+    """Clear non-serialized Fit maps without touching native file state."""
 
     _FIT_STATES.clear()
     clear_fit_semantic_sessions()
@@ -1118,7 +1118,7 @@ class BAW_OT_rigped_fit_cancel(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        # A present-but-stale Figure host must still expose Reset Fit so the
+        # A present-but-stale Fit host must still expose Reset Fit so the
         # user can discard only transient state and recover the file.
         return fit_ui_state_present(context)
 
@@ -1131,7 +1131,7 @@ class BAW_OT_rigped_fit_cancel(bpy.types.Operator):
         def discard_stale_state() -> None:
             # Deliberately do not restore mode, selection, transforms, rest, or
             # descriptors here. A stale session has no trustworthy native
-            # before-image; only its transient Figure maps may be discarded.
+            # before-image; only its transient Fit maps may be discarded.
             end_fit_semantic_session(context)
             _FIT_STATES.pop(key, None)
 
@@ -1266,7 +1266,7 @@ def draw_rigped_workflow(layout, context) -> None:
     if fit_host_present and state is None:
         status = box.row(align=True)
         status.label(text="Fit recovery required", icon="ERROR")
-        status.label(text="The transient Figure session is stale")
+        status.label(text="The transient Fit session is stale")
         box.operator(
             "baw.rigped_fit_cancel",
             text=ui_text("rigped.reset_fit", context),

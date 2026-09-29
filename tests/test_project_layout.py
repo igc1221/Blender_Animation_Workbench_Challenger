@@ -35,7 +35,7 @@ def test_user_final_recovery_blender_code_is_attached_session_fail_closed():
         encoding="utf-8-sig"
     )
     e11_replay = (
-        root / "debug" / "user_final_tests" / "E11" / "user_final_replay.json"
+        root / "debug" / "user_final_tests" / "core" / "a5" / "E11" / "user_final_replay.json"
     ).read_text(encoding="utf-8-sig")
 
     assert '"schema": "awb-user-final-recovery/v1"' in e11_replay

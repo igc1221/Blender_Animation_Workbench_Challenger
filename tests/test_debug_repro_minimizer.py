@@ -470,7 +470,7 @@ def test_bb7_source_identity_ignores_runtime_artifacts_but_not_source_changes(
             "?? debug/awb_interaction_trace.jsonl\n"
             "?? debug/runtime_error_log/runtime.jsonl\n"
             "?? build/candidate.json\n"
-            "?? external_workers/request.md\n"
+            "?? web_bridge_workers/request.md\n"
         )
     }
 

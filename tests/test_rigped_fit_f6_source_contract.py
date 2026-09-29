@@ -57,11 +57,11 @@ def test_f6_reset_remains_available_for_present_but_stale_state():
     assert "_transition_to_rig_selection(context, state.rig_object)" in block
 
 
-def test_f6_native_guard_and_figure_ownership_remain_fail_closed():
+def test_f6_native_guard_and_fit_ownership_remain_fail_closed():
     keymap = _source("viewport_keymap.py")
     ui = _source("rigped_create_fit_ui.py")
 
-    guard = keymap[keymap.index("class BAW_OT_guard_figure_native_edit") :]
+    guard = keymap[keymap.index("class BAW_OT_guard_fit_native_edit") :]
     assert "return fit_ui_state_present(context)" in guard
     assert "if any(state.character_id == character_id for state in _FIT_STATES.values())" in ui
     assert "if fit_host_present:" in keymap

@@ -14,7 +14,7 @@ def _function_block(source: str, name: str, next_name: str) -> str:
     return source[start:end]
 
 
-def test_f2_figure_entry_is_object_hosted_and_never_enters_edit_mode():
+def test_f2_fit_entry_is_object_hosted_and_never_enters_edit_mode():
     source = _source("rigped_create_fit_ui.py")
     block = _function_block(source, "_begin_fit", "_restore_fit_transform_settings")
 
@@ -70,7 +70,7 @@ def test_f2_selection_tool_owns_press_to_release_modal_gesture():
     assert 'if event.type == "LEFTMOUSE" and event.value == "RELEASE":' in keymap
 
 
-def test_figure_object_route_never_falls_through_to_native_transform_tools():
+def test_fit_object_route_never_falls_through_to_native_transform_tools():
     keymap = _source("viewport_keymap.py")
     gizmo = _source("global_transform_gizmo.py")
 
@@ -80,6 +80,6 @@ def test_figure_object_route_never_falls_through_to_native_transform_tools():
     assert 'if fit_host_present and context.mode == "OBJECT"' in keymap
     assert 'fit_ui_state_present(context) and getattr(context, "mode", "") == "OBJECT"' in gizmo
     assert 'if state is None:\n            return "", ""' in gizmo
-    assert 'return "FIGURE", "MOVE"' in gizmo
-    assert "BAW_OT_figure_fit_move_axis" in gizmo
+    assert 'return "FIT", "MOVE"' in gizmo
+    assert "BAW_OT_fit_move_axis" in gizmo
     assert "apply_fit_move_preview" in gizmo

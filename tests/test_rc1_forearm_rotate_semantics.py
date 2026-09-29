@@ -225,6 +225,7 @@ def test_rc1_sliding_forearm_local_y_uses_post_solve_overlay_not_native_ik_roll(
     assert '_RIGPED_LOCAL_AXES["Y"]' in live
 
     four_roll_bound = _source(_function("_bounded_four_limb_local_y_roll_angle"))
+    assert 'if lower_name in {"Calf.L", "Calf.R"}:' in four_roll_bound
     assert "start_long = float(hinge_state[1])" in four_roll_bound
     assert "roll_limit = float(limits[3])" in four_roll_bound
     assert "pair_sign = 1.0 if anchor_name == lower_name else -1.0" in four_roll_bound
@@ -280,11 +281,12 @@ def test_rc1_forearm_post_solve_roll_auto_keeps_sliding_authority() -> None:
     assert "_direct_rotate_auto_contexts(" not in modal
 
 
-def test_rc1_free_full_four_local_y_uses_pair_semantic_roll_axes() -> None:
+def test_rc1_free_full_four_local_y_locks_calves_and_rolls_forearms() -> None:
     preview = _source(_method("BAW_OT_rigped_direct_rotate_axis", "_apply_preview"))
     assert "full_four_local_y = (" in preview
     assert 'self.axis == "Y"' in preview
     assert "full_four_local_y_axes: dict[int, Vector] = {}" in preview
+    assert 'if lower_name in {"Calf.L", "Calf.R"}:' in preview
     assert "anchor_name = _lower_link_local_pair_anchor_name(" in preview
     assert "pair_sign = 1.0 if anchor_name == lower_name else -1.0" in preview
     assert 'roll_axis = basis_world @ _RIGPED_LOCAL_AXES["Y"]' in preview
@@ -292,10 +294,16 @@ def test_rc1_free_full_four_local_y_uses_pair_semantic_roll_axes() -> None:
     assert "elif full_four_local_y_axes:" in preview
     assert "_bounded_four_limb_local_y_roll_angle(" in preview
     assert "semantic_roll_axis = full_four_local_y_axes.get(pointer)" in preview
+    assert "calf_local_y_locked = (" in preview
+    assert "desired = state.start_matrix.copy()" in preview
     assert "elif semantic_roll_axis is not None:" in preview
     assert 'axis_name="Y"' in preview
     assert "mirror_opposites=False" in preview
 
+    invoke = _source(_method("BAW_OT_rigped_direct_rotate_axis", "invoke"))
+    assert "full_four_local_y_calf_lock = (" in invoke
+    assert 'str(control.target.name) in {"ForeArm.L", "ForeArm.R"}' in invoke
+    assert "auto_context = _subset_control_context(" in invoke
 
 def test_rc1_sliding_rotate_terminal_policy_is_axis_specific() -> None:
     source = _source(_function("_apply_direct_rotate_sliding_syncs"))

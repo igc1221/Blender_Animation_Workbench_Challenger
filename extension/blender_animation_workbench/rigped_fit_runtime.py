@@ -362,7 +362,7 @@ def publish_fit_session_after_native_commit(
 ) -> FitCommitResult:
     """Publish the setup descriptor after one already-verified F4 native mutation.
 
-    The caller must validate the live Figure session immediately before entering
+    The caller must validate the live Fit session immediately before entering
     its bounded native mutation window. During this function the previous
     descriptor is expected to be structurally stale until the new signature is
     published, so read_setup_descriptor() must not be used as a precondition.

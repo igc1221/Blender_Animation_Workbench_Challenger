@@ -1763,7 +1763,7 @@ class BAW_OT_set_transform_tool(bpy.types.Operator):
             return _finish({"FINISHED"})
 
         if fit_host_present:
-            # Figure is Object-hosted. Any externally forced non-Object mode is
+            # Fit is Object-hosted. Any externally forced non-Object mode is
             # stale/unsupported while the semantic session is alive. Consume
             # W/E/R here so native EditBone/Pose/Object transforms cannot become
             # a fallback authoring path.
@@ -2170,17 +2170,17 @@ def _unregister_awb_selection_tools() -> None:
     _AWB_SELECTION_TOOLS_REGISTERED = False
 
 
-class BAW_OT_guard_figure_native_edit(bpy.types.Operator):
-    """Keep an active Figure session from falling through to native edit transforms."""
+class BAW_OT_guard_fit_native_edit(bpy.types.Operator):
+    """Keep an active Fit session from falling through to native edit transforms."""
 
-    bl_idname = "baw.guard_figure_native_edit"
-    bl_label = "Guard Figure Native Edit"
+    bl_idname = "baw.guard_fit_native_edit"
+    bl_label = "Guard Fit Native Edit"
     bl_options: ClassVar[set[str]] = {"INTERNAL"}
 
     action: EnumProperty(
         items=(
-            ("BLOCK", "Block", "Consume a native transform while Figure owns authoring"),
-            ("RESTORE_OBJECT", "Restore Object", "Return a forced non-Object Figure host to Object Mode"),
+            ("BLOCK", "Block", "Consume a native transform while Fit owns authoring"),
+            ("RESTORE_OBJECT", "Restore Object", "Return a forced non-Object Fit host to Object Mode"),
         ),
         default="BLOCK",
     )
@@ -2655,7 +2655,7 @@ def register_viewport_keymaps() -> None:
         _register_transform_hotkeys(mode_km)
         guard_tab = _add_keymap_item(
             mode_km,
-            BAW_OT_guard_figure_native_edit.bl_idname,
+            BAW_OT_guard_fit_native_edit.bl_idname,
             "TAB",
         )
         guard_tab.properties.action = "RESTORE_OBJECT"
@@ -2663,7 +2663,7 @@ def register_viewport_keymaps() -> None:
             for event_type in ("G", "S"):
                 guard_transform = _add_keymap_item(
                     mode_km,
-                    BAW_OT_guard_figure_native_edit.bl_idname,
+                    BAW_OT_guard_fit_native_edit.bl_idname,
                     event_type,
                 )
                 guard_transform.properties.action = "BLOCK"

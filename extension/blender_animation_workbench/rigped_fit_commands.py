@@ -34,7 +34,7 @@ def fit_operations_for_role(
     *,
     parent_semantic_key: str | None = None,
 ) -> tuple[FitOperation, ...]:
-    """Coarse Figure capabilities for the migrated F3 transform matrix."""
+    """Coarse Fit capabilities for the migrated F3 transform matrix."""
 
     key = str(semantic_key)
     if key in {

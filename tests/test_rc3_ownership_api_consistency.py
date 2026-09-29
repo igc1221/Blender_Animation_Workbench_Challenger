@@ -21,9 +21,9 @@ def _fixture(tmp_path: Path) -> Path:
         destination = tmp_path / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(verifier.ROOT / relative, destination)
-    directory = tmp_path / verifier.ORCHESTRATOR
+    directory = tmp_path / verifier.RIGPED_PLANS
     directory.mkdir(parents=True)
-    for name in ("README.md", "RC1_plan.md", "RC2_plan.md", "RC3_plan.md"):
+    for name in verifier.RIGPED_CORE_PLAN_NAMES:
         (directory / name).write_text("# Plan\n", encoding="utf-8")
     return tmp_path
 
@@ -32,7 +32,7 @@ def _statuses(root: Path) -> dict[str, str]:
     return {item["id"]: item["status"] for item in verifier.verify(root)["checks"]}
 
 
-def test_accepted_architecture_passes_with_present_orchestrator_plans(tmp_path: Path) -> None:
+def test_accepted_architecture_passes_with_rigped_core_plans(tmp_path: Path) -> None:
     root = _fixture(tmp_path)
     receipt = verifier.verify(root)
     assert receipt["schema"] == verifier.SCHEMA
@@ -42,10 +42,10 @@ def test_accepted_architecture_passes_with_present_orchestrator_plans(tmp_path: 
 
 def test_missing_plan_and_missing_source_fail_closed(tmp_path: Path) -> None:
     root = _fixture(tmp_path)
-    (root / verifier.ORCHESTRATOR / "RC3_plan.md").unlink()
+    (root / verifier.RIGPED_PLANS / verifier.RIGPED_CORE_PLAN_NAMES[-1]).unlink()
     (root / verifier.PACKAGE / "phase4_writer.py").unlink()
     statuses = _statuses(root)
-    assert statuses["orchestrator_plans"] == "FAIL"
+    assert statuses["rigped_core_plans"] == "FAIL"
     assert statuses["writer_boundary"] == "FAIL"
     assert verifier.verify(root)["status"] == "FAIL"
 
@@ -55,7 +55,15 @@ def test_legacy_operations_plan_directory_fails_closed(tmp_path: Path) -> None:
     legacy = root / verifier.LEGACY_OPERATIONS_PLANS
     legacy.mkdir(parents=True)
     (legacy / "README.md").write_text("# stale\n", encoding="utf-8")
-    assert _statuses(root)["orchestrator_plans"] == "FAIL"
+    assert _statuses(root)["rigped_core_plans"] == "FAIL"
+
+
+def test_legacy_orchestrator_directory_fails_closed(tmp_path: Path) -> None:
+    root = _fixture(tmp_path)
+    legacy = root / verifier.LEGACY_ORCHESTRATOR
+    legacy.mkdir(parents=True)
+    (legacy / "README.md").write_text("# stale\n", encoding="utf-8")
+    assert _statuses(root)["rigped_core_plans"] == "FAIL"
 
 
 def test_missing_canonical_domain_api_fails_closed(tmp_path: Path) -> None:

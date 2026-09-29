@@ -167,7 +167,7 @@ def test_e10_archived_semantic_replays_declare_mode_explicitly() -> None:
         "E9": "RECORDED_RESULT",
     }
     for test_id, replay_mode in expected.items():
-        manifest_path = ROOT / "debug" / "user_final_tests" / test_id / "manifest.json"
+        manifest_path = ROOT / "debug" / "user_final_tests" / "core" / "a5" / test_id / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         assert manifest["runner"] == "semantic_replay"
         assert manifest["replay_mode"] == replay_mode
