@@ -1,0 +1,77 @@
+{
+  "schema": "awb-debug-native-escalation/v1",
+  "escalation_id": "INC-20260926-120000-a1b2c3d4:native-escalation",
+  "incident_id": "INC-20260926-120000-a1b2c3d4",
+  "incident_id_status": "BOUND",
+  "created_utc": "2026-09-29T00:40:34.787+00:00",
+  "trigger": {
+    "kind": "UNAVAILABLE",
+    "detail": null,
+    "detected_utc": null,
+    "exit_code": null
+  },
+  "preconditions": {
+    "python_evidence_status": "UNAVAILABLE",
+    "semantic_evidence_status": "UNAVAILABLE",
+    "last_cause_event": {
+      "trace_id": null,
+      "span_id": null,
+      "parent_span_id": null,
+      "operation_id": null,
+      "checkpoint_id": null,
+      "checkpoint_seq": null,
+      "boundary": null
+    },
+    "preceding_causal_evidence_preserved": false,
+    "incident_manifest_path": "manifest.json",
+    "incident_manifest_sha256": "ff8a6531e5d352d12ecf21864e08e967c5f4d339b39dbb45cb31e07268b591c4",
+    "supervisor_result": null
+  },
+  "route": {
+    "attempted": false,
+    "route": "NONE",
+    "reason": "native tooling and dump analysis were not attempted by this writer",
+    "requires_reproduction": false,
+    "next_higher_layer": "NONE"
+  },
+  "tooling": {
+    "name": "NONE",
+    "version": null,
+    "path": null,
+    "status": "NOT_ATTEMPTED",
+    "error": null
+  },
+  "dump": {
+    "status": "NOT_CAPTURED",
+    "kind": "UNAVAILABLE",
+    "full_memory": false,
+    "path": null,
+    "size_bytes": null,
+    "sha256": null,
+    "hash_algorithm": null,
+    "reason": "dump capture was not attempted by this writer"
+  },
+  "analysis": {
+    "status": "NOT_ATTEMPTED",
+    "analyzed_utc": null,
+    "exception_code": null,
+    "faulting_module": null,
+    "faulting_symbol": null,
+    "root_cause_summary": null,
+    "notes": null
+  },
+  "verdict": {
+    "classification": "UNDETERMINED",
+    "responsibility": "UNDETERMINED",
+    "summary": "Native root cause has not been established."
+  },
+  "supervisor_initiated_termination": null,
+  "artifacts": [],
+  "evidence": {
+    "status": "PARTIAL",
+    "reason": "the incident manifest is hashed; native tooling and analysis were not attempted"
+  },
+  "recommended_next_actions": [
+    "Capture and analyze native evidence before making a native-root-cause claim."
+  ]
+}
