@@ -15,7 +15,7 @@
 AXIS 1  Rigped Foundation / Fit                      CLOSED
 AXIS 2  Rigped Animate Core                          CLOSED
 AXIS 3  Rigped Core Closure RC0-RC3                  CLOSED / CORE FREEZE PASS
-AXIS 4  Post-RC3 Character Production Expansion      NEXT
+AXIS 4  Post-RC3 Character Production Expansion      CURRENT
 AXIS 5  Phase 4 Integration / Release                LATER
 AXIS 6  Deferred / Optional Product Branches         OPTIONAL
 ```
@@ -165,12 +165,12 @@ Foundation / Fit
 -> RC0-RC3 Core Closure
 
 CURRENT
--> repository cleanup
--> bounded current-axis revalidation if still required
+-> AXIS 4 focused planning
+-> select one user-prioritized presentation / topology / production-pipeline slice
 
 NEXT
--> one focused AXIS 4 plan
--> explicitly prioritized presentation / topology / production-pipeline slice
+-> freeze that slice's focused contract/implementation plan
+-> begin implementation only after the plan is accepted
 
 THEN
 -> I24 Integrated Phase 4 acceptance
